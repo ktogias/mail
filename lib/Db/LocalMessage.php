@@ -141,8 +141,8 @@ class LocalMessage extends Entity implements JsonSerializable {
 	/** @var bool */
 	protected $requestMdn;
 
-	/** @var bool */
-	protected $aiGenerated = false;
+	/** @var bool Transient flag — not persisted to DB, used only within a single request. */
+	private bool $aiGeneratedFlag = false;
 
 	public function __construct() {
 		$this->addType('type', 'integer');
@@ -158,7 +158,6 @@ class LocalMessage extends Entity implements JsonSerializable {
 		$this->addType('smimeEncrypt', 'boolean');
 		$this->addType('status', 'integer');
 		$this->addType('requestMdn', 'boolean');
-		$this->addType('aiGenerated', 'boolean');
 	}
 
 	#[\Override]
@@ -218,11 +217,11 @@ class LocalMessage extends Entity implements JsonSerializable {
 	}
 
 	public function isAiGenerated(): bool {
-		return $this->aiGenerated === true;
+		return $this->aiGeneratedFlag;
 	}
 
 	public function setAiGenerated(bool $aiGenerated): void {
-		$this->setter('aiGenerated', [$aiGenerated]);
+		$this->aiGeneratedFlag = $aiGenerated;
 	}
 
 	/**

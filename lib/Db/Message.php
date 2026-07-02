@@ -73,8 +73,6 @@ use function json_encode;
  * @method void setEncrypted(bool|null $encrypted)
  * @method bool getMentionsMe()
  * @method void setMentionsMe(bool $isMentionned)
- * @method bool|null getFlagAiGenerated()
- * @method void setFlagAiGenerated(bool $aiGenerated)
  */
 class Message extends Entity implements JsonSerializable {
 	private const MUTABLE_FLAGS = [
@@ -119,7 +117,6 @@ class Message extends Entity implements JsonSerializable {
 	protected $imipProcessed = false;
 	protected $imipError = false;
 	protected $mentionsMe = false;
-	protected $flagAiGenerated = false;
 
 	/**
 	 * @var bool|null
@@ -175,7 +172,6 @@ class Message extends Entity implements JsonSerializable {
 		$this->addType('imipProcessed', 'boolean');
 		$this->addType('imipError', 'boolean');
 		$this->addType('encrypted', 'boolean');
-		$this->addType('flagAiGenerated', 'boolean');
 	}
 
 	/**
@@ -360,7 +356,6 @@ class Message extends Entity implements JsonSerializable {
 				'$junk' => ($this->getFlagJunk() === true),
 				'$notjunk' => ($this->getFlagNotjunk() === true),
 				'$mdnsent' => ($this->getFlagMdnsent() === true),
-				'aiGenerated' => ($this->getFlagAiGenerated() === true),
 			],
 			'tags' => $indexed,
 			'from' => $this->getFrom()->jsonSerialize(),
