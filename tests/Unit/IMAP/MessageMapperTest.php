@@ -930,4 +930,34 @@ class MessageMapperTest extends TestCase {
 		$this->assertEquals('image/png', $attachment->getType());
 		$this->assertEquals('inline', $attachment->disposition);
 	}
+
+	public function testMarkAllReadChunksLargeMailboxes(): void {
+		$imapClient = $this->createMock(Horde_Imap_Client_Socket::class);
+		$imapClient->method('status')
+			->with('INBOX', Horde_Imap_Client::STATUS_MESSAGES)
+			->willReturn(['messages' => 1200]);
+
+		$storedRanges = [];
+		$imapClient->expects($this->exactly(3))
+			->method('store')
+			->willReturnCallback(function ($mailbox, $options) use (&$storedRanges) {
+				$this->assertEquals('INBOX', $mailbox);
+				$this->assertEquals([[Horde_Imap_Client::FLAG_SEEN]], $options['add']);
+				$storedRanges[] = (string)$options['ids'];
+			});
+
+		$this->mapper->markAllRead($imapClient, 'INBOX');
+
+		$this->assertEquals(['1:500', '501:1000', '1001:1200'], $storedRanges);
+	}
+
+	public function testMarkAllReadSkipsEmptyMailbox(): void {
+		$imapClient = $this->createMock(Horde_Imap_Client_Socket::class);
+		$imapClient->method('status')
+			->willReturn(['messages' => 0]);
+		$imapClient->expects($this->never())
+			->method('store');
+
+		$this->mapper->markAllRead($imapClient, 'INBOX');
+	}
 }

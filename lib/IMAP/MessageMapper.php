@@ -362,11 +362,31 @@ class MessageMapper {
 
 	public function markAllRead(Horde_Imap_Client_Base $client,
 		string $mailbox): void {
-		$client->store($mailbox, [
-			'add' => [
-				[Horde_Imap_Client::FLAG_SEEN],
-			],
-		]);
+		// Chunked into batches instead of one unscoped STORE against the
+		// whole mailbox: a single command spanning tens of thousands of
+		// messages at once is exactly the shape of request that provider-side
+		// abuse/anomaly detection is built to catch, and can trip a lasting
+		// throttle on a large mailbox. 500 matches the batch size already
+		// used elsewhere in this file for message persistence.
+		$status = $client->status($mailbox, Horde_Imap_Client::STATUS_MESSAGES);
+		$total = $status['messages'] ?? 0;
+		if ($total === 0) {
+			return;
+		}
+
+		$chunkSize = 500;
+		for ($start = 1; $start <= $total; $start += $chunkSize) {
+			$end = min($start + $chunkSize - 1, $total);
+			$client->store($mailbox, [
+				'add' => [
+					[Horde_Imap_Client::FLAG_SEEN],
+				],
+				'ids' => new Horde_Imap_Client_Ids("$start:$end", true),
+			]);
+			if ($end < $total) {
+				usleep(300000);
+			}
+		}
 	}
 
 	/**
