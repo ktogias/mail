@@ -573,6 +573,51 @@ describe('Vuex store actions', () => {
 			// Here we expect notifications
 			expect(NotificationService.showNewMessagesNotification).toHaveBeenCalled()
 		})
+
+		it('syncs every already-loaded query bucket of a mailbox, not just the default', async () => {
+			// Reproduces a real bug: when "sort favorites separately" is on, the
+			// visible list reads from envelopeLists['not:starred'], but syncInboxes()
+			// used to only ever sync the unfiltered '' bucket -- new mail landed in
+			// the store under the wrong key and never appeared in the open view,
+			// even though the mailbox's unread counter updated correctly (a separate
+			// mechanism). This asserts every existing bucket gets its own sync call.
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+
+			const account13 = {
+				id: 13,
+			}
+
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: {
+					name: 'INBOX',
+					databaseId: 11,
+					specialRole: 'inbox',
+				},
+			})
+
+			// Simulate a mailbox that's been viewed both with the default query and
+			// with favorites split out -- both buckets already exist in the store.
+			store.mailboxes[11].envelopeLists[''] = []
+			store.mailboxes[11].envelopeLists['not:starred'] = []
+
+			store.fetchEnvelopes = vi.fn(async () => {})
+			store.syncEnvelopes = vi.fn(async () => [])
+
+			await store.syncInboxes()
+
+			expect(store.fetchEnvelopes).not.toHaveBeenCalled()
+			expect(store.syncEnvelopes).toHaveBeenCalledTimes(2)
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({
+				mailboxId: 11,
+				query: '',
+			})
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({
+				mailboxId: 11,
+				query: 'not:starred',
+			})
+		})
 	})
 
 	it('should move message to junk, no mailbox configured', async () => {

@@ -1015,16 +1015,31 @@ export default function mainStoreActions() {
 								return
 							}
 
-							const list = mailbox.envelopeLists[normalizedEnvelopeListId(undefined)]
-							if (list === undefined) {
-								await this.fetchEnvelopes({
-									mailboxId: mailbox.databaseId,
-								})
-							}
+							// Sync every query bucket already loaded for this mailbox
+							// (e.g. '' for the plain view, 'not:starred' when the user
+							// has "sort favorites separately" enabled), not just the
+							// unfiltered default -- new messages synced under a query
+							// nobody's envelopeLists key matches the currently
+							// displayed one are added to the store but never rendered.
+							// Falls back to the unfiltered default for a mailbox with
+							// no envelopeLists yet (never opened this session).
+							const queries = Object.keys(mailbox.envelopeLists)
+							const queriesToSync = queries.length > 0 ? queries : [undefined]
 
-							return await this.syncEnvelopes({
-								mailboxId: mailbox.databaseId,
-							})
+							return await Promise.all(queriesToSync.map(async (query) => {
+								const list = mailbox.envelopeLists[normalizedEnvelopeListId(query)]
+								if (list === undefined) {
+									await this.fetchEnvelopes({
+										mailboxId: mailbox.databaseId,
+										query,
+									})
+								}
+
+								return await this.syncEnvelopes({
+									mailboxId: mailbox.databaseId,
+									query,
+								})
+							}))
 						}))
 					}))
 				const newMessages = flatMapDeep(identity, results).filter((m) => m !== undefined)
