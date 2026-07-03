@@ -112,5 +112,33 @@ class PreviewEnhancerTest extends TestCase {
 		$this->assertSame($message2Avatar, $message2->getAvatar());
 	}
 
+	public function testLiveEnhanceFalseSkipsImapEntirely(): void {
+		$account = $this->createStub(\OCA\Mail\Account::class);
+		$mailbox = $this->createStub(\OCA\Mail\Db\Mailbox::class);
+		$message = new Message();
+		$message->setId(1);
+		// Not analyzed yet -- would normally trigger a live body-structure
+		// fetch, but liveEnhance=false must skip everything below before
+		// even connecting.
+		$message->setStructureAnalyzed(false);
+		$messages = [$message];
 
+		$this->imapClientFactory->expects($this->never())
+			->method('getClient');
+		$this->attachmentService->expects($this->never())
+			->method('getAttachmentNames');
+		$this->imapMapper->expects($this->never())
+			->method('getBodyStructureData');
+
+		$result = $this->previewEnhancer->process(
+			$account,
+			$mailbox,
+			$messages,
+			true,
+			'testuser',
+			false
+		);
+
+		$this->assertSame($messages, $result);
+	}
 }

@@ -100,6 +100,9 @@ class MailSearch implements IMailSearch {
 			$query->addFlag(Flag::not(Flag::DELETED));
 		}
 
+		// liveEnhance=false: a folder listing must not block on live IMAP
+		// work (structure analysis, attachment lookups) the way opening one
+		// specific message (findMessage(), above) reasonably still does.
 		return $this->previewEnhancer->process(
 			$account,
 			$mailbox,
@@ -108,7 +111,8 @@ class MailSearch implements IMailSearch {
 				$sortOrder,
 			),
 			true,
-			$userId
+			$userId,
+			false
 		);
 	}
 
