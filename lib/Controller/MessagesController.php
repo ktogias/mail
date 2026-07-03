@@ -57,6 +57,13 @@ use function array_map;
 
 #[OpenAPI(scope: OpenAPI::SCOPE_IGNORE)]
 class MessagesController extends Controller {
+	// A message's content is immutable once delivered (only flags like
+	// read/unread or labels change, tracked separately), so caching it for
+	// weeks instead of minutes carries no staleness risk, and makes
+	// reopening any previously-read message resilient to the account's
+	// provider being temporarily slow or unreachable later.
+	private const BODY_CACHE_TTL = 30 * 24 * 3600;
+
 	private IMimeTypeDetector $mimeTypeDetector;
 	private IL10N $l10n;
 	private IURLGenerator $urlGenerator;
@@ -212,22 +219,56 @@ class MessagesController extends Controller {
 		$cacheInstance = $this->getCacheForAccount($account->getId());
 		$imapMessageCacheKey = "message_$id";
 
-		$client = $this->clientFactory->getClient($account);
-		try {
-			$imapMessage = $this->mailManager->getImapMessage(
-				$client,
-				$account,
-				$mailbox,
-				$message->getUid(), true
-			);
+		// The full response is cached separately from $imapMessageCacheKey
+		// above (that key only ever stores the narrower HTML-body snippet
+		// read by getHtmlBody(), a different endpoint) so a previously-opened
+		// message can be served without a live IMAP fetch at all -- checked
+		// before touching the network, since content never changes once
+		// delivered.
+		$fullMessageCacheKey = "message_full_$id";
+		$json = $cacheInstance->get($fullMessageCacheKey);
+		if ($json === null) {
+			$client = $this->clientFactory->getClient($account);
+			try {
+				$imapMessage = $this->mailManager->getImapMessage(
+					$client,
+					$account,
+					$mailbox,
+					$message->getUid(), true
+				);
 
-			if ($imapMessage->hasHtmlMessage()) {
-				$cacheInstance->set($imapMessageCacheKey, $imapMessage->getHtmlBody($id), 600);
+				if ($imapMessage->hasHtmlMessage()) {
+					$cacheInstance->set($imapMessageCacheKey, $imapMessage->getHtmlBody($id), self::BODY_CACHE_TTL);
+				}
+
+				$json = $imapMessage->getFullMessage($id);
+
+				// $imapMessage only exists on a cache miss (it's the live
+				// IMAP fetch above), so the smime check has to happen here
+				// and get cached as part of $json -- a cache hit below has
+				// no live IMAP object left to ask.
+				$smimeData = new SmimeData();
+				$smimeData->setIsEncrypted($message->isEncrypted() || $imapMessage->isEncrypted());
+				if ($imapMessage->isSigned()) {
+					$smimeData->setIsSigned(true);
+					$smimeData->setSignatureIsValid($imapMessage->isSignatureValid());
+				}
+				$json['smime'] = $smimeData;
+
+				$cacheInstance->set($fullMessageCacheKey, $json, self::BODY_CACHE_TTL);
+			} finally {
+				$client->logout();
 			}
+		}
 
-			$json = $imapMessage->getFullMessage($id);
-		} finally {
-			$client->logout();
+		if (!isset($json['smime'])) {
+			// Cache entries written before smime was cached alongside the
+			// body (or otherwise missing it) have no 'smime' key at all.
+			// The frontend always expects one, so backfill a safe default
+			// instead of letting it read a property off undefined.
+			$smimeData = new SmimeData();
+			$smimeData->setIsEncrypted($message->isEncrypted());
+			$json['smime'] = $smimeData;
 		}
 
 		$itineraries = $this->itineraryService->getCached($account, $mailbox, $message->getUid());
@@ -240,14 +281,6 @@ class MessagesController extends Controller {
 		$json['mailboxId'] = $mailbox->getId();
 		$json['databaseId'] = $message->getId();
 		$json['isSenderTrusted'] = $this->isSenderTrusted($message);
-
-		$smimeData = new SmimeData();
-		$smimeData->setIsEncrypted($message->isEncrypted() || $imapMessage->isEncrypted());
-		if ($imapMessage->isSigned()) {
-			$smimeData->setIsSigned(true);
-			$smimeData->setSignatureIsValid($imapMessage->isSignatureValid());
-		}
-		$json['smime'] = $smimeData;
 
 		$dkimResult = $this->dkimService->getCached($account, $mailbox, $message->getUid());
 		if (is_bool($dkimResult)) {

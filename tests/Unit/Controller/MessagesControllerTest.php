@@ -50,6 +50,7 @@ use OCP\AppFramework\Http\ZipResponse;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\Files\Folder;
 use OCP\Files\IMimeTypeDetector;
+use OCP\ICache;
 use OCP\ICacheFactory;
 use OCP\IL10N;
 use OCP\IRequest;
@@ -288,6 +289,127 @@ class MessagesControllerTest extends TestCase {
 
 		$this->assertEquals($expectedPlainResponse, $actualPlainResponse);
 		$this->assertEquals($expectedRichResponse, $actualRichResponse);
+	}
+
+	/**
+	 * setUp() wires $this->cacheFactory to always return a NullCache, which
+	 * these two tests need to override -- re-stubbing the shared mock's
+	 * method after setUp() does not reliably replace that first stub, so
+	 * these build a dedicated controller instance with its own cache mock
+	 * instead.
+	 */
+	private function makeControllerWithCache(ICache $cache): MessagesController {
+		return new MessagesController(
+			$this->appName,
+			$this->request,
+			$this->accountService,
+			$this->mailManager,
+			$this->mailSearch,
+			$this->itineraryService,
+			$this->userId,
+			$this->userFolder,
+			$this->logger,
+			$this->l10n,
+			$this->mimeTypeDetector,
+			$this->urlGenerator,
+			$this->nonceManager,
+			$this->trustedSenderService,
+			$this->mailTransmission,
+			$this->smimeService,
+			$this->clientFactory,
+			$this->dkimService,
+			$this->userPreferences,
+			$this->snoozeService,
+			$this->aiIntegrationsService,
+			$this->createConfiguredMock(ICacheFactory::class, ['createDistributed' => $cache]),
+			$this->delegationService,
+		);
+	}
+
+	public function testGetBodyCacheMissFetchesAndCachesSmime(): void {
+		$accountId = 17;
+		$mailboxId = 13;
+		$messageId = 4321;
+		$this->account->method('getId')->willReturn($accountId);
+		$mailbox = new \OCA\Mail\Db\Mailbox();
+		$message = new \OCA\Mail\Db\Message();
+		$message->setMailboxId($mailboxId);
+		$message->setUid(123);
+		$mailbox->setAccountId($accountId);
+
+		$this->mailManager->method('getMessage')
+			->with($this->userId, $messageId)
+			->willReturn($message);
+		$this->mailManager->method('getMailbox')
+			->with($this->userId, $mailboxId)
+			->willReturn($mailbox);
+		$this->accountService->method('find')
+			->with($this->userId, $accountId)
+			->willReturn($this->account);
+
+		$client = $this->createMock(Horde_Imap_Client_Socket::class);
+		$imapMessage = $this->createMock(IMAPMessage::class);
+		$imapMessage->method('hasHtmlMessage')->willReturn(false);
+		$imapMessage->method('getFullMessage')->willReturn(['attachments' => [], 'inlineAttachments' => []]);
+		$imapMessage->method('isEncrypted')->willReturn(false);
+		$imapMessage->method('isSigned')->willReturn(false);
+		$this->mailManager->method('getImapMessage')
+			->with($client, $this->account, $mailbox, 123, true)
+			->willReturn($imapMessage);
+		$this->clientFactory->method('getClient')->willReturn($client);
+		$client->expects($this->once())->method('logout');
+
+		$cache = $this->createMock(ICache::class);
+		$cache->expects($this->once())
+			->method('get')
+			->with("message_full_$messageId")
+			->willReturn(null);
+		$cache->expects($this->once())
+			->method('set')
+			->with("message_full_$messageId", $this->callback(function ($json) {
+				return isset($json['smime']) && $json['smime']->isEncrypted() === false;
+			}), $this->anything());
+
+		$response = $this->makeControllerWithCache($cache)->getBody($messageId);
+
+		$this->assertEquals(false, $response->getData()['smime']->isEncrypted());
+	}
+
+	public function testGetBodyCacheHitSkipsImapAndBackfillsMissingSmime(): void {
+		$accountId = 17;
+		$mailboxId = 13;
+		$messageId = 4321;
+		$this->account->method('getId')->willReturn($accountId);
+		$mailbox = new \OCA\Mail\Db\Mailbox();
+		$message = new \OCA\Mail\Db\Message();
+		$message->setMailboxId($mailboxId);
+		$message->setUid(123);
+		$message->setEncrypted(false);
+		$mailbox->setAccountId($accountId);
+
+		$this->mailManager->method('getMessage')
+			->with($this->userId, $messageId)
+			->willReturn($message);
+		$this->mailManager->method('getMailbox')
+			->with($this->userId, $mailboxId)
+			->willReturn($mailbox);
+		$this->accountService->method('find')
+			->with($this->userId, $accountId)
+			->willReturn($this->account);
+
+		// Cached before this fix existed, so it has no 'smime' key at all --
+		// must not crash reading ->isSigned() etc off a missing property.
+		$cache = $this->createMock(ICache::class);
+		$cache->method('get')
+			->with("message_full_$messageId")
+			->willReturn(['attachments' => [], 'inlineAttachments' => []]);
+
+		$this->mailManager->expects($this->never())->method('getImapMessage');
+		$this->clientFactory->expects($this->never())->method('getClient');
+
+		$response = $this->makeControllerWithCache($cache)->getBody($messageId);
+
+		$this->assertEquals(false, $response->getData()['smime']->isEncrypted());
 	}
 
 	public function testDownloadAttachment() {
