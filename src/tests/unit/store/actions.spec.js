@@ -205,6 +205,55 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	it('fetchEnvelopes() drops entries that no longer match a filtered query', async () => {
+		// A real bug: opening a saved/quick filter (e.g. "unread") that was
+		// already cached from an earlier visit showed a message that had
+		// since been read elsewhere -- addEnvelopesMutation() only ever
+		// added-or-replaced entries present in the fresh response, it never
+		// pruned ones absent from it. fetchEnvelopes() fetches a full,
+		// authoritative snapshot of what currently matches a query (unlike
+		// an incremental sync's newMessages), so a message missing from
+		// that snapshot must be dropped from the cached list, not left
+		// lingering forever.
+		normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+
+		const account13 = {
+			id: 13,
+		}
+
+		store.addAccountMutation(account13)
+		store.addMailboxMutation({
+			account: account13,
+			mailbox: {
+				name: 'INBOX',
+				databaseId: 11,
+				specialRole: 'inbox',
+			},
+		})
+
+		const stillUnread = mockEnvelope(11, 1)
+		const nowRead = mockEnvelope(11, 2)
+
+		// Simulate an earlier visit to the "unread" filter that cached both.
+		store.addEnvelopesMutation({
+			query: 'is:unread',
+			envelopes: [stillUnread, nowRead],
+			addToUnifiedMailboxes: false,
+		})
+		expect(store.mailboxes[11].envelopeLists['is:unread']).toHaveLength(2)
+
+		// The message has since been read; a fresh fetch of the same
+		// filter now only returns the one still-unread message.
+		MessageService.fetchEnvelopes.mockResolvedValueOnce([stillUnread])
+
+		await store.fetchEnvelopes({
+			mailboxId: 11,
+			query: 'is:unread',
+		})
+
+		expect(store.mailboxes[11].envelopeLists['is:unread']).toEqual([stillUnread.databaseId])
+	})
+
 	it('fetches the next individual page', async () => {
 		const msgs1 = reverse(range(30, 40))
 		const page1 = reverse(range(10, 30))

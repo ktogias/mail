@@ -768,6 +768,8 @@ export default function mainStoreActions() {
 						query,
 						envelopes,
 						addToUnifiedMailboxes,
+						replace: true,
+						replaceMailboxId: mailboxId,
 					}))),
 				)(mailbox.accountId, mailboxId, query, undefined, PAGE_SIZE, this.getPreference('sort-order'), this.getPreference('layout-message-view'), includeCacheBuster ? mailbox.cacheBuster : undefined)
 			})
@@ -2145,15 +2147,55 @@ export default function mainStoreActions() {
 			query,
 			envelopes,
 			addToUnifiedMailboxes = true,
+			// fetchEnvelopes() fetches a fresh, authoritative "what
+			// currently matches this query" snapshot (at least the first
+			// page) -- unlike an incremental sync's newMessages, a message
+			// that no longer matches the query (e.g. a message that was
+			// unread in an 'is:unread' filter's list and has since been
+			// read) must not linger in the cached envelopeLists array just
+			// because this particular call didn't mention it. The default
+			// (merge-only) behaviour stays correct for incremental sync
+			// and pagination, which only ever report a subset of changes,
+			// not a full current-state snapshot. Only meaningful together
+			// with replaceMailboxId, since an empty envelopes array alone
+			// can't say which mailbox's list to clear.
+			replace = false,
+			replaceMailboxId,
 		}) {
-			if (envelopes.length === 0) {
-				return
-			}
-
 			const idToDateInt = (id) => this.envelopes[id].dateInt
 
 			const listId = normalizedEnvelopeListId(query)
 			const orderByDateInt = orderBy(idToDateInt, this.preferences['sort-order'] === 'newest' ? 'desc' : 'asc')
+
+			if (replace) {
+				const mailbox = this.mailboxes[replaceMailboxId]
+				envelopes.forEach((envelope) => {
+					this.normalizeTags(envelope)
+					Vue.set(this.envelopes, envelope.databaseId, { ...this.envelopes[envelope.databaseId] || {}, ...envelope })
+					Vue.set(envelope, 'accountId', mailbox.accountId)
+				})
+				Vue.set(mailbox.envelopeLists, listId, uniq(orderByDateInt(envelopes.map((e) => e.databaseId))))
+
+				if (addToUnifiedMailboxes) {
+					const unifiedAccount = this.accountsUnmapped[UNIFIED_ACCOUNT_ID]
+					unifiedAccount.mailboxes
+						.map((mbId) => this.mailboxes[mbId])
+						.filter((mb) => mb.specialRole && mb.specialRole === mailbox.specialRole)
+						.forEach((unifiedMailbox) => {
+							const existing = unifiedMailbox.envelopeLists[listId] || []
+							Vue.set(
+								unifiedMailbox.envelopeLists,
+								listId,
+								uniq(orderByDateInt(existing.concat(envelopes.map((e) => e.databaseId)))),
+							)
+						})
+				}
+				return
+			}
+
+			if (envelopes.length === 0) {
+				return
+			}
 
 			envelopes.forEach((envelope) => {
 				const mailbox = this.mailboxes[envelope.mailboxId]
