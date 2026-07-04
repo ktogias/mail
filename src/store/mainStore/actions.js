@@ -223,6 +223,35 @@ function transformMailboxName(account, mailbox) {
 // starting their own.
 const pendingLockWaits = new Map()
 
+const LOCK_RETRY_BASE_MS = 1500
+const LOCK_RETRY_MAX_MS = 30 * 1000
+
+/**
+ * How long to wait before the next lock-retry attempt.
+ *
+ * When the server tells us exactly how long its lock/rate-limit has left
+ * (retryAfterMs, from the Retry-After response header), that's authoritative
+ * -- use it, plus a little jitter so several clients that all got the same
+ * hint at the same moment don't then all retry in the same instant either.
+ *
+ * Otherwise, fall back to exponential backoff with full jitter (see the AWS
+ * Architecture Blog's "Exponential Backoff and Jitter"): the delay's upper
+ * bound grows with each attempt, and the actual wait is randomized across
+ * the full range up to that bound. This is what actually protects a
+ * contended mailbox lock from several independent, uncoordinated clients
+ * (different browser tabs, devices, or users) -- unlike a fixed retry
+ * interval, which just means every such client keeps hammering the lock at
+ * the same fixed cadence for as long as it stays held.
+ */
+export function computeLockRetryDelayMs(attempt, retryAfterMs) {
+	if (retryAfterMs !== undefined) {
+		return retryAfterMs + Math.random() * 1000
+	}
+
+	const upperBound = Math.min(LOCK_RETRY_MAX_MS, LOCK_RETRY_BASE_MS * (2 ** attempt))
+	return Math.random() * upperBound
+}
+
 export default function mainStoreActions() {
 	return {
 		updateSyncTimestamp() {
@@ -917,6 +946,10 @@ export default function mainStoreActions() {
 			// above). Lets that chain keep retrying via this same function
 			// without re-registering itself as a new, separate leader.
 			isLockRetryLeader = false,
+			// Internal only: how many times the leader chain has already
+			// retried, used to grow the backoff delay (see
+			// computeLockRetryDelayMs above).
+			lockRetryAttempt = 0,
 		}) {
 			return handleHttpAuthErrors(async () => {
 				logger.debug(`starting mailbox sync of ${mailboxId} (${query})`)
@@ -1010,12 +1043,14 @@ export default function mainStoreActions() {
 								}
 
 								if (isLockRetryLeader || !pendingLockWaits.has(mailboxId)) {
-									logger.info(`Sync failed because mailbox ${mailboxId} is locked, retrying`, { error })
-									const retry = wait(1500).then(() => this.syncEnvelopes({
+									const delay = computeLockRetryDelayMs(lockRetryAttempt, error.retryAfterMs)
+									logger.info(`Sync failed because mailbox ${mailboxId} is locked, retrying in ${Math.round(delay)}ms (attempt ${lockRetryAttempt + 1})`, { error })
+									const retry = wait(delay).then(() => this.syncEnvelopes({
 										mailboxId,
 										query,
 										init,
 										isLockRetryLeader: true,
+										lockRetryAttempt: lockRetryAttempt + 1,
 									}))
 									if (!isLockRetryLeader) {
 										const tracked = retry.finally(() => pendingLockWaits.delete(mailboxId))

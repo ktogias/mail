@@ -12,6 +12,7 @@ import * as MessageService from '../../../service/MessageService.js'
 import * as NotificationService from '../../../service/NotificationService.js'
 import { PAGE_SIZE, UNIFIED_INBOX_ID } from '../../../store/constants.js'
 import useMainStore from '../../../store/mainStore.js'
+import { computeLockRetryDelayMs } from '../../../store/mainStore/actions.js'
 import { normalizedEnvelopeListId } from '../../../util/normalization.js'
 import { wait } from '../../../util/wait.js'
 
@@ -794,6 +795,92 @@ describe('Vuex store actions', () => {
 			// coordination, the follower would run its own independent
 			// wait()-then-retry loop too, roughly doubling this count.
 			expect(wait).toHaveBeenCalledTimes(3)
+		})
+
+		it('honors the server-provided retryAfterMs instead of guessing a backoff', async () => {
+			// The server knows exactly how long its own lock/rate-limit has
+			// left (Retry-After) -- when present, that's authoritative and
+			// should be used more or less as-is (plus a little jitter),
+			// not overridden by our own guessed exponential backoff.
+			const account13 = {
+				id: 13,
+			}
+
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: {
+					name: 'INBOX',
+					databaseId: 11,
+					specialRole: 'inbox',
+				},
+			})
+
+			let callCount = 0
+			MessageService.syncEnvelopes.mockImplementation(async () => {
+				callCount++
+				if (callCount === 1) {
+					const error = new MailboxLockedError('locked')
+					error.retryAfterMs = 45_000
+					throw error
+				}
+				return {
+					newMessages: [],
+					changedMessages: [],
+					vanishedMessages: [],
+					stats: { unread: 0 },
+				}
+			})
+
+			await store.syncEnvelopes({ mailboxId: 11, query: 'A' })
+
+			expect(wait).toHaveBeenCalledTimes(1)
+			// 45s plus up to 1s of jitter (see computeLockRetryDelayMs) --
+			// never less than the server's own hint, and not the unrelated,
+			// much smaller exponential-backoff range.
+			const actualDelay = wait.mock.calls[0][0]
+			expect(actualDelay).toBeGreaterThanOrEqual(45_000)
+			expect(actualDelay).toBeLessThanOrEqual(46_000)
+		})
+	})
+
+	describe('computeLockRetryDelayMs', () => {
+		afterEach(() => {
+			vi.restoreAllMocks()
+		})
+
+		it('grows the delay upper bound exponentially across attempts', () => {
+			// Full jitter means the actual value is random within [0, bound]
+			// -- pin Math.random to 1 (its supremum) to read the bound itself
+			// back out for each attempt.
+			vi.spyOn(Math, 'random').mockReturnValue(1)
+
+			expect(computeLockRetryDelayMs(0)).toBeCloseTo(1500, 0)
+			expect(computeLockRetryDelayMs(1)).toBeCloseTo(3000, 0)
+			expect(computeLockRetryDelayMs(2)).toBeCloseTo(6000, 0)
+			expect(computeLockRetryDelayMs(3)).toBeCloseTo(12000, 0)
+		})
+
+		it('caps the delay upper bound so it never grows unbounded', () => {
+			vi.spyOn(Math, 'random').mockReturnValue(1)
+
+			// Attempt 10 would be 1500 * 2^10 = 1,536,000ms uncapped --
+			// must be clamped to the 30s ceiling instead.
+			expect(computeLockRetryDelayMs(10)).toBeCloseTo(30_000, 0)
+		})
+
+		it('never returns a negative or undefined delay at attempt 0', () => {
+			vi.spyOn(Math, 'random').mockReturnValue(0)
+
+			expect(computeLockRetryDelayMs(0)).toBe(0)
+		})
+
+		it('prefers retryAfterMs over the computed backoff when present', () => {
+			vi.spyOn(Math, 'random').mockReturnValue(0)
+
+			// Attempt number is irrelevant once the server has told us
+			// exactly how long to wait.
+			expect(computeLockRetryDelayMs(5, 10_000)).toBe(10_000)
 		})
 	})
 
