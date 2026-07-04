@@ -385,10 +385,12 @@ class MailboxesControllerTest extends TestCase {
 		$response = $this->controller->sync($mailboxId);
 
 		$this->assertEquals(429, $response->getStatus());
-		$this->assertEquals(
-			(string)Mailbox::LOCK_TIMEOUT,
-			$response->getHeaders()['Retry-After'],
-		);
+		// Deliberately much shorter than the rate limit's own period
+		// (Mailbox::LOCK_TIMEOUT) -- confirmed live that advising the full
+		// period here made a client that hit the limit once wait a felt
+		// ~5 minutes for new mail, even after the mailbox itself had long
+		// since freed up.
+		$this->assertEquals('30', $response->getHeaders()['Retry-After']);
 	}
 
 	public function testSyncReturnsRetryAfterBasedOnRemainingLockTime(): void {

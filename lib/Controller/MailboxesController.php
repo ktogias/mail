@@ -54,6 +54,20 @@ class MailboxesController extends Controller {
 	private const SYNC_RATE_LIMIT = 20;
 	private const SYNC_RATE_PERIOD = Mailbox::LOCK_TIMEOUT;
 
+	/**
+	 * The Retry-After sent to the client on 429 is deliberately much
+	 * shorter than SYNC_RATE_PERIOD itself. Confirmed live: a client
+	 * that hit the limit once (e.g. from a burst of several browser
+	 * windows/tabs all reacting to the same event) and then honoured
+	 * a Retry-After of the full period waited a genuinely felt ~5
+	 * minutes before new mail appeared, even though the mailbox
+	 * itself was free again almost immediately. A short retry hint
+	 * costs at most a few more cheap, fast-rejected requests if the
+	 * limit hasn't cleared yet -- far better than a single, long,
+	 * user-visible stall.
+	 */
+	private const SYNC_RATE_LIMIT_RETRY_AFTER = 30;
+
 	public function __construct(
 		string $appName,
 		IRequest $request,
@@ -206,7 +220,7 @@ class MailboxesController extends Controller {
 					],
 					Http::STATUS_TOO_MANY_REQUESTS,
 				);
-				$response->addHeader('Retry-After', (string)self::SYNC_RATE_PERIOD);
+				$response->addHeader('Retry-After', (string)self::SYNC_RATE_LIMIT_RETRY_AFTER);
 				return $response;
 			}
 		}
