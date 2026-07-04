@@ -208,6 +208,21 @@ function transformMailboxName(account, mailbox) {
 	}
 }
 
+// A mailbox sync lock is mailbox-wide, not per-query. Several independent
+// call sites can all be syncing the same mailbox concurrently (App.vue's
+// background loop across several query buckets -- now sequenced internally,
+// see syncInboxes() -- and Mailbox.vue's own per-instance timer, doubled up
+// when "sort favorites separately" renders two separate Mailbox components
+// for one mailbox). Without coordination, every one of them independently
+// re-triggers its own 1.5s retry-on-lock loop against the same lock,
+// multiplying request volume by however many call sites happen to be
+// syncing that mailbox at once -- confirmed live: a genuinely long-held
+// lock on a slow account produced a sustained ~1 request/second 409 storm.
+// This map lets only one such retry loop actually run per mailbox at a
+// time; anyone else who hits the same lock just awaits it instead of
+// starting their own.
+const pendingLockWaits = new Map()
+
 export default function mainStoreActions() {
 	return {
 		updateSyncTimestamp() {
@@ -753,6 +768,8 @@ export default function mainStoreActions() {
 						query,
 						envelopes,
 						addToUnifiedMailboxes,
+						replace: true,
+						replaceMailboxId: mailboxId,
 					}))),
 				)(mailbox.accountId, mailboxId, query, undefined, PAGE_SIZE, this.getPreference('sort-order'), this.getPreference('layout-message-view'), includeCacheBuster ? mailbox.cacheBuster : undefined)
 			})
@@ -894,6 +911,12 @@ export default function mainStoreActions() {
 			mailboxId,
 			query,
 			init = false,
+			// Internal only, never passed by external callers -- true only
+			// for the recursive retry chain that "won" the right to
+			// actually probe this mailbox's lock (see pendingLockWaits
+			// above). Lets that chain keep retrying via this same function
+			// without re-registering itself as a new, separate leader.
+			isLockRetryLeader = false,
 		}) {
 			return handleHttpAuthErrors(async () => {
 				logger.debug(`starting mailbox sync of ${mailboxId} (${query})`)
@@ -986,8 +1009,24 @@ export default function mainStoreActions() {
 									throw error
 								}
 
-								logger.info('Sync failed because the mailbox is locked, retriggering', { error })
-								return wait(1500).then(() => this.syncEnvelopes({
+								if (isLockRetryLeader || !pendingLockWaits.has(mailboxId)) {
+									logger.info(`Sync failed because mailbox ${mailboxId} is locked, retrying`, { error })
+									const retry = wait(1500).then(() => this.syncEnvelopes({
+										mailboxId,
+										query,
+										init,
+										isLockRetryLeader: true,
+									}))
+									if (!isLockRetryLeader) {
+										const tracked = retry.finally(() => pendingLockWaits.delete(mailboxId))
+										pendingLockWaits.set(mailboxId, tracked)
+										return tracked
+									}
+									return retry
+								}
+
+								logger.info(`Sync failed because mailbox ${mailboxId} is locked; another caller is already retrying it -- awaiting that instead of starting an independent retry loop`, { error })
+								return pendingLockWaits.get(mailboxId).catch(() => {}).then(() => this.syncEnvelopes({
 									mailboxId,
 									query,
 									init,
@@ -1015,16 +1054,49 @@ export default function mainStoreActions() {
 								return
 							}
 
-							const list = mailbox.envelopeLists[normalizedEnvelopeListId(undefined)]
-							if (list === undefined) {
-								await this.fetchEnvelopes({
-									mailboxId: mailbox.databaseId,
-								})
-							}
+							// Sync every query bucket already loaded for this mailbox
+							// (e.g. '' for the plain view, 'not:starred' when the user
+							// has "sort favorites separately" enabled), not just the
+							// unfiltered default -- new messages synced under a query
+							// nobody's envelopeLists key matches the currently
+							// displayed one are added to the store but never rendered.
+							// Falls back to the unfiltered default for a mailbox with
+							// no envelopeLists yet (never opened this session).
+							//
+							// Sequential, not Promise.all: syncEnvelopes() has its own
+							// internal retry-on-lock loop (every 1.5s) that keeps
+							// awaiting until the mailbox unlocks. A sync lock is
+							// mailbox-wide, not per-query -- firing every bucket's
+							// sync concurrently means every bucket independently
+							// re-triggers its own 1.5s retry chain against the same
+							// lock, multiplying request volume by the bucket count
+							// for as long as the mailbox stays locked (confirmed
+							// live: a genuinely long lock on the slow Gmail account
+							// produced a sustained ~1 request/second storm with two
+							// buckets loaded). Going sequential means only one
+							// bucket's sync (and its retry chain, if any) is ever
+							// in flight for a given mailbox at a time; the rest
+							// simply wait their turn, and once the lock clears they
+							// resolve immediately since nothing else needed re-sent.
+							const queries = Object.keys(mailbox.envelopeLists)
+							const queriesToSync = queries.length > 0 ? queries : [undefined]
 
-							return await this.syncEnvelopes({
-								mailboxId: mailbox.databaseId,
-							})
+							const newMessagesPerQuery = []
+							for (const query of queriesToSync) {
+								const list = mailbox.envelopeLists[normalizedEnvelopeListId(query)]
+								if (list === undefined) {
+									await this.fetchEnvelopes({
+										mailboxId: mailbox.databaseId,
+										query,
+									})
+								}
+
+								newMessagesPerQuery.push(await this.syncEnvelopes({
+									mailboxId: mailbox.databaseId,
+									query,
+								}))
+							}
+							return newMessagesPerQuery
 						}))
 					}))
 				const newMessages = flatMapDeep(identity, results).filter((m) => m !== undefined)
@@ -2075,15 +2147,55 @@ export default function mainStoreActions() {
 			query,
 			envelopes,
 			addToUnifiedMailboxes = true,
+			// fetchEnvelopes() fetches a fresh, authoritative "what
+			// currently matches this query" snapshot (at least the first
+			// page) -- unlike an incremental sync's newMessages, a message
+			// that no longer matches the query (e.g. a message that was
+			// unread in an 'is:unread' filter's list and has since been
+			// read) must not linger in the cached envelopeLists array just
+			// because this particular call didn't mention it. The default
+			// (merge-only) behaviour stays correct for incremental sync
+			// and pagination, which only ever report a subset of changes,
+			// not a full current-state snapshot. Only meaningful together
+			// with replaceMailboxId, since an empty envelopes array alone
+			// can't say which mailbox's list to clear.
+			replace = false,
+			replaceMailboxId,
 		}) {
-			if (envelopes.length === 0) {
-				return
-			}
-
 			const idToDateInt = (id) => this.envelopes[id].dateInt
 
 			const listId = normalizedEnvelopeListId(query)
 			const orderByDateInt = orderBy(idToDateInt, this.preferences['sort-order'] === 'newest' ? 'desc' : 'asc')
+
+			if (replace) {
+				const mailbox = this.mailboxes[replaceMailboxId]
+				envelopes.forEach((envelope) => {
+					this.normalizeTags(envelope)
+					Vue.set(this.envelopes, envelope.databaseId, { ...this.envelopes[envelope.databaseId] || {}, ...envelope })
+					Vue.set(envelope, 'accountId', mailbox.accountId)
+				})
+				Vue.set(mailbox.envelopeLists, listId, uniq(orderByDateInt(envelopes.map((e) => e.databaseId))))
+
+				if (addToUnifiedMailboxes) {
+					const unifiedAccount = this.accountsUnmapped[UNIFIED_ACCOUNT_ID]
+					unifiedAccount.mailboxes
+						.map((mbId) => this.mailboxes[mbId])
+						.filter((mb) => mb.specialRole && mb.specialRole === mailbox.specialRole)
+						.forEach((unifiedMailbox) => {
+							const existing = unifiedMailbox.envelopeLists[listId] || []
+							Vue.set(
+								unifiedMailbox.envelopeLists,
+								listId,
+								uniq(orderByDateInt(existing.concat(envelopes.map((e) => e.databaseId)))),
+							)
+						})
+				}
+				return
+			}
+
+			if (envelopes.length === 0) {
+				return
+			}
 
 			envelopes.forEach((envelope) => {
 				const mailbox = this.mailboxes[envelope.mailboxId]
