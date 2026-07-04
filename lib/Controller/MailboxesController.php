@@ -14,8 +14,10 @@ use Horde_Imap_Client;
 use OCA\Mail\AppInfo\Application;
 use OCA\Mail\Contracts\IMailManager;
 use OCA\Mail\Contracts\IMailSearch;
+use OCA\Mail\Db\Mailbox;
 use OCA\Mail\Exception\ClientException;
 use OCA\Mail\Exception\IncompleteSyncException;
+use OCA\Mail\Exception\MailboxLockedException;
 use OCA\Mail\Exception\MailboxNotCachedException;
 use OCA\Mail\Exception\NotImplemented;
 use OCA\Mail\Exception\ServiceException;
@@ -33,9 +35,25 @@ use OCP\AppFramework\Http\JSONResponse;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\IConfig;
 use OCP\IRequest;
+use OCP\IUserManager;
+use OCP\Security\RateLimiting\ILimiter;
+use OCP\Security\RateLimiting\IRateLimitExceededException;
 
 #[OpenAPI(scope: OpenAPI::SCOPE_IGNORE)]
 class MailboxesController extends Controller {
+	/**
+	 * Per-mailbox cap on sync attempts, independent of how many browser
+	 * tabs/devices/users are hitting it -- a mailbox sync lock is shared
+	 * infrastructure, not a per-session resource, and several independent
+	 * clients (a forgotten tab at the office, one at home, a phone) can
+	 * otherwise hammer the very same lock without any of them being aware
+	 * of the others. Sized generously enough for one well-behaved client's
+	 * own exponential-backoff retries across a full lock lifetime, while
+	 * still meaningfully capping many uncoordinated ones.
+	 */
+	private const SYNC_RATE_LIMIT = 20;
+	private const SYNC_RATE_PERIOD = Mailbox::LOCK_TIMEOUT;
+
 	public function __construct(
 		string $appName,
 		IRequest $request,
@@ -46,6 +64,8 @@ class MailboxesController extends Controller {
 		private readonly IConfig $config,
 		private readonly ITimeFactory $timeFactory,
 		private DelegationService $delegationService,
+		private readonly ILimiter $limiter,
+		private readonly IUserManager $userManager,
 	) {
 		parent::__construct($appName, $request);
 	}
@@ -165,6 +185,32 @@ class MailboxesController extends Controller {
 		$account = $this->accountService->find($effectiveUserId, $mailbox->getAccountId());
 		$order = $sortOrder === 'newest' ? IMailSearch::ORDER_NEWEST_FIRST: IMailSearch::ORDER_OLDEST_FIRST;
 
+		$user = $this->userManager->get($effectiveUserId);
+		if ($user !== null) {
+			try {
+				$this->limiter->registerUserRequest(
+					'mail-sync-mailbox-' . $id,
+					self::SYNC_RATE_LIMIT,
+					self::SYNC_RATE_PERIOD,
+					$user,
+				);
+			} catch (IRateLimitExceededException $e) {
+				// Same "type" as MailboxLockedException so the frontend's
+				// existing wait-and-retry handling applies unchanged; 429
+				// (not 409) because this is "you're asking too often", not
+				// "the mailbox happens to be locked right now".
+				$response = \OCA\Mail\Http\JsonResponse::fail(
+					[
+						'message' => "Too many sync attempts for mailbox $id, please slow down",
+						'type' => MailboxLockedException::class,
+					],
+					Http::STATUS_TOO_MANY_REQUESTS,
+				);
+				$response->addHeader('Retry-After', (string)self::SYNC_RATE_PERIOD);
+				return $response;
+			}
+		}
+
 		$this->config->setUserValue(
 			$this->userId,
 			Application::APP_ID,
@@ -187,9 +233,36 @@ class MailboxesController extends Controller {
 			return new JSONResponse([], Http::STATUS_PRECONDITION_REQUIRED);
 		} catch (IncompleteSyncException $e) {
 			return \OCA\Mail\Http\JsonResponse::fail([], Http::STATUS_ACCEPTED);
+		} catch (MailboxLockedException $e) {
+			// Re-fetch: the lock that caused this was acquired by someone
+			// else after $mailbox was loaded above, so its in-memory lock
+			// fields are stale.
+			$freshMailbox = $this->mailManager->getMailbox($effectiveUserId, $id);
+			$response = \OCA\Mail\Http\JsonResponse::failWith($e);
+			$response->addHeader('Retry-After', (string)$this->computeRetryAfterSeconds($freshMailbox));
+			return $response;
 		}
 
 		return new JSONResponse($syncResponse);
+	}
+
+	/**
+	 * How long a client should wait before trying this mailbox's sync
+	 * again, based on when its active lock(s) will actually expire --
+	 * rather than a guessed, fixed delay.
+	 */
+	private function computeRetryAfterSeconds(Mailbox $mailbox): int {
+		$now = $this->timeFactory->getTime();
+		$locks = [
+			$mailbox->getSyncNewLock(),
+			$mailbox->getSyncChangedLock(),
+			$mailbox->getSyncVanishedLock(),
+		];
+		$remaining = array_map(
+			static fn (?int $lock): int => $lock === null ? 0 : $lock + Mailbox::LOCK_TIMEOUT - $now,
+			$locks,
+		);
+		return min(Mailbox::LOCK_TIMEOUT, max(5, ...$remaining));
 	}
 
 	/**
