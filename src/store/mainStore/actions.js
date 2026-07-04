@@ -229,10 +229,19 @@ const LOCK_RETRY_MAX_MS = 30 * 1000
 /**
  * How long to wait before the next lock-retry attempt.
  *
- * When the server tells us exactly how long its lock/rate-limit has left
- * (retryAfterMs, from the Retry-After response header), that's authoritative
- * -- use it, plus a little jitter so several clients that all got the same
- * hint at the same moment don't then all retry in the same instant either.
+ * When the server tells us how long its lock has left (retryAfterMs, from
+ * the Retry-After response header), that's a worst-case estimate -- it
+ * assumes the current holder uses its full lock window, which real syncs
+ * rarely do. Treat it as a floor and jitter proportionally above it, not
+ * just by a flat ~1s: a flat jitter leaves every caller that lost the same
+ * race retrying at (near enough) the same fixed cadence, which can resonate
+ * with any other fixed-interval poller and starve one caller indefinitely.
+ * Confirmed live: a Priority Inbox query bucket kept losing its mailbox lock
+ * race to its own sibling buckets for over two hours, because the ~300s
+ * Retry-After it kept receiving is an exact multiple of the 60s background
+ * poll interval those siblings run on, so every retry landed on a fresh
+ * collision. Proportional jitter spreads retries across a wide enough
+ * window to break that phase-lock within a couple of attempts.
  *
  * Otherwise, fall back to exponential backoff with full jitter (see the AWS
  * Architecture Blog's "Exponential Backoff and Jitter"): the delay's upper
@@ -245,7 +254,7 @@ const LOCK_RETRY_MAX_MS = 30 * 1000
  */
 export function computeLockRetryDelayMs(attempt, retryAfterMs) {
 	if (retryAfterMs !== undefined) {
-		return retryAfterMs + Math.random() * 1000
+		return retryAfterMs * (1 + Math.random() * 0.5)
 	}
 
 	const upperBound = Math.min(LOCK_RETRY_MAX_MS, LOCK_RETRY_BASE_MS * (2 ** attempt))
