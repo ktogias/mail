@@ -208,6 +208,21 @@ function transformMailboxName(account, mailbox) {
 	}
 }
 
+// A mailbox sync lock is mailbox-wide, not per-query. Several independent
+// call sites can all be syncing the same mailbox concurrently (App.vue's
+// background loop across several query buckets -- now sequenced internally,
+// see syncInboxes() -- and Mailbox.vue's own per-instance timer, doubled up
+// when "sort favorites separately" renders two separate Mailbox components
+// for one mailbox). Without coordination, every one of them independently
+// re-triggers its own 1.5s retry-on-lock loop against the same lock,
+// multiplying request volume by however many call sites happen to be
+// syncing that mailbox at once -- confirmed live: a genuinely long-held
+// lock on a slow account produced a sustained ~1 request/second 409 storm.
+// This map lets only one such retry loop actually run per mailbox at a
+// time; anyone else who hits the same lock just awaits it instead of
+// starting their own.
+const pendingLockWaits = new Map()
+
 export default function mainStoreActions() {
 	return {
 		updateSyncTimestamp() {
@@ -894,6 +909,12 @@ export default function mainStoreActions() {
 			mailboxId,
 			query,
 			init = false,
+			// Internal only, never passed by external callers -- true only
+			// for the recursive retry chain that "won" the right to
+			// actually probe this mailbox's lock (see pendingLockWaits
+			// above). Lets that chain keep retrying via this same function
+			// without re-registering itself as a new, separate leader.
+			isLockRetryLeader = false,
 		}) {
 			return handleHttpAuthErrors(async () => {
 				logger.debug(`starting mailbox sync of ${mailboxId} (${query})`)
@@ -986,8 +1007,24 @@ export default function mainStoreActions() {
 									throw error
 								}
 
-								logger.info('Sync failed because the mailbox is locked, retriggering', { error })
-								return wait(1500).then(() => this.syncEnvelopes({
+								if (isLockRetryLeader || !pendingLockWaits.has(mailboxId)) {
+									logger.info(`Sync failed because mailbox ${mailboxId} is locked, retrying`, { error })
+									const retry = wait(1500).then(() => this.syncEnvelopes({
+										mailboxId,
+										query,
+										init,
+										isLockRetryLeader: true,
+									}))
+									if (!isLockRetryLeader) {
+										const tracked = retry.finally(() => pendingLockWaits.delete(mailboxId))
+										pendingLockWaits.set(mailboxId, tracked)
+										return tracked
+									}
+									return retry
+								}
+
+								logger.info(`Sync failed because mailbox ${mailboxId} is locked; another caller is already retrying it -- awaiting that instead of starting an independent retry loop`, { error })
+								return pendingLockWaits.get(mailboxId).catch(() => {}).then(() => this.syncEnvelopes({
 									mailboxId,
 									query,
 									init,

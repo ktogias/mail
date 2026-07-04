@@ -5,6 +5,7 @@
 
 import { createPinia, setActivePinia } from 'pinia'
 import { curry, range, reverse } from 'ramda'
+import MailboxLockedError from '../../../errors/MailboxLockedError.js'
 import * as AccountService from '../../../service/AccountService.js'
 import * as MailboxService from '../../../service/MailboxService.js'
 import * as MessageService from '../../../service/MessageService.js'
@@ -12,6 +13,7 @@ import * as NotificationService from '../../../service/NotificationService.js'
 import { PAGE_SIZE, UNIFIED_INBOX_ID } from '../../../store/constants.js'
 import useMainStore from '../../../store/mainStore.js'
 import { normalizedEnvelopeListId } from '../../../util/normalization.js'
+import { wait } from '../../../util/wait.js'
 
 vi.mock('../../../service/AccountService.js')
 vi.mock('../../../service/MailboxService.js')
@@ -21,6 +23,12 @@ vi.mock('../../../util/normalization.js', () => ({
 	__esModule: true,
 	// Supply a default list id ('') to prevent annoying errors
 	normalizedEnvelopeListId: vi.fn(() => ''),
+}))
+// The lock-retry loop's 1.5s backoff would make its tests slow for no
+// reason -- resolve immediately instead.
+vi.mock('../../../util/wait.js', () => ({
+	__esModule: true,
+	wait: vi.fn(() => Promise.resolve()),
 }))
 
 const mockEnvelope = curry((mailboxId, uid) => ({
@@ -678,6 +686,65 @@ describe('Vuex store actions', () => {
 			// The second bucket's sync only fires once the first one resolves --
 			// by this point that's expected and correct, unlike above.
 			expect(store.syncEnvelopes).toHaveBeenCalledTimes(2)
+		})
+	})
+
+	describe('sync lock coordination', () => {
+		it('only retries once for a locked mailbox even when multiple queries are syncing it concurrently', async () => {
+			// A sync lock is mailbox-wide, not per-query. Two different
+			// callers syncing the same mailbox with different queries (e.g.
+			// the plain view and the favorites-split view, each backed by
+			// their own Mailbox.vue instance) would, without coordination,
+			// each independently retry every 1.5s against the very same
+			// lock -- multiplying request volume by the number of
+			// concurrent callers for as long as the mailbox stays locked.
+			// This asserts only one retry-wait actually happens: the first
+			// caller becomes the "leader" and probes the lock, the second
+			// just awaits that outcome instead of starting its own loop.
+			const account13 = {
+				id: 13,
+			}
+
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: {
+					name: 'INBOX',
+					databaseId: 11,
+					specialRole: 'inbox',
+				},
+			})
+
+			// Locked for long enough that a leader needs several retry
+			// rounds to get through -- long enough to clearly tell "one
+			// coordinated retry chain" apart from "two independent ones"
+			// by the resulting wait() call count.
+			let callCount = 0
+			MessageService.syncEnvelopes.mockImplementation(async () => {
+				callCount++
+				if (callCount <= 4) {
+					throw new MailboxLockedError('locked')
+				}
+				return {
+					newMessages: [],
+					changedMessages: [],
+					vanishedMessages: [],
+					stats: { unread: 0 },
+				}
+			})
+
+			const [resultA, resultB] = await Promise.all([
+				store.syncEnvelopes({ mailboxId: 11, query: 'A' }),
+				store.syncEnvelopes({ mailboxId: 11, query: 'B' }),
+			])
+
+			expect(resultA).toEqual([])
+			expect(resultB).toEqual([])
+			// Only the leader's retry chain ever calls wait() -- the
+			// follower just awaits the leader's outcome. Without
+			// coordination, the follower would run its own independent
+			// wait()-then-retry loop too, roughly doubling this count.
+			expect(wait).toHaveBeenCalledTimes(3)
 		})
 	})
 
