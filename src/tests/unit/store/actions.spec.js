@@ -618,6 +618,67 @@ describe('Vuex store actions', () => {
 				query: 'not:starred',
 			})
 		})
+
+		it('syncs a mailbox\'s query buckets sequentially, not concurrently', async () => {
+			// syncEnvelopes() has its own internal retry-on-lock loop that keeps
+			// awaiting until the mailbox unlocks (every 1.5s, see its own
+			// implementation). A sync lock is mailbox-wide, not per-query, so
+			// firing every bucket's sync at once would make every bucket
+			// independently re-trigger its own retry chain against the same
+			// lock -- multiplying request volume by the bucket count for as
+			// long as the mailbox stays locked. Confirmed this actually happens
+			// live: a genuinely long-held lock on a slow account produced a
+			// sustained ~1 request/second storm with two buckets loaded.
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+
+			const account13 = {
+				id: 13,
+			}
+
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: {
+					name: 'INBOX',
+					databaseId: 11,
+					specialRole: 'inbox',
+				},
+			})
+
+			store.mailboxes[11].envelopeLists[''] = []
+			store.mailboxes[11].envelopeLists['not:starred'] = []
+
+			store.fetchEnvelopes = vi.fn(async () => {})
+
+			let firstCallInFlight = false
+			let secondCallStartedWhileFirstWasInFlight = false
+			let resolveFirstCall
+			store.syncEnvelopes = vi.fn(async () => {
+				if (!firstCallInFlight) {
+					firstCallInFlight = true
+					return new Promise((resolve) => {
+						resolveFirstCall = () => resolve([])
+					})
+				}
+				secondCallStartedWhileFirstWasInFlight = true
+				return []
+			})
+
+			const syncPromise = store.syncInboxes()
+
+			// Give the first (still-pending) call's microtask a chance to run.
+			await Promise.resolve()
+			await Promise.resolve()
+			expect(store.syncEnvelopes).toHaveBeenCalledTimes(1)
+			expect(secondCallStartedWhileFirstWasInFlight).toBe(false)
+
+			resolveFirstCall()
+			await syncPromise
+
+			// The second bucket's sync only fires once the first one resolves --
+			// by this point that's expected and correct, unlike above.
+			expect(store.syncEnvelopes).toHaveBeenCalledTimes(2)
+		})
 	})
 
 	it('should move message to junk, no mailbox configured', async () => {

@@ -1023,10 +1023,27 @@ export default function mainStoreActions() {
 							// displayed one are added to the store but never rendered.
 							// Falls back to the unfiltered default for a mailbox with
 							// no envelopeLists yet (never opened this session).
+							//
+							// Sequential, not Promise.all: syncEnvelopes() has its own
+							// internal retry-on-lock loop (every 1.5s) that keeps
+							// awaiting until the mailbox unlocks. A sync lock is
+							// mailbox-wide, not per-query -- firing every bucket's
+							// sync concurrently means every bucket independently
+							// re-triggers its own 1.5s retry chain against the same
+							// lock, multiplying request volume by the bucket count
+							// for as long as the mailbox stays locked (confirmed
+							// live: a genuinely long lock on the slow Gmail account
+							// produced a sustained ~1 request/second storm with two
+							// buckets loaded). Going sequential means only one
+							// bucket's sync (and its retry chain, if any) is ever
+							// in flight for a given mailbox at a time; the rest
+							// simply wait their turn, and once the lock clears they
+							// resolve immediately since nothing else needed re-sent.
 							const queries = Object.keys(mailbox.envelopeLists)
 							const queriesToSync = queries.length > 0 ? queries : [undefined]
 
-							return await Promise.all(queriesToSync.map(async (query) => {
+							const newMessagesPerQuery = []
+							for (const query of queriesToSync) {
 								const list = mailbox.envelopeLists[normalizedEnvelopeListId(query)]
 								if (list === undefined) {
 									await this.fetchEnvelopes({
@@ -1035,11 +1052,12 @@ export default function mainStoreActions() {
 									})
 								}
 
-								return await this.syncEnvelopes({
+								newMessagesPerQuery.push(await this.syncEnvelopes({
 									mailboxId: mailbox.databaseId,
 									query,
-								})
-							}))
+								}))
+							}
+							return newMessagesPerQuery
 						}))
 					}))
 				const newMessages = flatMapDeep(identity, results).filter((m) => m !== undefined)
