@@ -842,6 +842,82 @@ describe('Vuex store actions', () => {
 			expect(actualDelay).toBeGreaterThanOrEqual(45_000)
 			expect(actualDelay).toBeLessThanOrEqual(46_000)
 		})
+
+		it('skips a doomed network request when a leader is already known to be retrying', async () => {
+			// A real bug: checking pendingLockWaits only inside the catch
+			// handler closes the loop for a NEW cycle arriving while a
+			// leader is already mid-retry, but does nothing to stop a
+			// call arriving *after* a leader is already established from
+			// making its own doomed request -- e.g. the main list and the
+			// favorites section both reacting to the same "refresh"
+			// click: one becomes leader, but if the other's own request
+			// only reaches the mailbox-locked check a moment later, it
+			// would previously still fire its own network request instead
+			// of recognizing the already-registered leader up front.
+			const account13 = {
+				id: 13,
+			}
+
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: {
+					name: 'INBOX',
+					databaseId: 11,
+					specialRole: 'inbox',
+				},
+			})
+
+			let callCount = 0
+			MessageService.syncEnvelopes.mockImplementation(async () => {
+				callCount++
+				if (callCount === 1) {
+					throw new MailboxLockedError('locked')
+				}
+				return {
+					newMessages: [],
+					changedMessages: [],
+					vanishedMessages: [],
+					stats: { unread: 0 },
+				}
+			})
+
+			// Hold the leader's retry wait open so it's still registered
+			// in pendingLockWaits when the "later" call below starts --
+			// simulating that call arriving strictly after the leader was
+			// established, not simultaneously with it.
+			let releaseLeaderWait
+			wait.mockImplementationOnce(() => new Promise((resolve) => {
+				releaseLeaderWait = resolve
+			}))
+
+			const leaderPromise = store.syncEnvelopes({ mailboxId: 11, query: 'A' })
+
+			// Give the leader's synchronous work (the failed first
+			// attempt, registering itself in pendingLockWaits) a chance
+			// to run before the later call starts.
+			await Promise.resolve()
+			await Promise.resolve()
+			await Promise.resolve()
+
+			const laterCallPromise = store.syncEnvelopes({ mailboxId: 11, query: 'B' })
+
+			// The later call should be waiting on the leader, not the
+			// network -- confirm no second network call happened yet.
+			await Promise.resolve()
+			await Promise.resolve()
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(1)
+
+			releaseLeaderWait()
+			await Promise.all([leaderPromise, laterCallPromise])
+
+			// 1 (leader's failed first attempt) + 1 (leader's successful
+			// retry) + 1 (the later call's own fresh attempt, made only
+			// after awaiting the leader) = 3. If the later call had made
+			// its own doomed request instead of recognizing the existing
+			// leader, this would be 4.
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(3)
+		})
 	})
 
 	describe('computeLockRetryDelayMs', () => {

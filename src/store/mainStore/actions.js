@@ -986,6 +986,27 @@ export default function mainStoreActions() {
 					}))
 				}
 
+				// Checking pendingLockWaits only inside the catch handler
+				// below closes the loop for a NEW cycle arriving while an
+				// existing leader is already mid-retry -- but it can't stop
+				// two calls that are BOTH making their very first attempt
+				// at nearly the same moment (e.g. two Vue components, the
+				// main list and the favorites section, both reacting to
+				// the same "refresh" event) from both hitting the network
+				// before either has had a chance to register as leader.
+				// Checking here too, before the request is even made,
+				// closes that gap: if a leader is already known to be
+				// retrying this mailbox, don't bother making a doomed
+				// request at all -- go straight to waiting on it.
+				if (!init && !isLockRetryLeader && pendingLockWaits.has(mailboxId)) {
+					logger.info(`Mailbox ${mailboxId} already has a caller retrying it -- awaiting that instead of making another doomed request`, { query })
+					return pendingLockWaits.get(mailboxId).catch(() => {}).then(() => this.syncEnvelopes({
+						mailboxId,
+						query,
+						init,
+					}))
+				}
+
 				const ids = this.getEnvelopes(mailboxId, query).map((env) => env.databaseId)
 				const lastTimestamp = this.getPreference('sort-order') === 'newest' ? null : this.getEnvelopes(mailboxId, query)[0]?.dateInt
 				logger.debug(`mailbox sync of ${mailboxId} (${query}) has ${ids.length} known IDs. ${lastTimestamp} is the last known message timestamp`, { mailbox })
