@@ -180,9 +180,12 @@
 			</div>
 		</template>
 		<template #indicator>
-			<!-- Color dot -->
+			<!-- Color dot -- follows isThreadUnread, same as the row's bold
+			     styling, so a thread with an unread older message looks
+			     exactly like a normal unread row (no separate visual state
+			     to explain, matching Gmail/Outlook conventions). -->
 			<IconBullet
-				v-if="!data.flags.seen"
+				v-if="isThreadUnread"
 				:size="20"
 				:aria-hidden="false"
 				:aria-label="t('mail', 'This message is unread')"

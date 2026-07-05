@@ -428,5 +428,21 @@ describe('Envelope', () => {
 			expect(unseen.vm.isThreadUnread).toBe(true)
 			expect(seen.vm.isThreadUnread).toBe(false)
 		})
+
+		it('shows the unread dot for a thread with an unseen message even if this row itself is seen', () => {
+			// Otherwise the row is bold (isThreadUnread drives the "seen"
+			// CSS class) but missing its unread dot -- an inconsistent,
+			// easy-to-miss half-state instead of looking like a normal
+			// unread row.
+			const view = mountWithFlags({ seen: true, hasUnseenInThread: true })
+
+			expect(view.find('iconbullet-stub').exists()).toBe(true)
+		})
+
+		it('hides the unread dot once the thread has no unseen message', () => {
+			const view = mountWithFlags({ seen: true, hasUnseenInThread: false })
+
+			expect(view.find('iconbullet-stub').exists()).toBe(false)
+		})
 	})
 })
