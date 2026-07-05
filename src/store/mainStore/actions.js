@@ -208,6 +208,59 @@ function transformMailboxName(account, mailbox) {
 	}
 }
 
+// A mailbox sync lock is mailbox-wide, not per-query. Several independent
+// call sites can all be syncing the same mailbox concurrently (App.vue's
+// background loop across several query buckets -- now sequenced internally,
+// see syncInboxes() -- and Mailbox.vue's own per-instance timer, doubled up
+// when "sort favorites separately" renders two separate Mailbox components
+// for one mailbox). Without coordination, every one of them independently
+// re-triggers its own 1.5s retry-on-lock loop against the same lock,
+// multiplying request volume by however many call sites happen to be
+// syncing that mailbox at once -- confirmed live: a genuinely long-held
+// lock on a slow account produced a sustained ~1 request/second 409 storm.
+// This map lets only one such retry loop actually run per mailbox at a
+// time; anyone else who hits the same lock just awaits it instead of
+// starting their own.
+const pendingLockWaits = new Map()
+
+const LOCK_RETRY_BASE_MS = 1500
+const LOCK_RETRY_MAX_MS = 30 * 1000
+
+/**
+ * How long to wait before the next lock-retry attempt.
+ *
+ * When the server tells us how long its lock has left (retryAfterMs, from
+ * the Retry-After response header), that's a worst-case estimate -- it
+ * assumes the current holder uses its full lock window, which real syncs
+ * rarely do. Treat it as a floor and jitter proportionally above it, not
+ * just by a flat ~1s: a flat jitter leaves every caller that lost the same
+ * race retrying at (near enough) the same fixed cadence, which can resonate
+ * with any other fixed-interval poller and starve one caller indefinitely.
+ * Confirmed live: a Priority Inbox query bucket kept losing its mailbox lock
+ * race to its own sibling buckets for over two hours, because the ~300s
+ * Retry-After it kept receiving is an exact multiple of the 60s background
+ * poll interval those siblings run on, so every retry landed on a fresh
+ * collision. Proportional jitter spreads retries across a wide enough
+ * window to break that phase-lock within a couple of attempts.
+ *
+ * Otherwise, fall back to exponential backoff with full jitter (see the AWS
+ * Architecture Blog's "Exponential Backoff and Jitter"): the delay's upper
+ * bound grows with each attempt, and the actual wait is randomized across
+ * the full range up to that bound. This is what actually protects a
+ * contended mailbox lock from several independent, uncoordinated clients
+ * (different browser tabs, devices, or users) -- unlike a fixed retry
+ * interval, which just means every such client keeps hammering the lock at
+ * the same fixed cadence for as long as it stays held.
+ */
+export function computeLockRetryDelayMs(attempt, retryAfterMs) {
+	if (retryAfterMs !== undefined) {
+		return retryAfterMs * (1 + Math.random() * 0.5)
+	}
+
+	const upperBound = Math.min(LOCK_RETRY_MAX_MS, LOCK_RETRY_BASE_MS * (2 ** attempt))
+	return Math.random() * upperBound
+}
+
 export default function mainStoreActions() {
 	return {
 		updateSyncTimestamp() {
@@ -753,6 +806,8 @@ export default function mainStoreActions() {
 						query,
 						envelopes,
 						addToUnifiedMailboxes,
+						replace: true,
+						replaceMailboxId: mailboxId,
 					}))),
 				)(mailbox.accountId, mailboxId, query, undefined, PAGE_SIZE, this.getPreference('sort-order'), this.getPreference('layout-message-view'), includeCacheBuster ? mailbox.cacheBuster : undefined)
 			})
@@ -894,6 +949,16 @@ export default function mainStoreActions() {
 			mailboxId,
 			query,
 			init = false,
+			// Internal only, never passed by external callers -- true only
+			// for the recursive retry chain that "won" the right to
+			// actually probe this mailbox's lock (see pendingLockWaits
+			// above). Lets that chain keep retrying via this same function
+			// without re-registering itself as a new, separate leader.
+			isLockRetryLeader = false,
+			// Internal only: how many times the leader chain has already
+			// retried, used to grow the backoff delay (see
+			// computeLockRetryDelayMs above).
+			lockRetryAttempt = 0,
 		}) {
 			return handleHttpAuthErrors(async () => {
 				logger.debug(`starting mailbox sync of ${mailboxId} (${query})`)
@@ -927,6 +992,27 @@ export default function mainStoreActions() {
 									query,
 									init,
 								})))))
+					}))
+				}
+
+				// Checking pendingLockWaits only inside the catch handler
+				// below closes the loop for a NEW cycle arriving while an
+				// existing leader is already mid-retry -- but it can't stop
+				// two calls that are BOTH making their very first attempt
+				// at nearly the same moment (e.g. two Vue components, the
+				// main list and the favorites section, both reacting to
+				// the same "refresh" event) from both hitting the network
+				// before either has had a chance to register as leader.
+				// Checking here too, before the request is even made,
+				// closes that gap: if a leader is already known to be
+				// retrying this mailbox, don't bother making a doomed
+				// request at all -- go straight to waiting on it.
+				if (!init && !isLockRetryLeader && pendingLockWaits.has(mailboxId)) {
+					logger.info(`Mailbox ${mailboxId} already has a caller retrying it -- awaiting that instead of making another doomed request`, { query })
+					return pendingLockWaits.get(mailboxId).catch(() => {}).then(() => this.syncEnvelopes({
+						mailboxId,
+						query,
+						init,
 					}))
 				}
 
@@ -986,8 +1072,26 @@ export default function mainStoreActions() {
 									throw error
 								}
 
-								logger.info('Sync failed because the mailbox is locked, retriggering', { error })
-								return wait(1500).then(() => this.syncEnvelopes({
+								if (isLockRetryLeader || !pendingLockWaits.has(mailboxId)) {
+									const delay = computeLockRetryDelayMs(lockRetryAttempt, error.retryAfterMs)
+									logger.info(`Sync failed because mailbox ${mailboxId} is locked, retrying in ${Math.round(delay)}ms (attempt ${lockRetryAttempt + 1})`, { error })
+									const retry = wait(delay).then(() => this.syncEnvelopes({
+										mailboxId,
+										query,
+										init,
+										isLockRetryLeader: true,
+										lockRetryAttempt: lockRetryAttempt + 1,
+									}))
+									if (!isLockRetryLeader) {
+										const tracked = retry.finally(() => pendingLockWaits.delete(mailboxId))
+										pendingLockWaits.set(mailboxId, tracked)
+										return tracked
+									}
+									return retry
+								}
+
+								logger.info(`Sync failed because mailbox ${mailboxId} is locked; another caller is already retrying it -- awaiting that instead of starting an independent retry loop`, { error })
+								return pendingLockWaits.get(mailboxId).catch(() => {}).then(() => this.syncEnvelopes({
 									mailboxId,
 									query,
 									init,
@@ -1015,16 +1119,49 @@ export default function mainStoreActions() {
 								return
 							}
 
-							const list = mailbox.envelopeLists[normalizedEnvelopeListId(undefined)]
-							if (list === undefined) {
-								await this.fetchEnvelopes({
-									mailboxId: mailbox.databaseId,
-								})
-							}
+							// Sync every query bucket already loaded for this mailbox
+							// (e.g. '' for the plain view, 'not:starred' when the user
+							// has "sort favorites separately" enabled), not just the
+							// unfiltered default -- new messages synced under a query
+							// nobody's envelopeLists key matches the currently
+							// displayed one are added to the store but never rendered.
+							// Falls back to the unfiltered default for a mailbox with
+							// no envelopeLists yet (never opened this session).
+							//
+							// Sequential, not Promise.all: syncEnvelopes() has its own
+							// internal retry-on-lock loop (every 1.5s) that keeps
+							// awaiting until the mailbox unlocks. A sync lock is
+							// mailbox-wide, not per-query -- firing every bucket's
+							// sync concurrently means every bucket independently
+							// re-triggers its own 1.5s retry chain against the same
+							// lock, multiplying request volume by the bucket count
+							// for as long as the mailbox stays locked (confirmed
+							// live: a genuinely long lock on the slow Gmail account
+							// produced a sustained ~1 request/second storm with two
+							// buckets loaded). Going sequential means only one
+							// bucket's sync (and its retry chain, if any) is ever
+							// in flight for a given mailbox at a time; the rest
+							// simply wait their turn, and once the lock clears they
+							// resolve immediately since nothing else needed re-sent.
+							const queries = Object.keys(mailbox.envelopeLists)
+							const queriesToSync = queries.length > 0 ? queries : [undefined]
 
-							return await this.syncEnvelopes({
-								mailboxId: mailbox.databaseId,
-							})
+							const newMessagesPerQuery = []
+							for (const query of queriesToSync) {
+								const list = mailbox.envelopeLists[normalizedEnvelopeListId(query)]
+								if (list === undefined) {
+									await this.fetchEnvelopes({
+										mailboxId: mailbox.databaseId,
+										query,
+									})
+								}
+
+								newMessagesPerQuery.push(await this.syncEnvelopes({
+									mailboxId: mailbox.databaseId,
+									query,
+								}))
+							}
+							return newMessagesPerQuery
 						}))
 					}))
 				const newMessages = flatMapDeep(identity, results).filter((m) => m !== undefined)
@@ -2097,15 +2234,55 @@ export default function mainStoreActions() {
 			query,
 			envelopes,
 			addToUnifiedMailboxes = true,
+			// fetchEnvelopes() fetches a fresh, authoritative "what
+			// currently matches this query" snapshot (at least the first
+			// page) -- unlike an incremental sync's newMessages, a message
+			// that no longer matches the query (e.g. a message that was
+			// unread in an 'is:unread' filter's list and has since been
+			// read) must not linger in the cached envelopeLists array just
+			// because this particular call didn't mention it. The default
+			// (merge-only) behaviour stays correct for incremental sync
+			// and pagination, which only ever report a subset of changes,
+			// not a full current-state snapshot. Only meaningful together
+			// with replaceMailboxId, since an empty envelopes array alone
+			// can't say which mailbox's list to clear.
+			replace = false,
+			replaceMailboxId,
 		}) {
-			if (envelopes.length === 0) {
-				return
-			}
-
 			const idToDateInt = (id) => this.envelopes[id].dateInt
 
 			const listId = normalizedEnvelopeListId(query)
 			const orderByDateInt = orderBy(idToDateInt, this.preferences['sort-order'] === 'newest' ? 'desc' : 'asc')
+
+			if (replace) {
+				const mailbox = this.mailboxes[replaceMailboxId]
+				envelopes.forEach((envelope) => {
+					this.normalizeTags(envelope)
+					Vue.set(this.envelopes, envelope.databaseId, { ...this.envelopes[envelope.databaseId] || {}, ...envelope })
+					Vue.set(envelope, 'accountId', mailbox.accountId)
+				})
+				Vue.set(mailbox.envelopeLists, listId, uniq(orderByDateInt(envelopes.map((e) => e.databaseId))))
+
+				if (addToUnifiedMailboxes) {
+					const unifiedAccount = this.accountsUnmapped[UNIFIED_ACCOUNT_ID]
+					unifiedAccount.mailboxes
+						.map((mbId) => this.mailboxes[mbId])
+						.filter((mb) => mb.specialRole && mb.specialRole === mailbox.specialRole)
+						.forEach((unifiedMailbox) => {
+							const existing = unifiedMailbox.envelopeLists[listId] || []
+							Vue.set(
+								unifiedMailbox.envelopeLists,
+								listId,
+								uniq(orderByDateInt(existing.concat(envelopes.map((e) => e.databaseId)))),
+							)
+						})
+				}
+				return
+			}
+
+			if (envelopes.length === 0) {
+				return
+			}
 
 			envelopes.forEach((envelope) => {
 				const mailbox = this.mailboxes[envelope.mailboxId]

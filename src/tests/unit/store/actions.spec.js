@@ -5,13 +5,16 @@
 
 import { createPinia, setActivePinia } from 'pinia'
 import { curry, range, reverse } from 'ramda'
+import MailboxLockedError from '../../../errors/MailboxLockedError.js'
 import * as AccountService from '../../../service/AccountService.js'
 import * as MailboxService from '../../../service/MailboxService.js'
 import * as MessageService from '../../../service/MessageService.js'
 import * as NotificationService from '../../../service/NotificationService.js'
 import { PAGE_SIZE, UNIFIED_INBOX_ID } from '../../../store/constants.js'
 import useMainStore from '../../../store/mainStore.js'
+import { computeLockRetryDelayMs } from '../../../store/mainStore/actions.js'
 import { normalizedEnvelopeListId } from '../../../util/normalization.js'
+import { wait } from '../../../util/wait.js'
 
 vi.mock('../../../service/AccountService.js')
 vi.mock('../../../service/MailboxService.js')
@@ -21,6 +24,12 @@ vi.mock('../../../util/normalization.js', () => ({
 	__esModule: true,
 	// Supply a default list id ('') to prevent annoying errors
 	normalizedEnvelopeListId: vi.fn(() => ''),
+}))
+// The lock-retry loop's 1.5s backoff would make its tests slow for no
+// reason -- resolve immediately instead.
+vi.mock('../../../util/wait.js', () => ({
+	__esModule: true,
+	wait: vi.fn(() => Promise.resolve()),
 }))
 
 const mockEnvelope = curry((mailboxId, uid) => ({
@@ -195,6 +204,55 @@ describe('Vuex store actions', () => {
 			}],
 			query: undefined,
 		})
+	})
+
+	it('fetchEnvelopes() drops entries that no longer match a filtered query', async () => {
+		// A real bug: opening a saved/quick filter (e.g. "unread") that was
+		// already cached from an earlier visit showed a message that had
+		// since been read elsewhere -- addEnvelopesMutation() only ever
+		// added-or-replaced entries present in the fresh response, it never
+		// pruned ones absent from it. fetchEnvelopes() fetches a full,
+		// authoritative snapshot of what currently matches a query (unlike
+		// an incremental sync's newMessages), so a message missing from
+		// that snapshot must be dropped from the cached list, not left
+		// lingering forever.
+		normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+
+		const account13 = {
+			id: 13,
+		}
+
+		store.addAccountMutation(account13)
+		store.addMailboxMutation({
+			account: account13,
+			mailbox: {
+				name: 'INBOX',
+				databaseId: 11,
+				specialRole: 'inbox',
+			},
+		})
+
+		const stillUnread = mockEnvelope(11, 1)
+		const nowRead = mockEnvelope(11, 2)
+
+		// Simulate an earlier visit to the "unread" filter that cached both.
+		store.addEnvelopesMutation({
+			query: 'is:unread',
+			envelopes: [stillUnread, nowRead],
+			addToUnifiedMailboxes: false,
+		})
+		expect(store.mailboxes[11].envelopeLists['is:unread']).toHaveLength(2)
+
+		// The message has since been read; a fresh fetch of the same
+		// filter now only returns the one still-unread message.
+		MessageService.fetchEnvelopes.mockResolvedValueOnce([stillUnread])
+
+		await store.fetchEnvelopes({
+			mailboxId: 11,
+			query: 'is:unread',
+		})
+
+		expect(store.mailboxes[11].envelopeLists['is:unread']).toEqual([stillUnread.databaseId])
 	})
 
 	it('fetches the next individual page', async () => {
@@ -572,6 +630,349 @@ describe('Vuex store actions', () => {
 			})
 			// Here we expect notifications
 			expect(NotificationService.showNewMessagesNotification).toHaveBeenCalled()
+		})
+
+		it('syncs every already-loaded query bucket of a mailbox, not just the default', async () => {
+			// Reproduces a real bug: when "sort favorites separately" is on, the
+			// visible list reads from envelopeLists['not:starred'], but syncInboxes()
+			// used to only ever sync the unfiltered '' bucket -- new mail landed in
+			// the store under the wrong key and never appeared in the open view,
+			// even though the mailbox's unread counter updated correctly (a separate
+			// mechanism). This asserts every existing bucket gets its own sync call.
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+
+			const account13 = {
+				id: 13,
+			}
+
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: {
+					name: 'INBOX',
+					databaseId: 11,
+					specialRole: 'inbox',
+				},
+			})
+
+			// Simulate a mailbox that's been viewed both with the default query and
+			// with favorites split out -- both buckets already exist in the store.
+			store.mailboxes[11].envelopeLists[''] = []
+			store.mailboxes[11].envelopeLists['not:starred'] = []
+
+			store.fetchEnvelopes = vi.fn(async () => {})
+			store.syncEnvelopes = vi.fn(async () => [])
+
+			await store.syncInboxes()
+
+			expect(store.fetchEnvelopes).not.toHaveBeenCalled()
+			expect(store.syncEnvelopes).toHaveBeenCalledTimes(2)
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({
+				mailboxId: 11,
+				query: '',
+			})
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({
+				mailboxId: 11,
+				query: 'not:starred',
+			})
+		})
+
+		it('syncs a mailbox\'s query buckets sequentially, not concurrently', async () => {
+			// syncEnvelopes() has its own internal retry-on-lock loop that keeps
+			// awaiting until the mailbox unlocks (every 1.5s, see its own
+			// implementation). A sync lock is mailbox-wide, not per-query, so
+			// firing every bucket's sync at once would make every bucket
+			// independently re-trigger its own retry chain against the same
+			// lock -- multiplying request volume by the bucket count for as
+			// long as the mailbox stays locked. Confirmed this actually happens
+			// live: a genuinely long-held lock on a slow account produced a
+			// sustained ~1 request/second storm with two buckets loaded.
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+
+			const account13 = {
+				id: 13,
+			}
+
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: {
+					name: 'INBOX',
+					databaseId: 11,
+					specialRole: 'inbox',
+				},
+			})
+
+			store.mailboxes[11].envelopeLists[''] = []
+			store.mailboxes[11].envelopeLists['not:starred'] = []
+
+			store.fetchEnvelopes = vi.fn(async () => {})
+
+			let firstCallInFlight = false
+			let secondCallStartedWhileFirstWasInFlight = false
+			let resolveFirstCall
+			store.syncEnvelopes = vi.fn(async () => {
+				if (!firstCallInFlight) {
+					firstCallInFlight = true
+					return new Promise((resolve) => {
+						resolveFirstCall = () => resolve([])
+					})
+				}
+				secondCallStartedWhileFirstWasInFlight = true
+				return []
+			})
+
+			const syncPromise = store.syncInboxes()
+
+			// Give the first (still-pending) call's microtask a chance to run.
+			await Promise.resolve()
+			await Promise.resolve()
+			expect(store.syncEnvelopes).toHaveBeenCalledTimes(1)
+			expect(secondCallStartedWhileFirstWasInFlight).toBe(false)
+
+			resolveFirstCall()
+			await syncPromise
+
+			// The second bucket's sync only fires once the first one resolves --
+			// by this point that's expected and correct, unlike above.
+			expect(store.syncEnvelopes).toHaveBeenCalledTimes(2)
+		})
+	})
+
+	describe('sync lock coordination', () => {
+		it('only retries once for a locked mailbox even when multiple queries are syncing it concurrently', async () => {
+			// A sync lock is mailbox-wide, not per-query. Two different
+			// callers syncing the same mailbox with different queries (e.g.
+			// the plain view and the favorites-split view, each backed by
+			// their own Mailbox.vue instance) would, without coordination,
+			// each independently retry every 1.5s against the very same
+			// lock -- multiplying request volume by the number of
+			// concurrent callers for as long as the mailbox stays locked.
+			// This asserts only one retry-wait actually happens: the first
+			// caller becomes the "leader" and probes the lock, the second
+			// just awaits that outcome instead of starting its own loop.
+			const account13 = {
+				id: 13,
+			}
+
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: {
+					name: 'INBOX',
+					databaseId: 11,
+					specialRole: 'inbox',
+				},
+			})
+
+			// Locked for long enough that a leader needs several retry
+			// rounds to get through -- long enough to clearly tell "one
+			// coordinated retry chain" apart from "two independent ones"
+			// by the resulting wait() call count.
+			let callCount = 0
+			MessageService.syncEnvelopes.mockImplementation(async () => {
+				callCount++
+				if (callCount <= 4) {
+					throw new MailboxLockedError('locked')
+				}
+				return {
+					newMessages: [],
+					changedMessages: [],
+					vanishedMessages: [],
+					stats: { unread: 0 },
+				}
+			})
+
+			const [resultA, resultB] = await Promise.all([
+				store.syncEnvelopes({ mailboxId: 11, query: 'A' }),
+				store.syncEnvelopes({ mailboxId: 11, query: 'B' }),
+			])
+
+			expect(resultA).toEqual([])
+			expect(resultB).toEqual([])
+			// Only the leader's retry chain ever calls wait() -- the
+			// follower just awaits the leader's outcome. Without
+			// coordination, the follower would run its own independent
+			// wait()-then-retry loop too, roughly doubling this count.
+			expect(wait).toHaveBeenCalledTimes(3)
+		})
+
+		it('honors the server-provided retryAfterMs instead of guessing a backoff', async () => {
+			// The server knows exactly how long its own lock/rate-limit has
+			// left (Retry-After) -- when present, that's authoritative and
+			// should be used more or less as-is (plus a little jitter),
+			// not overridden by our own guessed exponential backoff.
+			const account13 = {
+				id: 13,
+			}
+
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: {
+					name: 'INBOX',
+					databaseId: 11,
+					specialRole: 'inbox',
+				},
+			})
+
+			let callCount = 0
+			MessageService.syncEnvelopes.mockImplementation(async () => {
+				callCount++
+				if (callCount === 1) {
+					const error = new MailboxLockedError('locked')
+					error.retryAfterMs = 45_000
+					throw error
+				}
+				return {
+					newMessages: [],
+					changedMessages: [],
+					vanishedMessages: [],
+					stats: { unread: 0 },
+				}
+			})
+
+			await store.syncEnvelopes({ mailboxId: 11, query: 'A' })
+
+			expect(wait).toHaveBeenCalledTimes(1)
+			// 45s plus up to 50% proportional jitter (see
+			// computeLockRetryDelayMs) -- never less than the server's own
+			// hint, and not the unrelated, much smaller exponential-backoff
+			// range.
+			const actualDelay = wait.mock.calls[0][0]
+			expect(actualDelay).toBeGreaterThanOrEqual(45_000)
+			expect(actualDelay).toBeLessThanOrEqual(67_500)
+		})
+
+		it('skips a doomed network request when a leader is already known to be retrying', async () => {
+			// A real bug: checking pendingLockWaits only inside the catch
+			// handler closes the loop for a NEW cycle arriving while a
+			// leader is already mid-retry, but does nothing to stop a
+			// call arriving *after* a leader is already established from
+			// making its own doomed request -- e.g. the main list and the
+			// favorites section both reacting to the same "refresh"
+			// click: one becomes leader, but if the other's own request
+			// only reaches the mailbox-locked check a moment later, it
+			// would previously still fire its own network request instead
+			// of recognizing the already-registered leader up front.
+			const account13 = {
+				id: 13,
+			}
+
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: {
+					name: 'INBOX',
+					databaseId: 11,
+					specialRole: 'inbox',
+				},
+			})
+
+			let callCount = 0
+			MessageService.syncEnvelopes.mockImplementation(async () => {
+				callCount++
+				if (callCount === 1) {
+					throw new MailboxLockedError('locked')
+				}
+				return {
+					newMessages: [],
+					changedMessages: [],
+					vanishedMessages: [],
+					stats: { unread: 0 },
+				}
+			})
+
+			// Hold the leader's retry wait open so it's still registered
+			// in pendingLockWaits when the "later" call below starts --
+			// simulating that call arriving strictly after the leader was
+			// established, not simultaneously with it.
+			let releaseLeaderWait
+			wait.mockImplementationOnce(() => new Promise((resolve) => {
+				releaseLeaderWait = resolve
+			}))
+
+			const leaderPromise = store.syncEnvelopes({ mailboxId: 11, query: 'A' })
+
+			// Give the leader's synchronous work (the failed first
+			// attempt, registering itself in pendingLockWaits) a chance
+			// to run before the later call starts.
+			await Promise.resolve()
+			await Promise.resolve()
+			await Promise.resolve()
+
+			const laterCallPromise = store.syncEnvelopes({ mailboxId: 11, query: 'B' })
+
+			// The later call should be waiting on the leader, not the
+			// network -- confirm no second network call happened yet.
+			await Promise.resolve()
+			await Promise.resolve()
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(1)
+
+			releaseLeaderWait()
+			await Promise.all([leaderPromise, laterCallPromise])
+
+			// 1 (leader's failed first attempt) + 1 (leader's successful
+			// retry) + 1 (the later call's own fresh attempt, made only
+			// after awaiting the leader) = 3. If the later call had made
+			// its own doomed request instead of recognizing the existing
+			// leader, this would be 4.
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(3)
+		})
+	})
+
+	describe('computeLockRetryDelayMs', () => {
+		afterEach(() => {
+			vi.restoreAllMocks()
+		})
+
+		it('grows the delay upper bound exponentially across attempts', () => {
+			// Full jitter means the actual value is random within [0, bound]
+			// -- pin Math.random to 1 (its supremum) to read the bound itself
+			// back out for each attempt.
+			vi.spyOn(Math, 'random').mockReturnValue(1)
+
+			expect(computeLockRetryDelayMs(0)).toBeCloseTo(1500, 0)
+			expect(computeLockRetryDelayMs(1)).toBeCloseTo(3000, 0)
+			expect(computeLockRetryDelayMs(2)).toBeCloseTo(6000, 0)
+			expect(computeLockRetryDelayMs(3)).toBeCloseTo(12000, 0)
+		})
+
+		it('caps the delay upper bound so it never grows unbounded', () => {
+			vi.spyOn(Math, 'random').mockReturnValue(1)
+
+			// Attempt 10 would be 1500 * 2^10 = 1,536,000ms uncapped --
+			// must be clamped to the 30s ceiling instead.
+			expect(computeLockRetryDelayMs(10)).toBeCloseTo(30_000, 0)
+		})
+
+		it('never returns a negative or undefined delay at attempt 0', () => {
+			vi.spyOn(Math, 'random').mockReturnValue(0)
+
+			expect(computeLockRetryDelayMs(0)).toBe(0)
+		})
+
+		it('prefers retryAfterMs over the computed backoff when present', () => {
+			vi.spyOn(Math, 'random').mockReturnValue(0)
+
+			// Attempt number is irrelevant once the server has told us
+			// exactly how long to wait.
+			expect(computeLockRetryDelayMs(5, 10_000)).toBe(10_000)
+		})
+
+		it('jitters retryAfterMs proportionally instead of by a flat amount', () => {
+			// At its minimum (Math.random() === 0), retryAfterMs is honored
+			// as-is -- it's a floor, never retry earlier than the server said.
+			vi.spyOn(Math, 'random').mockReturnValue(0)
+			expect(computeLockRetryDelayMs(5, 10_000)).toBe(10_000)
+
+			// At its supremum, the wait grows by up to 50% -- wide enough
+			// that repeated collisions with a fixed-interval poller (e.g. a
+			// 60s background sync) de-phase within a couple of retries,
+			// unlike a flat ~1s jitter which barely dents a 300s-multiple
+			// cadence.
+			vi.spyOn(Math, 'random').mockReturnValue(1)
+			expect(computeLockRetryDelayMs(5, 10_000)).toBe(15_000)
 		})
 	})
 

@@ -50,4 +50,47 @@ describe('convert error', () => {
 
 		expect(result instanceof Error).toEqual(true)
 	})
+
+	it('attaches retryAfterMs from a Retry-After header, converted to milliseconds', () => {
+		const error = {
+			response: {
+				headers: {
+					'x-mail-response': '1',
+					'retry-after': '42',
+				},
+				status: 409,
+				data: {
+					status: 'fail',
+					data: {
+						type: 'OCA\\Mail\\Exception\\MailboxLockedException',
+					},
+				},
+			},
+		}
+
+		const result = convertAxiosError(error)
+
+		expect(result.retryAfterMs).toEqual(42000)
+	})
+
+	it('leaves retryAfterMs unset when there is no Retry-After header', () => {
+		const error = {
+			response: {
+				headers: {
+					'x-mail-response': '1',
+				},
+				status: 409,
+				data: {
+					status: 'fail',
+					data: {
+						type: 'OCA\\Mail\\Exception\\MailboxLockedException',
+					},
+				},
+			},
+		}
+
+		const result = convertAxiosError(error)
+
+		expect(result.retryAfterMs).toBeUndefined()
+	})
 })

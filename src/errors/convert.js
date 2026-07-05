@@ -44,5 +44,16 @@ export function convertAxiosError(axiosError) {
 		return axiosError
 	}
 
-	return new map[response.data.data.type](response.data.data.message)
+	const error = new map[response.data.data.type](response.data.data.message)
+
+	// The mailbox-locked/rate-limited responses carry an authoritative
+	// Retry-After (seconds) telling the client exactly how long the
+	// server-side lock or rate limit has left, instead of the client
+	// having to guess a backoff on its own.
+	const retryAfter = response.headers['retry-after']
+	if (retryAfter !== undefined) {
+		error.retryAfterMs = Number(retryAfter) * 1000
+	}
+
+	return error
 }

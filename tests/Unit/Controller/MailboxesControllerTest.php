@@ -24,6 +24,9 @@ use OCP\AppFramework\Http\JSONResponse;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\IConfig;
 use OCP\IRequest;
+use OCP\IUser;
+use OCP\IUserManager;
+use OCP\Security\RateLimiting\ILimiter;
 use PHPUnit\Framework\MockObject\MockObject;
 
 class MailboxesControllerTest extends TestCase {
@@ -51,6 +54,8 @@ class MailboxesControllerTest extends TestCase {
 	private IConfig|MockObject $config;
 	private ITimeFactory|MockObject $timeFactory;
 	private DelegationService|MockObject $delegationService;
+	private ILimiter|MockObject $limiter;
+	private IUserManager|MockObject $userManager;
 
 	public function setUp(): void {
 		parent::setUp();
@@ -64,6 +69,10 @@ class MailboxesControllerTest extends TestCase {
 		$this->delegationService = $this->createMock(DelegationService::class);
 		$this->delegationService->method('resolveAccountUserId')->willReturn($this->userId);
 		$this->delegationService->method('resolveMailboxUserId')->willReturn($this->userId);
+		$this->limiter = $this->createMock(ILimiter::class);
+		$this->userManager = $this->createMock(IUserManager::class);
+		$user = $this->createMock(IUser::class);
+		$this->userManager->method('get')->with($this->userId)->willReturn($user);
 
 		$this->controller = new MailboxesController(
 			$this->appName,
@@ -75,6 +84,8 @@ class MailboxesControllerTest extends TestCase {
 			$this->config,
 			$this->timeFactory,
 			$this->delegationService,
+			$this->limiter,
+			$this->userManager,
 		);
 	}
 
@@ -346,5 +357,99 @@ class MailboxesControllerTest extends TestCase {
 		$this->expectException(NotImplemented::class);
 
 		$this->controller->update();
+	}
+
+	public function testSyncRejectsWithRetryAfterWhenRateLimited(): void {
+		// A mailbox sync lock is shared, mailbox-wide infrastructure, not a
+		// per-session resource -- several independent clients (a forgotten
+		// tab at the office, one at home, a phone, other users) can all hit
+		// the very same lock without any of them knowing about the others.
+		// The per-mailbox rate limit protects against that pile-on
+		// regardless of how many uncoordinated clients are involved.
+		$mailboxId = 13;
+		$mailbox = new Mailbox();
+		$mailbox->setId($mailboxId);
+		$mailbox->setAccountId(28);
+		$account = $this->createStub(Account::class);
+		$this->mailManager->method('getMailbox')->willReturn($mailbox);
+		$this->accountService->method('find')->willReturn($account);
+
+		$this->limiter->expects($this->once())
+			->method('registerUserRequest')
+			->with('mail-sync-mailbox-' . $mailboxId, 20, Mailbox::LOCK_TIMEOUT, $this->anything())
+			->willThrowException(new class extends \Exception implements \OCP\Security\RateLimiting\IRateLimitExceededException {
+			});
+
+		$this->syncService->expects($this->never())->method('syncMailbox');
+
+		$response = $this->controller->sync($mailboxId);
+
+		$this->assertEquals(429, $response->getStatus());
+		// Deliberately much shorter than the rate limit's own period
+		// (Mailbox::LOCK_TIMEOUT) -- confirmed live that advising the full
+		// period here made a client that hit the limit once wait a felt
+		// ~5 minutes for new mail, even after the mailbox itself had long
+		// since freed up.
+		$this->assertEquals('30', $response->getHeaders()['Retry-After']);
+	}
+
+	public function testSyncReturnsRetryAfterBasedOnRemainingLockTime(): void {
+		$mailboxId = 13;
+		$now = 1000000;
+		// Locked 100s ago; 200s of its 300s LOCK_TIMEOUT remain.
+		$lockedAt = $now - 100;
+
+		$mailbox = new Mailbox();
+		$mailbox->setId($mailboxId);
+		$mailbox->setAccountId(28);
+		$account = $this->createStub(Account::class);
+
+		$freshMailbox = new Mailbox();
+		$freshMailbox->setId($mailboxId);
+		$freshMailbox->setSyncNewLock($lockedAt);
+
+		$this->mailManager->expects($this->exactly(2))
+			->method('getMailbox')
+			->willReturnOnConsecutiveCalls($mailbox, $freshMailbox);
+		$this->accountService->method('find')->willReturn($account);
+		$this->timeFactory->method('getTime')->willReturn($now);
+		$this->syncService->method('syncMailbox')
+			->willThrowException(\OCA\Mail\Exception\MailboxLockedException::from($mailbox));
+
+		$response = $this->controller->sync($mailboxId);
+
+		$this->assertEquals(409, $response->getStatus());
+		$this->assertEquals('200', $response->getHeaders()['Retry-After']);
+	}
+
+	public function testSyncCapsRetryAfterAtLockTimeoutEvenIfLockLooksOlder(): void {
+		// A defensive floor/ceiling: an unexpected clock skew or stale lock
+		// value shouldn't produce a nonsensical Retry-After (negative, or
+		// far beyond how long a lock could ever legitimately last).
+		$mailboxId = 13;
+		$now = 1000000;
+
+		$mailbox = new Mailbox();
+		$mailbox->setId($mailboxId);
+		$mailbox->setAccountId(28);
+		$account = $this->createStub(Account::class);
+
+		$freshMailbox = new Mailbox();
+		$freshMailbox->setId($mailboxId);
+		// A lock timestamp from far in the future relative to $now.
+		$freshMailbox->setSyncNewLock($now + 10000);
+
+		$this->mailManager->expects($this->exactly(2))
+			->method('getMailbox')
+			->willReturnOnConsecutiveCalls($mailbox, $freshMailbox);
+		$this->accountService->method('find')->willReturn($account);
+		$this->timeFactory->method('getTime')->willReturn($now);
+		$this->syncService->method('syncMailbox')
+			->willThrowException(\OCA\Mail\Exception\MailboxLockedException::from($mailbox));
+
+		$response = $this->controller->sync($mailboxId);
+
+		$this->assertEquals(409, $response->getStatus());
+		$this->assertEquals((string)Mailbox::LOCK_TIMEOUT, $response->getHeaders()['Retry-After']);
 	}
 }
