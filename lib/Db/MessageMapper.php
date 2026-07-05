@@ -972,13 +972,52 @@ class MessageMapper extends QBMapper {
 			);
 		}
 
-		foreach ($query->getFlags() as $flag) {
-			$select->andWhere($qb->expr()->eq('m.' . $this->flagToColumnName($flag), $qb->createNamedParameter($flag->isSet(), IQueryBuilder::PARAM_BOOL)));
-		}
-		if (!empty($query->getFlagExpressions())) {
-			$select->andWhere(
-				...array_map(fn (FlagExpression $expr) => $this->flagExpressionToQuery($expr, $select, 'm'), $query->getFlagExpressions())
-			);
+		if ($query->getThreaded() && (!empty($query->getFlags()) || !empty($query->getFlagExpressions()))) {
+			// In threaded view, `m` (see the self-join above) is only a
+			// stand-in for its whole thread -- the thread's newest message,
+			// not a message to judge on its own. A flag filter (unread,
+			// starred, important, ...) must therefore match if ANY message
+			// in the thread has it, not only the newest one -- otherwise a
+			// thread whose newest reply has already been read is invisible
+			// to the "unread" filter even though it genuinely contains an
+			// unread message (confirmed live).
+			// Named parameters must be created on the OUTER query builder
+			// ($qb), not the inner one -- both generate placeholder names
+			// from their own independent counters (e.g. :dcValue1), so a
+			// value bound on the inner builder collides with whatever the
+			// outer builder's own placeholder of the same name is bound to
+			// once the inner SQL is embedded as literal text below. This is
+			// the same reason findIdsGloballyByQuery()'s sub-select above
+			// creates its parameters via the outer $qb too.
+			$threadMatchQb = $this->db->getQueryBuilder();
+			$threadMatch = $threadMatchQb->select($threadMatchQb->expr()->literal(1))
+				->from($this->getTableName(), 'tm')
+				->where(
+					$threadMatchQb->expr()->eq('tm.mailbox_id', 'm.mailbox_id', IQueryBuilder::PARAM_INT),
+					$threadMatchQb->expr()->orX(
+						// A message with no thread_root_id isn't grouped
+						// with anything (NULL never equals NULL below), so
+						// it must still match itself.
+						$threadMatchQb->expr()->eq('tm.id', 'm.id', IQueryBuilder::PARAM_INT),
+						$threadMatchQb->expr()->eq('tm.thread_root_id', 'm.thread_root_id', IQueryBuilder::PARAM_STR),
+					),
+				);
+			foreach ($query->getFlags() as $flag) {
+				$threadMatch->andWhere($threadMatchQb->expr()->eq('tm.' . $this->flagToColumnName($flag), $qb->createNamedParameter($flag->isSet(), IQueryBuilder::PARAM_BOOL)));
+			}
+			foreach ($query->getFlagExpressions() as $expr) {
+				$threadMatch->andWhere($this->flagExpressionToQuery($expr, $qb, 'tm'));
+			}
+			$select->andWhere($qb->createFunction('EXISTS (' . $threadMatch->getSQL() . ')'));
+		} else {
+			foreach ($query->getFlags() as $flag) {
+				$select->andWhere($qb->expr()->eq('m.' . $this->flagToColumnName($flag), $qb->createNamedParameter($flag->isSet(), IQueryBuilder::PARAM_BOOL)));
+			}
+			if (!empty($query->getFlagExpressions())) {
+				$select->andWhere(
+					...array_map(fn (FlagExpression $expr) => $this->flagExpressionToQuery($expr, $select, 'm'), $query->getFlagExpressions())
+				);
+			}
 		}
 
 		if ($query->getThreaded()) {

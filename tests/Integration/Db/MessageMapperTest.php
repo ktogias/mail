@@ -15,6 +15,7 @@ use OCA\Mail\Account;
 use OCA\Mail\Db\Mailbox;
 use OCA\Mail\Db\MessageMapper;
 use OCA\Mail\Db\TagMapper;
+use OCA\Mail\Service\Search\Flag;
 use OCA\Mail\Service\Search\SearchQuery;
 use OCA\Mail\Support\PerformanceLogger;
 use OCP\AppFramework\Utility\ITimeFactory;
@@ -206,6 +207,115 @@ class MessageMapperTest extends TestCase {
 		$result = $this->mapper->findIdsByQuery($mailbox, $searchQuery, $sortOrder, 3, null);
 
 		self::assertEquals([3,2,1], $result);
+	}
+
+	/**
+	 * A thread's newest message represents the whole thread in threaded
+	 * view (see the m2 self-join in findIdsByQuery()). An unread filter
+	 * must match that representative if ANY message in its thread is
+	 * unread -- not only if the representative itself is -- otherwise a
+	 * thread whose newest reply has already been read hides a genuinely
+	 * unread older message entirely.
+	 */
+	public function testFindIdsByQueryThreadedUnreadMatchesAnyMessageInThread(): void {
+		$mailbox = new Mailbox();
+		$mailbox->setId(2);
+		$searchQuery = new SearchQuery();
+		$searchQuery->addFlag(Flag::not(Flag::SEEN));
+		$sortOrder = 'DESC';
+		$qb = $this->db->getQueryBuilder();
+
+		$values = [
+			// Thread A: older message unread, newest reply already read.
+			[
+				'id' => 10,
+				'uid' => $qb->createNamedParameter(310, IQueryBuilder::PARAM_INT),
+				'message_id' => $qb->createNamedParameter('<a1@thread.com>'),
+				'mailbox_id' => $qb->createNamedParameter(2, IQueryBuilder::PARAM_INT),
+				'subject' => $qb->createNamedParameter('Thread A'),
+				'sent_at' => $qb->createNamedParameter(1000, IQueryBuilder::PARAM_INT),
+				'thread_root_id' => $qb->createNamedParameter('thread-a'),
+				'flag_seen' => $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL),
+			],
+			[
+				'id' => 11,
+				'uid' => $qb->createNamedParameter(311, IQueryBuilder::PARAM_INT),
+				'message_id' => $qb->createNamedParameter('<a2@thread.com>'),
+				'mailbox_id' => $qb->createNamedParameter(2, IQueryBuilder::PARAM_INT),
+				'subject' => $qb->createNamedParameter('Re: Thread A'),
+				'sent_at' => $qb->createNamedParameter(2000, IQueryBuilder::PARAM_INT),
+				'thread_root_id' => $qb->createNamedParameter('thread-a'),
+				'flag_seen' => $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL),
+			],
+			// Standalone, already-read message -- must not match.
+			[
+				'id' => 12,
+				'uid' => $qb->createNamedParameter(312, IQueryBuilder::PARAM_INT),
+				'message_id' => $qb->createNamedParameter('<b1@thread.com>'),
+				'mailbox_id' => $qb->createNamedParameter(2, IQueryBuilder::PARAM_INT),
+				'subject' => $qb->createNamedParameter('Unrelated'),
+				'sent_at' => $qb->createNamedParameter(3000, IQueryBuilder::PARAM_INT),
+				'flag_seen' => $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL),
+			],
+		];
+
+		foreach ($values as $value) {
+			$insert = $qb->insert($this->mapper->getTableName())->values($value);
+			$insert->executeStatement();
+		}
+
+		$result = $this->mapper->findIdsByQuery($mailbox, $searchQuery, $sortOrder, null, null);
+
+		// Only thread A's newest message (11) is returned, representing a
+		// thread that genuinely contains an unread message -- even though
+		// message 11 itself has already been read.
+		self::assertEquals([11], $result);
+	}
+
+	/**
+	 * The non-threaded path is unaffected by the above: a flag filter still
+	 * applies to each message individually, not thread-wide.
+	 */
+	public function testFindIdsByQueryNonThreadedUnreadMatchesOnlyThatMessage(): void {
+		$mailbox = new Mailbox();
+		$mailbox->setId(2);
+		$searchQuery = new SearchQuery();
+		$searchQuery->setThreaded(false);
+		$searchQuery->addFlag(Flag::not(Flag::SEEN));
+		$sortOrder = 'DESC';
+		$qb = $this->db->getQueryBuilder();
+
+		$values = [
+			[
+				'id' => 10,
+				'uid' => $qb->createNamedParameter(310, IQueryBuilder::PARAM_INT),
+				'message_id' => $qb->createNamedParameter('<a1@thread.com>'),
+				'mailbox_id' => $qb->createNamedParameter(2, IQueryBuilder::PARAM_INT),
+				'subject' => $qb->createNamedParameter('Thread A'),
+				'sent_at' => $qb->createNamedParameter(1000, IQueryBuilder::PARAM_INT),
+				'thread_root_id' => $qb->createNamedParameter('thread-a'),
+				'flag_seen' => $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL),
+			],
+			[
+				'id' => 11,
+				'uid' => $qb->createNamedParameter(311, IQueryBuilder::PARAM_INT),
+				'message_id' => $qb->createNamedParameter('<a2@thread.com>'),
+				'mailbox_id' => $qb->createNamedParameter(2, IQueryBuilder::PARAM_INT),
+				'subject' => $qb->createNamedParameter('Re: Thread A'),
+				'sent_at' => $qb->createNamedParameter(2000, IQueryBuilder::PARAM_INT),
+				'thread_root_id' => $qb->createNamedParameter('thread-a'),
+				'flag_seen' => $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL),
+			],
+		];
+
+		foreach ($values as $value) {
+			$insert = $qb->insert($this->mapper->getTableName())->values($value);
+			$insert->executeStatement();
+		}
+
+		$result = $this->mapper->findIdsByQuery($mailbox, $searchQuery, $sortOrder, null, null);
+
+		self::assertEquals([10], $result);
 	}
 
 	public function testDeleteByUid(): void {
