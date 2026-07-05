@@ -243,6 +243,16 @@ const LOCK_RETRY_MAX_MS = 30 * 1000
  * collision. Proportional jitter spreads retries across a wide enough
  * window to break that phase-lock within a couple of attempts.
  *
+ * Kept deliberately modest (up to 20%, not 50%): the jitter only needs to be
+ * wide enough to eventually escape a resonant collision with a fixed-interval
+ * poller, which a random walk does within a handful of retries even at a
+ * fairly small spread. A wider spread doesn't resolve resonance any faster,
+ * it just adds avoidable wait on top of retries that were never resonating
+ * with anything in the first place -- confirmed live: a mailbox undergoing a
+ * genuinely long, still-in-progress sync (not periodic-poller resonance) had
+ * every retry pushed out by up to 50% for no corresponding benefit, making
+ * an already slow mailbox feel even less responsive.
+ *
  * Otherwise, fall back to exponential backoff with full jitter (see the AWS
  * Architecture Blog's "Exponential Backoff and Jitter"): the delay's upper
  * bound grows with each attempt, and the actual wait is randomized across
@@ -254,7 +264,7 @@ const LOCK_RETRY_MAX_MS = 30 * 1000
  */
 export function computeLockRetryDelayMs(attempt, retryAfterMs) {
 	if (retryAfterMs !== undefined) {
-		return retryAfterMs * (1 + Math.random() * 0.5)
+		return retryAfterMs * (1 + Math.random() * 0.2)
 	}
 
 	const upperBound = Math.min(LOCK_RETRY_MAX_MS, LOCK_RETRY_BASE_MS * (2 ** attempt))

@@ -835,13 +835,13 @@ describe('Vuex store actions', () => {
 			await store.syncEnvelopes({ mailboxId: 11, query: 'A' })
 
 			expect(wait).toHaveBeenCalledTimes(1)
-			// 45s plus up to 50% proportional jitter (see
+			// 45s plus up to 20% proportional jitter (see
 			// computeLockRetryDelayMs) -- never less than the server's own
 			// hint, and not the unrelated, much smaller exponential-backoff
 			// range.
 			const actualDelay = wait.mock.calls[0][0]
 			expect(actualDelay).toBeGreaterThanOrEqual(45_000)
-			expect(actualDelay).toBeLessThanOrEqual(67_500)
+			expect(actualDelay).toBeLessThanOrEqual(54_000)
 		})
 
 		it('skips a doomed network request when a leader is already known to be retrying', async () => {
@@ -966,13 +966,15 @@ describe('Vuex store actions', () => {
 			vi.spyOn(Math, 'random').mockReturnValue(0)
 			expect(computeLockRetryDelayMs(5, 10_000)).toBe(10_000)
 
-			// At its supremum, the wait grows by up to 50% -- wide enough
+			// At its supremum, the wait grows by up to 20% -- wide enough
 			// that repeated collisions with a fixed-interval poller (e.g. a
 			// 60s background sync) de-phase within a couple of retries,
 			// unlike a flat ~1s jitter which barely dents a 300s-multiple
-			// cadence.
+			// cadence, but not so wide that a mailbox stuck on a genuinely
+			// long sync (not periodic-poller resonance) waits noticeably
+			// longer for no corresponding benefit.
 			vi.spyOn(Math, 'random').mockReturnValue(1)
-			expect(computeLockRetryDelayMs(5, 10_000)).toBe(15_000)
+			expect(computeLockRetryDelayMs(5, 10_000)).toBe(12_000)
 		})
 	})
 
