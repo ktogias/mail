@@ -318,6 +318,89 @@ class MessageMapperTest extends TestCase {
 		self::assertEquals([10], $result);
 	}
 
+	/**
+	 * findByIds() (used to load full envelopes, e.g. for a folder listing)
+	 * must annotate each loaded message with whether ITS thread contains
+	 * any unseen message -- not just whether the loaded message itself is
+	 * unseen -- so the frontend can show a thread's row as unread even when
+	 * only an older message (not the one actually displayed) is unseen.
+	 */
+	public function testFindByIdsAnnotatesHasUnseenInThread(): void {
+		$qb = $this->db->getQueryBuilder();
+
+		$values = [
+			// Thread A: older unseen, newest reply already seen.
+			[
+				'id' => 20,
+				'uid' => $qb->createNamedParameter(320, IQueryBuilder::PARAM_INT),
+				'message_id' => $qb->createNamedParameter('<a1@thread.com>'),
+				'mailbox_id' => $qb->createNamedParameter(3, IQueryBuilder::PARAM_INT),
+				'subject' => $qb->createNamedParameter('Thread A'),
+				'sent_at' => $qb->createNamedParameter(1000, IQueryBuilder::PARAM_INT),
+				'thread_root_id' => $qb->createNamedParameter('thread-a'),
+				'flag_seen' => $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL),
+			],
+			[
+				'id' => 21,
+				'uid' => $qb->createNamedParameter(321, IQueryBuilder::PARAM_INT),
+				'message_id' => $qb->createNamedParameter('<a2@thread.com>'),
+				'mailbox_id' => $qb->createNamedParameter(3, IQueryBuilder::PARAM_INT),
+				'subject' => $qb->createNamedParameter('Re: Thread A'),
+				'sent_at' => $qb->createNamedParameter(2000, IQueryBuilder::PARAM_INT),
+				'thread_root_id' => $qb->createNamedParameter('thread-a'),
+				'flag_seen' => $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL),
+			],
+			// Standalone, unseen -- must annotate itself as unseen.
+			[
+				'id' => 22,
+				'uid' => $qb->createNamedParameter(322, IQueryBuilder::PARAM_INT),
+				'message_id' => $qb->createNamedParameter('<b1@thread.com>'),
+				'mailbox_id' => $qb->createNamedParameter(3, IQueryBuilder::PARAM_INT),
+				'subject' => $qb->createNamedParameter('Standalone'),
+				'sent_at' => $qb->createNamedParameter(3000, IQueryBuilder::PARAM_INT),
+				'flag_seen' => $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL),
+			],
+			// Thread C: both seen -- must not be annotated as unseen.
+			[
+				'id' => 23,
+				'uid' => $qb->createNamedParameter(323, IQueryBuilder::PARAM_INT),
+				'message_id' => $qb->createNamedParameter('<c1@thread.com>'),
+				'mailbox_id' => $qb->createNamedParameter(3, IQueryBuilder::PARAM_INT),
+				'subject' => $qb->createNamedParameter('Thread C'),
+				'sent_at' => $qb->createNamedParameter(4000, IQueryBuilder::PARAM_INT),
+				'thread_root_id' => $qb->createNamedParameter('thread-c'),
+				'flag_seen' => $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL),
+			],
+			[
+				'id' => 24,
+				'uid' => $qb->createNamedParameter(324, IQueryBuilder::PARAM_INT),
+				'message_id' => $qb->createNamedParameter('<c2@thread.com>'),
+				'mailbox_id' => $qb->createNamedParameter(3, IQueryBuilder::PARAM_INT),
+				'subject' => $qb->createNamedParameter('Re: Thread C'),
+				'sent_at' => $qb->createNamedParameter(5000, IQueryBuilder::PARAM_INT),
+				'thread_root_id' => $qb->createNamedParameter('thread-c'),
+				'flag_seen' => $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL),
+			],
+		];
+
+		foreach ($values as $value) {
+			$insert = $qb->insert($this->mapper->getTableName())->values($value);
+			$insert->executeStatement();
+		}
+
+		$messages = $this->mapper->findByIds('test-user', [20, 21, 22, 23, 24], 'ASC');
+		$hasUnseenById = [];
+		foreach ($messages as $message) {
+			$hasUnseenById[$message->getId()] = $message->getHasUnseenInThread();
+		}
+
+		self::assertTrue($hasUnseenById[20], 'the older, actually-unseen message in thread A');
+		self::assertTrue($hasUnseenById[21], "thread A's newest (seen) reply -- its thread still has an unseen message");
+		self::assertTrue($hasUnseenById[22], 'the standalone unseen message');
+		self::assertFalse($hasUnseenById[23], "thread C's older message -- thread C has no unseen message");
+		self::assertFalse($hasUnseenById[24], "thread C's newest message -- thread C has no unseen message");
+	}
+
 	public function testDeleteByUid(): void {
 		$mailbox = new Mailbox();
 		$mailbox->setId(1);

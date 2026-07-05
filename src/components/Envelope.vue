@@ -14,7 +14,7 @@
 			isDraggable,
 		}"
 		class="list-item-style envelope"
-		:class="{ seen: data.flags.seen, draft, selected: selected }"
+		:class="{ seen: !isThreadUnread, draft, selected: selected }"
 		:to="link"
 		:exact="true"
 		:data-envelope-id="data.databaseId"
@@ -697,6 +697,16 @@ export default {
 
 		isRTL() {
 			return isRTL()
+		},
+
+		// In threaded listings this row represents the whole thread (its
+		// newest message), so its own `seen` flag alone isn't enough --
+		// `hasUnseenInThread` (see Message::jsonSerialize()) reflects the
+		// thread as a whole and already reduces to `!seen` for a message
+		// that isn't part of any real thread. Fall back to `!seen` only for
+		// envelope objects predating this field (e.g. a stale cache).
+		isThreadUnread() {
+			return this.data.flags.hasUnseenInThread ?? !this.data.flags.seen
 		},
 
 		messageLongDate() {

@@ -383,4 +383,50 @@ describe('Envelope', () => {
 
 		expect(view.vm.hasWriteAcl).toBe(true)
 	})
+
+	describe('isThreadUnread', () => {
+		const mountWithFlags = (flags) => shallowMount(Envelope, {
+			mocks: {
+				$route,
+			},
+			propsData: {
+				mailbox: {
+					specialRole: '',
+					databaseId: '3',
+					myAcls: undefined,
+				},
+				data: {
+					accountId: 123,
+					from: [{ email: 'info@test.com' }],
+					flags,
+				},
+			},
+			store,
+			localVue,
+		})
+
+		it('is unread when the thread has an unseen message, even if this row itself is seen', () => {
+			const view = mountWithFlags({ seen: true, hasUnseenInThread: true })
+
+			expect(view.vm.isThreadUnread).toBe(true)
+		})
+
+		it('is read when the thread has no unseen message, even if this row itself is unseen', () => {
+			// Not a realistic combination in practice (the row shown is
+			// always the thread's newest message, which would itself be
+			// among any unseen ones) -- but hasUnseenInThread must still
+			// win over the row's own flag when both are present.
+			const view = mountWithFlags({ seen: false, hasUnseenInThread: false })
+
+			expect(view.vm.isThreadUnread).toBe(false)
+		})
+
+		it('falls back to the row-s own seen flag when hasUnseenInThread is absent', () => {
+			const unseen = mountWithFlags({ seen: false })
+			const seen = mountWithFlags({ seen: true })
+
+			expect(unseen.vm.isThreadUnread).toBe(true)
+			expect(seen.vm.isThreadUnread).toBe(false)
+		})
+	})
 })

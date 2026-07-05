@@ -146,6 +146,18 @@ class Message extends Entity implements JsonSerializable {
 	/** @var array */
 	private $attachments = [];
 
+	/**
+	 * Whether this message's thread (see threadRootId) contains any unseen
+	 * message -- not just this one. Computed at read time (see
+	 * MessageMapper::findRelatedData()), not persisted. Threaded listings
+	 * show one row per thread (this message, if it's the newest), so its
+	 * own flag_seen alone can't tell the frontend whether the thread as a
+	 * whole should still be shown as unread.
+	 *
+	 * @var bool
+	 */
+	private $hasUnseenInThread = false;
+
 	public function __construct() {
 		$this->from = new AddressList([]);
 		$this->to = new AddressList([]);
@@ -329,6 +341,14 @@ class Message extends Entity implements JsonSerializable {
 		return $this->attachments;
 	}
 
+	public function setHasUnseenInThread(bool $hasUnseenInThread): void {
+		$this->hasUnseenInThread = $hasUnseenInThread;
+	}
+
+	public function getHasUnseenInThread(): bool {
+		return $this->hasUnseenInThread;
+	}
+
 	#[\Override]
 	#[ReturnTypeWillChange]
 	public function jsonSerialize() {
@@ -356,6 +376,7 @@ class Message extends Entity implements JsonSerializable {
 				'$junk' => ($this->getFlagJunk() === true),
 				'$notjunk' => ($this->getFlagNotjunk() === true),
 				'$mdnsent' => ($this->getFlagMdnsent() === true),
+				'hasUnseenInThread' => $this->hasUnseenInThread,
 			],
 			'tags' => $indexed,
 			'from' => $this->getFrom()->jsonSerialize(),

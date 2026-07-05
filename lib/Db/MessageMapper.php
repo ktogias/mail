@@ -1381,6 +1381,7 @@ class MessageMapper extends QBMapper {
 	 */
 	public function findRelatedData(array $messages, string $userId): array {
 		$messages = $this->findRecipients($messages);
+		$messages = $this->applyHasUnseenInThread($messages);
 		$tags = $this->tagMapper->getAllTagsForMessages($messages, $userId);
 		/** @var Message $message */
 		$messages = array_map(static function ($message) use ($tags) {
@@ -1388,6 +1389,57 @@ class MessageMapper extends QBMapper {
 			$message->setTags($messageId !== null ? ($tags[$messageId] ?? []) : []);
 			return $message;
 		}, $messages);
+		return $messages;
+	}
+
+	/**
+	 * A thread's newest message is what's shown as a single row in
+	 * threaded listings (see the m2 self-join in findIdsByQuery()), but its
+	 * own flag_seen only reflects that one message. Compute whether ANY
+	 * message in its thread is still unseen, so the frontend can show the
+	 * whole thread as unread even when its newest reply has already been
+	 * read -- the same thread-wide semantics as the "unread" filter.
+	 *
+	 * @param Message[] $messages
+	 * @return Message[]
+	 */
+	private function applyHasUnseenInThread(array $messages): array {
+		$threadRootIdsByMailbox = [];
+		foreach ($messages as $message) {
+			$threadRootId = $message->getThreadRootId();
+			if ($threadRootId !== null) {
+				$threadRootIdsByMailbox[$message->getMailboxId()][] = $threadRootId;
+			}
+		}
+
+		$unseenThreadKeys = [];
+		foreach ($threadRootIdsByMailbox as $mailboxId => $threadRootIds) {
+			$qb = $this->db->getQueryBuilder();
+			$qb->selectDistinct('thread_root_id')
+				->from($this->getTableName())
+				->where(
+					$qb->expr()->eq('mailbox_id', $qb->createNamedParameter($mailboxId, IQueryBuilder::PARAM_INT)),
+					$qb->expr()->in('thread_root_id', $qb->createNamedParameter(array_values(array_unique($threadRootIds)), IQueryBuilder::PARAM_STR_ARRAY)),
+					$qb->expr()->eq('flag_seen', $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL)),
+				);
+			$result = $qb->executeQuery();
+			while (($threadRootId = $result->fetchOne()) !== false) {
+				$unseenThreadKeys[$mailboxId . ':' . $threadRootId] = true;
+			}
+			$result->closeCursor();
+		}
+
+		foreach ($messages as $message) {
+			$threadRootId = $message->getThreadRootId();
+			if ($threadRootId === null) {
+				// Not grouped with anything (see findIdsByQuery()'s self-join
+				// for why), so the thread's status is just its own.
+				$message->setHasUnseenInThread($message->getFlagSeen() !== true);
+			} else {
+				$message->setHasUnseenInThread(isset($unseenThreadKeys[$message->getMailboxId() . ':' . $threadRootId]));
+			}
+		}
+
 		return $messages;
 	}
 
