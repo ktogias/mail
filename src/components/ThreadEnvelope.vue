@@ -759,6 +759,12 @@ export default {
 		expanded(expanded) {
 			if (expanded) {
 				this.fetchMessage()
+				// Covers Thread.vue correcting its initial guess at which
+				// message to auto-expand after the full thread loads (see
+				// initiallyExpandedEnvelopeId()) -- mounted() below only
+				// scrolls for the envelope that was already expanded when
+				// this component was first created.
+				this.$nextTick(() => this.handleThreadScrolling())
 			} else {
 				this.message = undefined
 				this.loading = Loading.Done

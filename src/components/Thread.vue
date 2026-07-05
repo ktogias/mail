@@ -224,8 +224,23 @@ export default {
 			}
 		},
 
+		// Which message to auto-expand (and scroll to) when the thread
+		// opens: the first (oldest) unread message, like Gmail -- not
+		// always the newest, which may well have already been read while
+		// an earlier reply in the same thread hasn't. Falls back to the
+		// clicked/newest message (threadId) once nothing in the thread is
+		// unread. Relies on this.thread's ascending date order (see the
+		// getEnvelopesByThreadRootId getter) to find the earliest one.
+		initiallyExpandedEnvelopeId() {
+			// Requires an explicit `false`, not just falsy/missing flags,
+			// so an envelope whose flags haven't loaded yet is never
+			// mistaken for unread.
+			const firstUnread = this.thread.find((envelope) => envelope.flags?.seen === false)
+			return firstUnread ? firstUnread.databaseId : this.threadId
+		},
+
 		async resetThread() {
-			this.expandedThreads = [this.threadId]
+			this.expandedThreads = [this.initiallyExpandedEnvelopeId()]
 			this.errorMessage = ''
 			this.errorTitle = ''
 			if (this.mainStore.getPreference('layout-message-view', 'threaded') === 'threaded') {
@@ -259,6 +274,16 @@ export default {
 					this.errorMessage = getRandomMessageErrorMessage()
 					this.loading = false
 					return
+				}
+
+				// resetThread()'s initial guess only had whatever was
+				// already cached locally to go on -- now that the full
+				// thread is loaded, correct it if that guess turns out to
+				// have been wrong (e.g. an unread message elsewhere in the
+				// thread wasn't cached yet).
+				const target = this.initiallyExpandedEnvelopeId()
+				if (!this.expandedThreads.includes(target)) {
+					this.expandedThreads = [target]
 				}
 
 				this.loading = false

@@ -49,6 +49,20 @@ describe('Thread', () => {
 					mailboxId: 23,
 				}
 			}
+			if (id === 4003) {
+				return {
+					accountId: 300,
+					threadRootId: 'thread-unread',
+					mailboxId: 30,
+				}
+			}
+			if (id === 5003) {
+				return {
+					accountId: 300,
+					threadRootId: 'thread-allread',
+					mailboxId: 30,
+				}
+			}
 			return undefined
 		})
 
@@ -133,6 +147,77 @@ describe('Thread', () => {
 					},
 				]
 			}
+			if (threadRootId === 'thread-unread') {
+				// Oldest-to-newest, matching the real getter's dateInt sort.
+				// The oldest (4001) is unread; the clicked/newest (4003,
+				// the route's threadId) has already been read.
+				return [
+					{
+						accountId: 300,
+						threadRootId: 'thread-unread',
+						mailboxId: 30,
+						databaseId: 4001,
+						from: [],
+						to: [],
+						cc: [],
+						flags: { seen: false },
+					},
+					{
+						accountId: 300,
+						threadRootId: 'thread-unread',
+						mailboxId: 30,
+						databaseId: 4002,
+						from: [],
+						to: [],
+						cc: [],
+						flags: { seen: true },
+					},
+					{
+						accountId: 300,
+						threadRootId: 'thread-unread',
+						mailboxId: 30,
+						databaseId: 4003,
+						from: [],
+						to: [],
+						cc: [],
+						flags: { seen: true },
+					},
+				]
+			}
+			if (threadRootId === 'thread-allread') {
+				return [
+					{
+						accountId: 300,
+						threadRootId: 'thread-allread',
+						mailboxId: 30,
+						databaseId: 5001,
+						from: [],
+						to: [],
+						cc: [],
+						flags: { seen: true },
+					},
+					{
+						accountId: 300,
+						threadRootId: 'thread-allread',
+						mailboxId: 30,
+						databaseId: 5002,
+						from: [],
+						to: [],
+						cc: [],
+						flags: { seen: true },
+					},
+					{
+						accountId: 300,
+						threadRootId: 'thread-allread',
+						mailboxId: 30,
+						databaseId: 5003,
+						from: [],
+						to: [],
+						cc: [],
+						flags: { seen: true },
+					},
+				]
+			}
 			return []
 		})
 
@@ -167,6 +252,14 @@ describe('Thread', () => {
 					name: 'Junk',
 					accountId: 200,
 					specialRole: 'junk',
+				}
+			}
+			if (id === 30) {
+				return {
+					databaseId: 30,
+					name: 'INBOX',
+					accountId: 300,
+					specialRole: 'inbox',
 				}
 			}
 			return undefined
@@ -208,6 +301,15 @@ describe('Thread', () => {
 						databaseId: 23,
 						name: 'Junk',
 						specialRole: 'junk',
+					},
+				]
+			}
+			if (accountId === 300) {
+				return [
+					{
+						databaseId: 30,
+						name: 'INBOX',
+						specialRole: 'inbox',
 					},
 				]
 			}
@@ -297,5 +399,43 @@ describe('Thread', () => {
 		const envelopes = view.vm.thread
 		expect(envelopes).toHaveLength(1)
 		expect(envelopes[0].mailboxId).toBe(23)
+	})
+
+	describe('initiallyExpandedEnvelopeId', () => {
+		it('opens on the first (oldest) unread message instead of always the clicked/newest one', () => {
+			const view = shallowMount(Thread, {
+				mocks: {
+					$route: {
+						params: {
+							threadId: 4003,
+						},
+					},
+				},
+				store,
+				localVue,
+			})
+
+			expect(view.vm.initiallyExpandedEnvelopeId()).toBe(4001)
+			// resetThread() runs on created(), so this should already hold
+			// without calling the method directly.
+			expect(view.vm.expandedThreads).toEqual([4001])
+		})
+
+		it('falls back to the clicked/newest message when nothing in the thread is unread', () => {
+			const view = shallowMount(Thread, {
+				mocks: {
+					$route: {
+						params: {
+							threadId: 5003,
+						},
+					},
+				},
+				store,
+				localVue,
+			})
+
+			expect(view.vm.initiallyExpandedEnvelopeId()).toBe(5003)
+			expect(view.vm.expandedThreads).toEqual([5003])
+		})
 	})
 })
