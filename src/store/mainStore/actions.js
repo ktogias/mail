@@ -1116,11 +1116,33 @@ export default function mainStoreActions() {
 					flag: 'seen',
 					value: newState,
 				})
+				if (newState === false) {
+					// Marking unread definitely means this thread has an
+					// unseen message now (this one) -- no need to wait for
+					// the server to know that much.
+					this.flagEnvelopeMutation({
+						envelope,
+						flag: 'hasUnseenInThread',
+						value: true,
+					})
+				}
 
 				try {
-					await setEnvelopeFlags(envelope.databaseId, {
+					const response = await setEnvelopeFlags(envelope.databaseId, {
 						seen: newState,
 					})
+					// Marking read: only the server knows whether some OTHER
+					// message in this thread is still unseen, so correct the
+					// optimistic value with the authoritative one once it's
+					// back, instead of leaving it stale until the next full
+					// listing fetch.
+					if (response?.hasUnseenInThread !== undefined) {
+						this.flagEnvelopeMutation({
+							envelope,
+							flag: 'hasUnseenInThread',
+							value: response.hasUnseenInThread,
+						})
+					}
 				} catch (error) {
 					logger.error('could not toggle message seen state', { error })
 

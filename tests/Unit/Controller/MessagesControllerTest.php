@@ -682,7 +682,7 @@ class MessagesControllerTest extends TestCase {
 		$mailbox = new \OCA\Mail\Db\Mailbox();
 		$mailbox->setName('INBOX');
 		$mailbox->setAccountId($accountId);
-		$this->mailManager->expects($this->once())
+		$this->mailManager->expects($this->exactly(2))
 			->method('getMessage')
 			->with($this->userId, $id)
 			->willReturn($message);
@@ -701,13 +701,58 @@ class MessagesControllerTest extends TestCase {
 			->method('logDelegatedAction')
 			->with($this->userId, $this->userId, "$this->userId updated flags on message <$id> with [seen=false] on behalf of $this->userId");
 
-		$expected = new JSONResponse();
+		// setFlags() re-fetches the message after persisting the flag
+		// change, so its response can tell the frontend whether the
+		// message's thread still has any other unseen message -- it can't
+		// know that from the optimistic client-side update alone.
+		$expected = new JSONResponse(['hasUnseenInThread' => false]);
 		$response = $this->controller->setFlags(
 			$id,
 			$flags
 		);
 
 		$this->assertEquals($expected, $response);
+	}
+
+	public function testSetFlagsSeenReturnsHasUnseenInThreadFromTheRefetchedMessage() {
+		$accountId = 17;
+		$mailboxId = 987;
+		$id = 123;
+		$flags = [
+			'seen' => true,
+		];
+		$beforeChange = new \OCA\Mail\Db\Message();
+		$beforeChange->setUid(444);
+		$beforeChange->setMailboxId($mailboxId);
+		$mailbox = new \OCA\Mail\Db\Mailbox();
+		$mailbox->setName('INBOX');
+		$mailbox->setAccountId($accountId);
+
+		// Marking this message read doesn't mean the rest of its thread is
+		// -- the re-fetch after the change is what tells us that, not the
+		// message object we already had before the change.
+		$afterChange = new \OCA\Mail\Db\Message();
+		$afterChange->setUid(444);
+		$afterChange->setMailboxId($mailboxId);
+		$afterChange->setHasUnseenInThread(true);
+
+		$this->mailManager->expects($this->exactly(2))
+			->method('getMessage')
+			->with($this->userId, $id)
+			->willReturnOnConsecutiveCalls($beforeChange, $afterChange);
+		$this->mailManager->method('getMailbox')
+			->with($this->userId, $mailboxId)
+			->willReturn($mailbox);
+		$this->accountService->method('find')
+			->with($this->equalTo($this->userId), $this->equalTo($accountId))
+			->willReturn($this->account);
+		$this->mailManager->expects($this->once())
+			->method('flagMessage')
+			->with($this->account, 'INBOX', 444, 'seen', true);
+
+		$response = $this->controller->setFlags($id, $flags);
+
+		$this->assertEquals(new JSONResponse(['hasUnseenInThread' => true]), $response);
 	}
 
 	public function testSetTagFailing() {
@@ -931,7 +976,7 @@ class MessagesControllerTest extends TestCase {
 		$mailbox = new \OCA\Mail\Db\Mailbox();
 		$mailbox->setName('INBOX');
 		$mailbox->setAccountId($accountId);
-		$this->mailManager->expects($this->once())
+		$this->mailManager->expects($this->exactly(2))
 			->method('getMessage')
 			->with($this->userId, $id)
 			->willReturn($message);
@@ -950,7 +995,7 @@ class MessagesControllerTest extends TestCase {
 			->method('logDelegatedAction')
 			->with($this->userId, $this->userId, "$this->userId updated flags on message <$id> with [flagged=true] on behalf of $this->userId");
 
-		$expected = new JSONResponse();
+		$expected = new JSONResponse(['hasUnseenInThread' => false]);
 		$response = $this->controller->setFlags(
 			$id,
 			$flags

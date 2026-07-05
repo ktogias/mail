@@ -740,6 +740,70 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	describe('toggleEnvelopeSeen thread-wide unread correction', () => {
+		it('marks the thread unread immediately when marking a message unread, without waiting for the server', async () => {
+			const envelope = {
+				databaseId: 42,
+				mailboxId: 11,
+				flags: { seen: true, hasUnseenInThread: false },
+			}
+			// Resolves later, so the assertion below only holds if the
+			// optimistic update happened before awaiting the server call.
+			let resolveRequest
+			MessageService.setEnvelopeFlags.mockReturnValue(new Promise((resolve) => {
+				resolveRequest = resolve
+			}))
+
+			const pending = store.toggleEnvelopeSeen({ envelope, seen: false })
+
+			expect(envelope.flags.hasUnseenInThread).toBe(true)
+
+			resolveRequest({ hasUnseenInThread: true })
+			await pending
+		})
+
+		it('corrects hasUnseenInThread with the server-authoritative value after marking read', async () => {
+			const envelope = {
+				databaseId: 42,
+				mailboxId: 11,
+				flags: { seen: false, hasUnseenInThread: true },
+			}
+			// The server is authoritative: some other message in the thread
+			// is still unseen even though this one was just marked read.
+			MessageService.setEnvelopeFlags.mockResolvedValue({ hasUnseenInThread: true })
+
+			await store.toggleEnvelopeSeen({ envelope, seen: true })
+
+			expect(envelope.flags.hasUnseenInThread).toBe(true)
+		})
+
+		it('clears hasUnseenInThread once the server confirms no other message in the thread is unseen', async () => {
+			const envelope = {
+				databaseId: 42,
+				mailboxId: 11,
+				flags: { seen: false, hasUnseenInThread: true },
+			}
+			MessageService.setEnvelopeFlags.mockResolvedValue({ hasUnseenInThread: false })
+
+			await store.toggleEnvelopeSeen({ envelope, seen: true })
+
+			expect(envelope.flags.hasUnseenInThread).toBe(false)
+		})
+
+		it('leaves hasUnseenInThread untouched if the server response omits it', async () => {
+			const envelope = {
+				databaseId: 42,
+				mailboxId: 11,
+				flags: { seen: false, hasUnseenInThread: true },
+			}
+			MessageService.setEnvelopeFlags.mockResolvedValue({})
+
+			await store.toggleEnvelopeSeen({ envelope, seen: true })
+
+			expect(envelope.flags.hasUnseenInThread).toBe(true)
+		})
+	})
+
 	describe('startComposerSession reply-to resolution', () => {
 		const account = {
 			id: 1,

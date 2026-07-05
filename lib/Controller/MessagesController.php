@@ -879,7 +879,17 @@ class MessagesController extends Controller {
 		}
 		$flagsSummary = implode(', ', $flagChanges);
 		$this->delegationService->logDelegatedAction($this->userId, $effectiveUserId, "$this->userId updated flags on message <$id> with [$flagsSummary] on behalf of $effectiveUserId");
-		return new JSONResponse();
+
+		// Re-fetch: the frontend optimistically flips this message's own
+		// flags before this request even completes, but it has no way to
+		// know whether OTHER messages in the same thread are still unseen
+		// (see Message::hasUnseenInThread) -- only the server can say for
+		// sure, so give it the authoritative value in the same round trip
+		// instead of leaving it stale until the next full listing fetch.
+		$updated = $this->mailManager->getMessage($effectiveUserId, $id);
+		return new JSONResponse([
+			'hasUnseenInThread' => $updated->getHasUnseenInThread(),
+		]);
 	}
 
 	/**

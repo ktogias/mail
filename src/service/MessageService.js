@@ -125,15 +125,17 @@ export async function clearCache(accountId, id) {
  *
  * @param {number} id
  * @param {object} flags
+ * @return {Promise<{hasUnseenInThread: boolean}>}
  */
 export async function setEnvelopeFlags(id, flags) {
 	const url = generateUrl('/apps/mail/api/messages/{id}/flags', {
 		id,
 	})
 
-	return await axios.put(url, {
+	const { data } = await axios.put(url, {
 		flags,
 	})
+	return data
 }
 
 export async function createEnvelopeTag(displayName, color) {
