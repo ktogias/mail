@@ -20,6 +20,7 @@ use OCA\Mail\Db\MailboxMapper;
 use OCA\Mail\Db\MessageMapper as DatabaseMessageMapper;
 use OCA\Mail\Db\TagMapper;
 use OCA\Mail\Events\SynchronizationEvent;
+use OCA\Mail\Exception\MailboxLockedException;
 use OCA\Mail\IMAP\IMAPClientFactory;
 use OCA\Mail\IMAP\MessageMapper as ImapMessageMapper;
 use OCA\Mail\IMAP\Sync\Synchronizer;
@@ -109,5 +110,77 @@ class ImapToDbSynchronizerTest extends TestCase {
 			$mailbox,
 			$this->createStub(LoggerInterface::class),
 		);
+	}
+
+	/**
+	 * A mailbox already being synced by another process (a frequently
+	 * contended INBOX, say) used to abort syncAccount()'s whole loop --
+	 * every mailbox after it in iteration order never got a chance to sync
+	 * at all, on any run, for as long as that one mailbox kept getting
+	 * locked by something else. Confirmed live: three mailboxes on one
+	 * account never finished their initial cache sync for this exact
+	 * reason.
+	 */
+	public function testSyncAccountSkipsALockedMailboxAndContinuesWithTheRest(): void {
+		$mailAccount = new MailAccount();
+		$mailAccount->setId(1);
+		$mailAccount->setUserId('user');
+		$account = new Account($mailAccount);
+
+		$lockedMailbox = new Mailbox();
+		$lockedMailbox->setId(100);
+		$lockedMailbox->setName('Locked');
+		$lockedMailbox->setAccountId(1);
+		$lockedMailbox->setSyncInBackground(true);
+
+		$okMailbox = new Mailbox();
+		$okMailbox->setId(200);
+		$okMailbox->setName('OK');
+		$okMailbox->setAccountId(1);
+		$okMailbox->setSyncInBackground(true);
+
+		$this->mailboxMapper->method('findAll')
+			->with($account)
+			->willReturn([$lockedMailbox, $okMailbox]);
+		$this->clientFactory->method('getClient')
+			->with($account)
+			->willReturn($this->createStub(Horde_Imap_Client_Socket::class));
+
+		/** @var ImapToDbSynchronizer&MockObject $synchronizer */
+		$synchronizer = $this->getMockBuilder(ImapToDbSynchronizer::class)
+			->setConstructorArgs([
+				$this->dbMapper,
+				$this->clientFactory,
+				$this->imapMapper,
+				$this->mailboxMapper,
+				$this->createStub(DatabaseMessageMapper::class),
+				$this->createStub(Synchronizer::class),
+				$this->dispatcher,
+				$this->performanceLogger,
+				$this->createStub(LoggerInterface::class),
+				$this->createStub(IMailManager::class),
+				$this->createStub(TagMapper::class),
+				$this->createStub(NewMessagesClassifier::class),
+			])
+			->onlyMethods(['sync'])
+			->getMock();
+
+		$synchronizer->expects($this->exactly(2))
+			->method('sync')
+			->willReturnCallback(function ($_account, $_client, Mailbox $mailbox) use ($lockedMailbox) {
+				if ($mailbox->getId() === $lockedMailbox->getId()) {
+					throw MailboxLockedException::from($mailbox);
+				}
+				return true;
+			});
+
+		// The other mailbox's own sync still ran (proven by $rebuildThreads
+		// making it true, from that call's own return value) and
+		// syncAccount() itself didn't throw or abort early.
+		$this->dispatcher->expects($this->once())
+			->method('dispatchTyped')
+			->with($this->callback(fn (SynchronizationEvent $event) => $event->isRebuildThreads()));
+
+		$synchronizer->syncAccount($account, $this->createStub(LoggerInterface::class));
 	}
 }

@@ -96,17 +96,30 @@ class ImapToDbSynchronizer {
 				continue;
 			}
 			$logger->debug("Syncing {$mailbox->getId()}");
-			if ($this->sync(
-				$account,
-				$client,
-				$mailbox,
-				$logger,
-				$criteria,
-				null,
-				$force,
-				true
-			)) {
-				$rebuildThreads = true;
+			try {
+				if ($this->sync(
+					$account,
+					$client,
+					$mailbox,
+					$logger,
+					$criteria,
+					null,
+					$force,
+					true
+				)) {
+					$rebuildThreads = true;
+				}
+			} catch (MailboxLockedException $e) {
+				// Another process is already syncing this one mailbox right
+				// now -- don't let that abort the whole account's sync pass.
+				// Confirmed live: an account with a frequently-contended
+				// mailbox early in iteration order (e.g. a large, actively
+				// polled INBOX) could starve every mailbox after it forever,
+				// since this used to propagate uncaught and cut the loop
+				// short on every single run.
+				$logger->debug("Mailbox {$mailbox->getId()} is locked by another process, skipping it for this sync pass", [
+					'exception' => $e,
+				]);
 			}
 		}
 
