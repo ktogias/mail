@@ -260,14 +260,17 @@ class ImapToDbSynchronizerTest extends TestCase {
 		);
 	}
 
-	public function testPartialSyncRunsNormallyWhenStatusDiffers(): void {
+	public function testPartialSyncPrunesOnlyTheProvablyIdlePhases(): void {
 		$mailAccount = new MailAccount();
 		$mailAccount->setId(1);
 		$mailAccount->setUserId('user');
 		$account = new Account($mailAccount);
 		$mailbox = $this->buildPartialSyncMailbox();
 
-		// UIDNEXT moved from 100 to 101: something is new.
+		// UIDNEXT moved from 100 to 101: something is new, so the new
+		// phase must run, and the vanished phase (whose count check can't
+		// exclude a simultaneous expunge) must run too -- but the flags
+		// phase, whose HIGHESTMODSEQ still matches, is pruned.
 		$client = $this->buildStatusClient([
 			'uidvalidity' => 200,
 			'uidnext' => 101,
@@ -280,7 +283,7 @@ class ImapToDbSynchronizerTest extends TestCase {
 
 		$response = new \OCA\Mail\IMAP\Sync\Response([], [], []);
 		$imapSync = $this->createMock(Synchronizer::class);
-		$imapSync->expects($this->exactly(3))
+		$imapSync->expects($this->exactly(2))
 			->method('sync')
 			->willReturn($response);
 		$this->mailboxMapper->expects($this->once())->method('update');
@@ -293,14 +296,15 @@ class ImapToDbSynchronizerTest extends TestCase {
 		);
 	}
 
-	public function testPartialSyncNeverSkippedWithoutAModseqCapableToken(): void {
+	public function testPartialSyncKeepsTheFlagsPhaseWithoutAModseqCapableToken(): void {
 		$mailAccount = new MailAccount();
 		$mailAccount->setId(1);
 		$mailAccount->setUserId('user');
 		$account = new Account($mailAccount);
 		$mailbox = $this->buildPartialSyncMailbox();
-		// Token without an H part: server/token pair can't prove flags are
-		// unchanged, the fast path must not engage.
+		// Token without an H part: the flags phase can't be proven idle and
+		// must run; new (UIDNEXT match) and vanished (count + UIDNEXT match)
+		// are still safely pruned.
 		$token = base64_encode('U100,V200');
 		$mailbox->setSyncNewToken($token);
 		$mailbox->setSyncChangedToken($token);
@@ -318,7 +322,7 @@ class ImapToDbSynchronizerTest extends TestCase {
 
 		$response = new \OCA\Mail\IMAP\Sync\Response([], [], []);
 		$imapSync = $this->createMock(Synchronizer::class);
-		$imapSync->expects($this->exactly(3))
+		$imapSync->expects($this->exactly(1))
 			->method('sync')
 			->willReturn($response);
 
