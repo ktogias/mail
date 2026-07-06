@@ -51,7 +51,7 @@ export default {
 			})
 		}
 
-		this.sync()
+		this.startWatchedMailboxSync()
 		await this.mainStore.fetchCurrentUserPrincipal()
 		await this.mainStore.loadCollections()
 		this.mainStore.hasCurrentUserPrincipalAndCollectionsMutation(true)
@@ -62,26 +62,35 @@ export default {
 			window.location.reload()
 		},
 
-		sync() {
-			setTimeout(async () => {
-				try {
-					await this.mainStore.syncInboxes()
-
-					logger.debug("Inboxes sync'ed in background")
-				} catch (error) {
-					matchError(error, {
-						[MailboxLockedError.name](error) {
-							logger.info('Background sync failed because a folder is locked', { error })
-						},
-						default(error) {
-							logger.error('Background sync failed: ' + error.message, { error })
-						},
+		startWatchedMailboxSync() {
+			// A plain interval, not a recursive setTimeout-after-completion:
+			// the previous implementation only scheduled its next run once
+			// the current one had fully resolved, which meant one genuinely
+			// slow/locked mailbox (e.g. a large Gmail INBOX mid a long full
+			// sync) delayed re-syncing every OTHER watched mailbox across
+			// every account for as long as it stayed locked, even though
+			// their own individual sync calls settle in well under a second.
+			// setInterval fires on a fixed cadence regardless of whether the
+			// previous tick's promise has settled yet, so a stuck mailbox
+			// can no longer hold up anyone else's cadence -- per-mailbox
+			// isolation is handled inside syncWatchedMailboxes() itself
+			// (see isMailboxSyncRetryPending()).
+			this.watchedMailboxSyncInterval = setInterval(() => {
+				this.mainStore.syncWatchedMailboxes()
+					.then(() => {
+						logger.debug("Watched mailboxes sync'ed in background")
 					})
-				} finally {
-					// Start over
-					this.sync()
-				}
-			}, 30 * 1000)
+					.catch((error) => {
+						matchError(error, {
+							[MailboxLockedError.name](error) {
+								logger.info('Background sync failed because a folder is locked', { error })
+							},
+							default(error) {
+								logger.error('Background sync failed: ' + error.message, { error })
+							},
+						})
+					})
+			}, 10 * 1000)
 		},
 	},
 }
