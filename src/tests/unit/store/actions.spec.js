@@ -608,7 +608,15 @@ describe('Vuex store actions', () => {
 			}
 
 			store.fetchEnvelopes = vi.fn(async () => {})
-			store.syncEnvelopes = vi.fn(async () => [{ id: 123 }, { id: 321 }])
+			store.syncEnvelopes = vi.fn(async ({ mailboxId }) => {
+				if (mailboxId === 11) {
+					return [{ id: 123, flags: { seen: false } }]
+				}
+				if (mailboxId === 21) {
+					return [{ id: 321, flags: { seen: true } }]
+				}
+				return []
+			})
 
 			await store.syncWatchedMailboxes()
 
@@ -628,8 +636,51 @@ describe('Vuex store actions', () => {
 				mailboxId: UNIFIED_INBOX_ID,
 				query: 'is:pi-other',
 			})
-			// Here we expect notifications
-			expect(NotificationService.showNewMessagesNotification).toHaveBeenCalled()
+			// Only the genuinely unseen message is news -- the one that came
+			// back already marked seen (read elsewhere before this sync) must
+			// not be part of the notification.
+			expect(NotificationService.showNewMessagesNotification).toHaveBeenCalledTimes(1)
+			expect(NotificationService.showNewMessagesNotification).toHaveBeenCalledWith([
+				{ id: 123, flags: { seen: false } },
+			])
+		})
+
+		it('does not notify at all when every newly synced message is already read', async () => {
+			const account13 = {
+				id: 13,
+			}
+
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: {
+					name: 'INBOX',
+					databaseId: 11,
+					specialRole: 'inbox',
+				},
+			})
+
+			const envelopeListId = Symbol()
+			normalizedEnvelopeListId.mockReturnValue(envelopeListId)
+			for (const mailbox of Object.values(store.mailboxes)) {
+				mailbox.envelopeLists[envelopeListId] = {}
+			}
+
+			store.fetchEnvelopes = vi.fn(async () => {})
+			store.syncEnvelopes = vi.fn(async ({ mailboxId }) => {
+				if (mailboxId === 11) {
+					return [{ id: 123, flags: { seen: true } }]
+				}
+				return []
+			})
+
+			await store.syncWatchedMailboxes()
+
+			// New messages did arrive, so the priority inbox is still refreshed
+			// (inbox + the two priority queries) ...
+			expect(store.syncEnvelopes).toHaveBeenCalledTimes(3)
+			// ... but nothing is unseen, so there is nothing to notify about.
+			expect(NotificationService.showNewMessagesNotification).not.toHaveBeenCalled()
 		})
 
 		it('syncs every already-loaded query bucket of a mailbox, not just the default', async () => {

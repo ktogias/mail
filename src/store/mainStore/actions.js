@@ -1275,7 +1275,17 @@ export default function mainStoreActions() {
 						})
 					}
 				} finally {
-					showNewMessagesNotification(newMessages)
+					// A message can reach this tab's sync already read: marked seen
+					// in another window, on the phone, or via IMAP before a delayed
+					// sync (e.g. after a long mailbox lock) finally caught up. Only
+					// explicitly unseen messages are news to the user; anything else
+					// would notify about mail they've already dealt with, minutes
+					// late. Requires flags.seen === false (not merely falsy), same
+					// as initiallyExpandedEnvelopeId() in Thread.vue.
+					const unseenMessages = newMessages.filter((message) => message.flags?.seen === false)
+					if (unseenMessages.length > 0) {
+						showNewMessagesNotification(unseenMessages)
+					}
 				}
 			})
 		},
