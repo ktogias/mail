@@ -1279,6 +1279,37 @@ export default function mainStoreActions() {
 										query,
 									}))
 								}
+
+								// Notify HERE, per mailbox, the moment its own sync
+								// resolved -- not after the global Promise.all below.
+								// The desktop notification used to wait for every
+								// other watched mailbox's sync (plus the priority
+								// inbox refresh) to settle first, so one slow/locked
+								// mailbox mid its own lock-retry chain held every
+								// notification hostage for seconds to minutes after
+								// the receiving mailbox's badge had already updated.
+								//
+								// Only explicitly unseen messages are news: a message
+								// can reach this tab's sync already read (marked seen
+								// in another window, on the phone, or via IMAP before
+								// a delayed sync caught up). flags.seen === false, not
+								// merely falsy -- same as initiallyExpandedEnvelopeId()
+								// in Thread.vue. Deduped by databaseId since several
+								// query buckets of the same mailbox can each report
+								// the same new message.
+								const notifiedIds = new Set()
+								const unseenMessages = flatMapDeep(identity, newMessagesPerQuery)
+									.filter((message) => {
+										if (message === undefined || message.flags?.seen !== false || notifiedIds.has(message.databaseId)) {
+											return false
+										}
+										notifiedIds.add(message.databaseId)
+										return true
+									})
+								if (unseenMessages.length > 0) {
+									showNewMessagesNotification(unseenMessages)
+								}
+
 								return newMessagesPerQuery
 							} finally {
 								watchedMailboxSyncsInFlight.delete(mailbox.databaseId)
@@ -1290,37 +1321,23 @@ export default function mainStoreActions() {
 					return
 				}
 
-				try {
-					// Make sure the priority inbox is updated as well
-					logger.info('updating priority inbox')
-					for (const query of [priorityImportantQuery, priorityOtherQuery]) {
-						logger.info("sync'ing priority inbox section", { query })
-						const mailbox = this.getMailbox(UNIFIED_INBOX_ID)
-						const list = mailbox.envelopeLists[normalizedEnvelopeListId(query)]
-						if (list === undefined) {
-							await this.fetchEnvelopes({
-								mailboxId: UNIFIED_INBOX_ID,
-								query,
-							})
-						}
-
-						await this.syncEnvelopes({
+				// Make sure the priority inbox is updated as well
+				logger.info('updating priority inbox')
+				for (const query of [priorityImportantQuery, priorityOtherQuery]) {
+					logger.info("sync'ing priority inbox section", { query })
+					const mailbox = this.getMailbox(UNIFIED_INBOX_ID)
+					const list = mailbox.envelopeLists[normalizedEnvelopeListId(query)]
+					if (list === undefined) {
+						await this.fetchEnvelopes({
 							mailboxId: UNIFIED_INBOX_ID,
 							query,
 						})
 					}
-				} finally {
-					// A message can reach this tab's sync already read: marked seen
-					// in another window, on the phone, or via IMAP before a delayed
-					// sync (e.g. after a long mailbox lock) finally caught up. Only
-					// explicitly unseen messages are news to the user; anything else
-					// would notify about mail they've already dealt with, minutes
-					// late. Requires flags.seen === false (not merely falsy), same
-					// as initiallyExpandedEnvelopeId() in Thread.vue.
-					const unseenMessages = newMessages.filter((message) => message.flags?.seen === false)
-					if (unseenMessages.length > 0) {
-						showNewMessagesNotification(unseenMessages)
-					}
+
+					await this.syncEnvelopes({
+						mailboxId: UNIFIED_INBOX_ID,
+						query,
+					})
 				}
 			})
 		},

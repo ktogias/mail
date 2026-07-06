@@ -750,6 +750,113 @@ describe('Vuex store actions', () => {
 			expect(NotificationService.showNewMessagesNotification).not.toHaveBeenCalled()
 		})
 
+		it('notifies for a mailbox the moment its own sync resolves, not after every other mailbox', async () => {
+			// The notification used to fire only after the global Promise.all
+			// over every watched mailbox (plus the priority-inbox refresh)
+			// settled -- so one slow/locked mailbox (e.g. the big Gmail INBOX
+			// mid a lock-retry chain) delayed the desktop notification for
+			// mail that had already arrived, synced, and updated its badge in
+			// a completely different account.
+			const account13 = {
+				id: 13,
+			}
+			const account26 = {
+				id: 26,
+			}
+
+			store.addAccountMutation(account13)
+			store.addAccountMutation(account26)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: {
+					name: 'INBOX',
+					databaseId: 11,
+					specialRole: 'inbox',
+				},
+			})
+			store.addMailboxMutation({
+				account: account26,
+				mailbox: {
+					name: 'INBOX',
+					databaseId: 21,
+					specialRole: 'inbox',
+				},
+			})
+
+			const envelopeListId = Symbol()
+			normalizedEnvelopeListId.mockReturnValue(envelopeListId)
+			for (const mailbox of Object.values(store.mailboxes)) {
+				mailbox.envelopeLists[envelopeListId] = {}
+			}
+
+			store.fetchEnvelopes = vi.fn(async () => {})
+			store.syncEnvelopes = vi.fn(async ({ mailboxId }) => {
+				if (mailboxId === 11) {
+					return [{ id: 123, flags: { seen: false } }]
+				}
+				// Mailbox 21 is stuck: its sync never resolves during this test.
+				return new Promise(() => {})
+			})
+
+			const tickPromise = store.syncWatchedMailboxes()
+
+			// Give mailbox 11's own (immediately resolving) sync chain a chance
+			// to run -- the overall tick promise is still pending on mailbox 21.
+			await Promise.resolve()
+			await Promise.resolve()
+			await Promise.resolve()
+
+			expect(NotificationService.showNewMessagesNotification).toHaveBeenCalledTimes(1)
+			expect(NotificationService.showNewMessagesNotification).toHaveBeenCalledWith([
+				{ id: 123, flags: { seen: false } },
+			])
+
+			// Sanity: the tick as a whole really is still unresolved.
+			let settled = false
+			tickPromise.then(() => {
+				settled = true
+			})
+			await Promise.resolve()
+			expect(settled).toBe(false)
+		})
+
+		it('notifies a message only once even when several query buckets of the mailbox report it', async () => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+
+			const account13 = {
+				id: 13,
+			}
+
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: {
+					name: 'INBOX',
+					databaseId: 11,
+					specialRole: 'inbox',
+				},
+			})
+
+			// Two loaded buckets (e.g. '' and 'not:starred') -- both syncs
+			// report the same new message relative to their own sync tokens.
+			store.mailboxes[11].envelopeLists.A = []
+			store.mailboxes[11].envelopeLists.B = []
+
+			const newMessage = { databaseId: 777, flags: { seen: false } }
+			store.fetchEnvelopes = vi.fn(async () => {})
+			store.syncEnvelopes = vi.fn(async ({ mailboxId }) => {
+				if (mailboxId === 11) {
+					return [newMessage]
+				}
+				return []
+			})
+
+			await store.syncWatchedMailboxes()
+
+			expect(NotificationService.showNewMessagesNotification).toHaveBeenCalledTimes(1)
+			expect(NotificationService.showNewMessagesNotification).toHaveBeenCalledWith([newMessage])
+		})
+
 		it('syncs every already-loaded query bucket of a mailbox, not just the default', async () => {
 			// Reproduces a real bug: when "sort favorites separately" is on, the
 			// visible list reads from envelopeLists['not:starred'], but syncWatchedMailboxes()
