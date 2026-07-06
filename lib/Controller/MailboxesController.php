@@ -50,8 +50,23 @@ class MailboxesController extends Controller {
 	 * of the others. Sized generously enough for one well-behaved client's
 	 * own exponential-backoff retries across a full lock lifetime, while
 	 * still meaningfully capping many uncoordinated ones.
+	 *
+	 * Raised from 20 to 100: this budget is shared across every query
+	 * bucket loaded for a mailbox (keyed by mailbox id only, not query --
+	 * see the identifier below), and the frontend's watched-mailbox poller
+	 * now ticks every ~10-15s per mailbox, not every 30-60s. Even a single
+	 * loaded bucket alone means roughly 24 requests per SYNC_RATE_PERIOD
+	 * (300s) just from steady, healthy polling -- above the old limit of
+	 * 20 before accounting for a second bucket (e.g. "sort favorites
+	 * separately"), manual actions, or the priority-inbox tail sync.
+	 * Confirmed live: a single, healthy browser tab with no other client
+	 * involved was hitting this limit routinely under completely normal
+	 * operation, not just during genuine contention. 100 comfortably covers
+	 * a few buckets at the fastest edge of the poller's jitter range plus
+	 * headroom for everything else sharing the same budget, while still
+	 * bounding a truly runaway client.
 	 */
-	private const SYNC_RATE_LIMIT = 20;
+	private const SYNC_RATE_LIMIT = 100;
 	private const SYNC_RATE_PERIOD = Mailbox::LOCK_TIMEOUT;
 
 	/**
