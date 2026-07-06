@@ -238,6 +238,18 @@ export function isMailboxSyncRetryPending(mailboxId) {
 
 const LOCK_RETRY_BASE_MS = 1500
 const LOCK_RETRY_MAX_MS = 30 * 1000
+// A mailbox freshly locked near the start of a long sync can have nearly
+// the full Mailbox::LOCK_TIMEOUT (300s) left on its Retry-After -- honoring
+// that server hint verbatim (see below) meant a caller could go up to ~6
+// minutes between retries. That's tolerable for a one-off manual sync, but
+// syncWatchedMailboxes()'s ~10s-cadence poller explicitly needs any one
+// stuck mailbox's own backoff to stay within 1-2 minutes, since every
+// watched mailbox skips re-attempting a mailbox for as long as its retry is
+// pending (see isMailboxSyncRetryPending()). Confirmed live: mailbox 31 got
+// a fresh lock, computed an uncapped ~5-6 minute delay, and every tick
+// skipped it for that entire window -- the badge and message list for that
+// mailbox simply didn't move until the wait finally elapsed.
+const LOCK_RETRY_ABSOLUTE_MAX_MS = 90 * 1000
 
 /**
  * How long to wait before the next lock-retry attempt.
@@ -277,7 +289,7 @@ const LOCK_RETRY_MAX_MS = 30 * 1000
  */
 export function computeLockRetryDelayMs(attempt, retryAfterMs) {
 	if (retryAfterMs !== undefined) {
-		return retryAfterMs * (1 + Math.random() * 0.2)
+		return Math.min(retryAfterMs * (1 + Math.random() * 0.2), LOCK_RETRY_ABSOLUTE_MAX_MS)
 	}
 
 	const upperBound = Math.min(LOCK_RETRY_MAX_MS, LOCK_RETRY_BASE_MS * (2 ** attempt))

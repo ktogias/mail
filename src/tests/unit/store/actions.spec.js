@@ -1064,6 +1064,19 @@ describe('Vuex store actions', () => {
 			expect(computeLockRetryDelayMs(10)).toBeCloseTo(30_000, 0)
 		})
 
+		it('also caps a server-provided retryAfterMs, so a fresh long lock cannot delay a retry for minutes', () => {
+			// A mailbox locked near the start of a genuinely long sync can
+			// have nearly the full 300s Mailbox::LOCK_TIMEOUT left on its
+			// Retry-After. Confirmed live: this uncapped formula produced a
+			// ~5-6 minute wait on a real account, during which
+			// syncWatchedMailboxes()'s ~10s-cadence poller skipped that
+			// mailbox every single tick (see isMailboxSyncRetryPending()) --
+			// its badge and message list simply didn't move for minutes.
+			vi.spyOn(Math, 'random').mockReturnValue(1)
+
+			expect(computeLockRetryDelayMs(0, 290_000)).toBeCloseTo(90_000, 0)
+		})
+
 		it('never returns a negative or undefined delay at attempt 0', () => {
 			vi.spyOn(Math, 'random').mockReturnValue(0)
 
