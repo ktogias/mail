@@ -12,15 +12,18 @@ namespace OCA\Mail\Tests\Unit\IMAP\Sync;
 use ChristophWurst\Nextcloud\Testing\TestCase;
 use Horde_Imap_Client;
 use Horde_Imap_Client_Base;
+use Horde_Imap_Client_Data_Capability_Imap;
 use Horde_Imap_Client_Data_Sync;
 use Horde_Imap_Client_Ids;
 use Horde_Imap_Client_Mailbox;
+use OCA\Mail\Cache\HordeSyncTokenParser;
 use OCA\Mail\IMAP\MessageMapper;
 use OCA\Mail\IMAP\Sync\Request;
 use OCA\Mail\IMAP\Sync\Response;
 use OCA\Mail\IMAP\Sync\Synchronizer;
 use PHPUnit\Framework\MockObject\MockObject;
 use Psr\Log\LoggerInterface;
+use function base64_encode;
 use function range;
 
 class SynchronizerTest extends TestCase {
@@ -39,7 +42,7 @@ class SynchronizerTest extends TestCase {
 		$this->mapper = $this->createMock(MessageMapper::class);
 		$this->logger = $this->createMock(LoggerInterface::class);
 
-		$this->synchronizer = new Synchronizer($this->mapper);
+		$this->synchronizer = new Synchronizer($this->mapper, new HordeSyncTokenParser());
 	}
 
 	public function testSyncWithQresync(): void {
@@ -121,5 +124,88 @@ class SynchronizerTest extends TestCase {
 		);
 
 		$this->assertEquals($expected, $response);
+	}
+
+	public function testSyncFlagsViaCondstoreIsASingleUnrestrictedRoundTrip(): void {
+		// base64('U100,V200,H300'): the token carries a HIGHESTMODSEQ, and the
+		// server has CONDSTORE -- the changed set comes back from ONE
+		// unrestricted MODSEQ sync instead of one chunked command per ~10KB
+		// of known UIDs.
+		$token = base64_encode('U100,V200,H300');
+		$request = new Request('abcdef', 'inbox', $token, [8, 9, 10]);
+
+		$capability = $this->createMock(Horde_Imap_Client_Data_Capability_Imap::class);
+		$capability->method('isEnabled')->with('CONDSTORE')->willReturn(true);
+		$imapClient = $this->createMock(Horde_Imap_Client_Base::class);
+		$imapClient->method('__get')->with('capability')->willReturn($capability);
+
+		$hordeSync = $this->createMock(Horde_Imap_Client_Data_Sync::class);
+		// 999 is a changed UID we don't know about (a new message; the
+		// new-messages phase deals with it) -- it must be filtered out.
+		$hordeSync->method('__get')
+			->with('flagsuids')
+			->willReturn(new Horde_Imap_Client_Ids([8, 999]));
+		$imapClient->expects($this->once())
+			->method('sync')
+			->with(
+				$this->equalTo(new Horde_Imap_Client_Mailbox('inbox')),
+				$this->equalTo($token),
+				$this->equalTo(['criteria' => Horde_Imap_Client::SYNC_FLAGSUIDS]),
+			)
+			->willReturn($hordeSync);
+
+		$this->mapper->expects($this->exactly(2))
+			->method('findByIds')
+			->willReturnCallback(function ($client, $mailbox, $ids) {
+				// First call: new messages (empty). Second: the changed set,
+				// intersected down to the known UID 8.
+				static $call = 0;
+				$call++;
+				if ($call === 2) {
+					$this->assertEquals(new Horde_Imap_Client_Ids([8]), $ids);
+				}
+				return [];
+			});
+
+		$this->synchronizer->sync(
+			$imapClient,
+			$request,
+			'user',
+			false,
+			$this->logger,
+			Horde_Imap_Client::SYNC_FLAGSUIDS,
+		);
+	}
+
+	public function testSyncFlagsWithoutCondstoreStaysChunkedAndRestricted(): void {
+		$token = base64_encode('U100,V200,H300');
+		$request = new Request('abcdef', 'inbox', $token, [8, 9, 10]);
+
+		$capability = $this->createMock(Horde_Imap_Client_Data_Capability_Imap::class);
+		$capability->method('isEnabled')->with('CONDSTORE')->willReturn(false);
+		$imapClient = $this->createMock(Horde_Imap_Client_Base::class);
+		$imapClient->method('__get')->with('capability')->willReturn($capability);
+
+		$hordeSync = $this->createMock(Horde_Imap_Client_Data_Sync::class);
+		$hordeSync->method('__get')
+			->with('flagsuids')
+			->willReturn(new Horde_Imap_Client_Ids([]));
+		$imapClient->expects($this->once())
+			->method('sync')
+			->with(
+				$this->equalTo(new Horde_Imap_Client_Mailbox('inbox')),
+				$this->equalTo($token),
+				$this->callback(fn (array $opts) => isset($opts['ids'])),
+			)
+			->willReturn($hordeSync);
+
+		$this->synchronizer->sync(
+			$imapClient,
+			$request,
+			'user',
+			false,
+			$this->logger,
+			Horde_Imap_Client::SYNC_FLAGSUIDS,
+		);
 	}
 }

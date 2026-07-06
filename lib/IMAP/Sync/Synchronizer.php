@@ -15,11 +15,15 @@ use Horde_Imap_Client_Exception;
 use Horde_Imap_Client_Exception_Sync;
 use Horde_Imap_Client_Ids;
 use Horde_Imap_Client_Mailbox;
+use OCA\Mail\Cache\HordeSyncTokenParser;
 use OCA\Mail\Exception\MailboxDoesNotSupportModSequencesException;
 use OCA\Mail\Exception\UidValidityChangedException;
 use OCA\Mail\IMAP\MessageMapper;
 use Psr\Log\LoggerInterface;
+use function array_intersect;
+use function array_map;
 use function array_merge;
+use function array_values;
 use function OCA\Mail\chunk_uid_sequence;
 
 class Synchronizer {
@@ -37,6 +41,7 @@ class Synchronizer {
 
 	public function __construct(
 		private MessageMapper $messageMapper,
+		private HordeSyncTokenParser $syncTokenParser,
 	) {
 	}
 
@@ -171,6 +176,26 @@ class Synchronizer {
 	 * @return Horde_Imap_Client_Ids
 	 */
 	private function getChangedMessageUids(Horde_Imap_Client_Base $imapClient, Horde_Imap_Client_Mailbox $mailbox, Request $request): Horde_Imap_Client_Ids {
+		// With CONDSTORE enabled and a HIGHESTMODSEQ-bearing sync token, the
+		// server can compute the changed set itself: Horde turns an
+		// unrestricted FLAGSUIDS sync into a single SEARCH MODSEQ round
+		// trip. The result is not limited to the UIDs we know about, so it
+		// is intersected with them locally -- an unknown changed UID is a
+		// new message, which is the new-messages phase's job. The chunked
+		// fallback below instead ships every known UID to the server in
+		// ~10KB slices, one command per slice: measured at ~10s per poll
+		// for a 26.9k-message Gmail INBOX, entirely round-trip-bound.
+		if ($imapClient->capability->isEnabled('CONDSTORE')
+			&& $this->syncTokenParser->parseSyncToken($request->getToken())->getHighestModSeq() !== null) {
+			$changed = $imapClient->sync($mailbox, $request->getToken(), [
+				'criteria' => Horde_Imap_Client::SYNC_FLAGSUIDS,
+			])->flagsuids;
+			return new Horde_Imap_Client_Ids(array_values(array_intersect(
+				array_map('intval', $changed->ids),
+				$request->getUids(),
+			)));
+		}
+
 		// Without QRESYNC we need to specify the known ids and in order to avoid
 		// overly long IMAP commands they have to be chunked.
 		$combined = new Horde_Imap_Client_Ids();
