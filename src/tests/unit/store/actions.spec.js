@@ -820,6 +820,50 @@ describe('Vuex store actions', () => {
 			expect(settled).toBe(false)
 		})
 
+		it('updateEnvelopeMutation() skips no-op updates instead of rebuilding identical reactive objects', () => {
+			// The server reports every known message as "changed" on every
+			// sync (upstream TODO in SyncService.php), and the watched-mailbox
+			// poller syncs every bucket every ~10-15s -- unconditionally
+			// replacing flags/tags with fresh objects thousands of times per
+			// minute leaked memory until the browser tab died. Identical data
+			// must leave the existing reactive objects untouched.
+			const account13 = {
+				id: 13,
+			}
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: {
+					name: 'INBOX',
+					databaseId: 11,
+					specialRole: 'inbox',
+				},
+			})
+			store.addEnvelopesMutation({
+				envelopes: [{ databaseId: 900, mailboxId: 11, uid: 1, flags: { seen: false }, tags: {} }],
+				addToUnifiedMailboxes: false,
+			})
+
+			const flagsBefore = store.envelopes[900].flags
+			const tagsBefore = store.envelopes[900].tags
+
+			store.updateEnvelopeMutation({
+				envelope: { databaseId: 900, mailboxId: 11, flags: { seen: false }, tags: {} },
+			})
+
+			expect(store.envelopes[900].flags).toBe(flagsBefore)
+			expect(store.envelopes[900].tags).toBe(tagsBefore)
+
+			store.updateEnvelopeMutation({
+				envelope: { databaseId: 900, mailboxId: 11, flags: { seen: true }, tags: {} },
+			})
+
+			expect(store.envelopes[900].flags).not.toBe(flagsBefore)
+			expect(store.envelopes[900].flags.seen).toBe(true)
+			// Tags were still identical, so that object stays untouched.
+			expect(store.envelopes[900].tags).toBe(tagsBefore)
+		})
+
 		it('notifies a message only once even when several query buckets of the mailbox report it', async () => {
 			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
 

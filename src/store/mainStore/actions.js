@@ -8,6 +8,7 @@ import { translate as t } from '@nextcloud/l10n'
 import DOMPurify from 'dompurify'
 import escapeRegExp from 'lodash/fp/escapeRegExp.js'
 import flatMapDeep from 'lodash/fp/flatMapDeep.js'
+import isEqual from 'lodash/fp/isEqual.js'
 import orderBy from 'lodash/fp/orderBy.js'
 import uniq from 'lodash/fp/uniq.js'
 import {
@@ -2462,8 +2463,21 @@ export default function mainStoreActions() {
 				return
 			}
 			this.normalizeTags(envelope)
-			Vue.set(existing, 'flags', envelope.flags)
-			Vue.set(existing, 'tags', envelope.tags)
+			// Skip no-op updates: the server's sync response reports EVERY
+			// known message as "changed" on EVERY sync (SyncService.php still
+			// carries the upstream TODO for computing a real changed set), and
+			// the watched-mailbox poller syncs every loaded bucket every
+			// ~10-15s. Unconditionally Vue.set()ing a fresh flags/tags object
+			// each time meant thousands of pointless reactive rebuilds and
+			// dependent re-renders per minute, for values that hadn't changed
+			// at all -- measured live as a browser tab ballooning by hundreds
+			// of MB per minute until earlyoom killed it.
+			if (!isEqual(existing.flags, envelope.flags)) {
+				Vue.set(existing, 'flags', envelope.flags)
+			}
+			if (!isEqual(existing.tags, envelope.tags)) {
+				Vue.set(existing, 'tags', envelope.tags)
+			}
 		},
 		flagEnvelopeMutation({
 			envelope,

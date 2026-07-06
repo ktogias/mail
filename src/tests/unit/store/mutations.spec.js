@@ -1252,7 +1252,9 @@ describe('Pinia store mutations', () => {
 					mailboxId: 27,
 					accountId: 1,
 					uid: 12345,
-					flags: undefined,
+					// No flags property: neither side had flags, and a no-op
+					// update must leave the envelope untouched (it used to
+					// write a literal `flags: undefined`).
 					tags: [1],
 				},
 			},
