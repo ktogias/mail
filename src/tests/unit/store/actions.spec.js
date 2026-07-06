@@ -1155,13 +1155,14 @@ describe('Vuex store actions', () => {
 			await store.syncEnvelopes({ mailboxId: 11, query: 'A' })
 
 			expect(wait).toHaveBeenCalledTimes(1)
-			// 45s plus up to 20% proportional jitter (see
-			// computeLockRetryDelayMs) -- never less than the server's own
-			// hint, and not the unrelated, much smaller exponential-backoff
-			// range.
+			// The first retry is the quick ~10s probe (see
+			// computeLockRetryDelayMs: the mailbox is most likely free again
+			// well before the server's worst-case 45s hint) -- but still in
+			// the hint-driven regime, not the unrelated, much smaller
+			// exponential-backoff range starting at 1.5s.
 			const actualDelay = wait.mock.calls[0][0]
-			expect(actualDelay).toBeGreaterThanOrEqual(45_000)
-			expect(actualDelay).toBeLessThanOrEqual(54_000)
+			expect(actualDelay).toBeGreaterThanOrEqual(10_000)
+			expect(actualDelay).toBeLessThanOrEqual(12_000)
 		})
 
 		it('skips a doomed network request when a leader is already known to be retrying', async () => {
@@ -1274,9 +1275,34 @@ describe('Vuex store actions', () => {
 			// syncWatchedMailboxes()'s ~10s-cadence poller skipped that
 			// mailbox every single tick (see isMailboxSyncRetryPending()) --
 			// its badge and message list simply didn't move for minutes.
+			// (Attempt 1, not 0: the first attempt is the quick probe below.)
 			vi.spyOn(Math, 'random').mockReturnValue(1)
 
-			expect(computeLockRetryDelayMs(0, 290_000)).toBeCloseTo(90_000, 0)
+			expect(computeLockRetryDelayMs(1, 290_000)).toBeCloseTo(90_000, 0)
+		})
+
+		it('probes quickly on the first retry instead of honoring a long hint', () => {
+			// The most common 409 is a transient collision between two
+			// windows' ticks -- the mailbox is free again in well under a
+			// second, but the server's worst-case Retry-After can't say so.
+			// Confirmed live: honoring it even capped cost the losing window
+			// a ~93s silence on that mailbox right as a new message arrived.
+			// The first retry probes at ~10s; only a mailbox still locked
+			// then gets the full (capped) hint from the second attempt on.
+			vi.spyOn(Math, 'random').mockReturnValue(0)
+			expect(computeLockRetryDelayMs(0, 290_000)).toBe(10_000)
+
+			// The probe gets the same proportional jitter as everything else.
+			vi.spyOn(Math, 'random').mockReturnValue(1)
+			expect(computeLockRetryDelayMs(0, 290_000)).toBe(12_000)
+		})
+
+		it('still honors a server hint shorter than the probe window on the first retry', () => {
+			vi.spyOn(Math, 'random').mockReturnValue(0)
+
+			// The hint stays the floor -- the probe only shortens waits, it
+			// never retries earlier than the server asked.
+			expect(computeLockRetryDelayMs(0, 3_000)).toBe(3_000)
 		})
 
 		it('never returns a negative or undefined delay at attempt 0', () => {

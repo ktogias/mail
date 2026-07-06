@@ -271,6 +271,20 @@ const LOCK_RETRY_MAX_MS = 30 * 1000
 // skipped it for that entire window -- the badge and message list for that
 // mailbox simply didn't move until the wait finally elapsed.
 const LOCK_RETRY_ABSOLUTE_MAX_MS = 90 * 1000
+// The by far most common 409 is a transient collision -- two windows'
+// jittered ~10-15s ticks landing on the same mailbox together -- where the
+// loser's mailbox is actually free again well under a second later, because
+// a healthy sync releases its lock almost immediately. The server's
+// Retry-After cannot tell that case apart from a genuinely long sync (it
+// only knows the worst case: the holder keeping the lock for its entire
+// remaining window), so honoring it even capped meant every lost collision
+// cost that window up to ~90s of silence on that mailbox -- confirmed live
+// as a 93s gap in an otherwise ~10-15s sync cadence, exactly while a new
+// message was arriving. The first retry therefore probes quickly (a 409
+// reject is cheap: one DB row check, no IMAP); only a mailbox found STILL
+// locked on that probe -- a genuinely long sync, not a collision -- gets
+// the server's estimate honored from the second attempt on.
+const LOCK_RETRY_FIRST_PROBE_MS = 10 * 1000
 
 /**
  * How long to wait before the next lock-retry attempt.
@@ -310,6 +324,12 @@ const LOCK_RETRY_ABSOLUTE_MAX_MS = 90 * 1000
  */
 export function computeLockRetryDelayMs(attempt, retryAfterMs) {
 	if (retryAfterMs !== undefined) {
+		// First retry after a 409: quick probe for the transient-collision
+		// case (see LOCK_RETRY_FIRST_PROBE_MS above). A hint shorter than
+		// the probe window is still honored as the floor.
+		if (attempt === 0) {
+			return Math.min(retryAfterMs, LOCK_RETRY_FIRST_PROBE_MS) * (1 + Math.random() * 0.2)
+		}
 		return Math.min(retryAfterMs * (1 + Math.random() * 0.2), LOCK_RETRY_ABSOLUTE_MAX_MS)
 	}
 
