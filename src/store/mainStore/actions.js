@@ -236,6 +236,27 @@ export function isMailboxSyncRetryPending(mailboxId) {
 	return pendingLockWaits.has(mailboxId)
 }
 
+// Tracks mailboxes syncWatchedMailboxes() is *currently* working through
+// (registered before its bucket loop starts, cleared once that loop ends --
+// success or failure). isMailboxSyncRetryPending()/pendingLockWaits only
+// starts tracking a mailbox once a request has actually FAILED with
+// MailboxLockedError; it says nothing about a call that's simply still
+// in flight, taking longer than one ~10-15s tick to get through every
+// loaded query bucket (ordinary IMAP latency, no error at all). Without
+// this, a new tick firing before the previous one finished for the same
+// mailbox would start a SECOND, fully independent bucket loop for it --
+// and since Mailbox::LOCK_TIMEOUT locking is acquired in three separate
+// steps (new/changed/vanished) with no yield between them for a single
+// caller, two genuinely concurrent callers racing those three lock
+// acquisitions against each other can leave one of them holding a
+// partially-acquired lock that's never released until it expires
+// naturally (up to the full 300s) -- confirmed live: mailbox 31, polled
+// by a single tab with no other client involved, kept hitting a 409 with
+// a Retry-After close to the full lock timeout on a clean, repeating
+// cycle, which is the signature of a genuine (not merely advisory) held
+// lock recurring, not of the pessimistic Retry-After estimate alone.
+const watchedMailboxSyncsInFlight = new Set()
+
 const LOCK_RETRY_BASE_MS = 1500
 const LOCK_RETRY_MAX_MS = 30 * 1000
 // A mailbox freshly locked near the start of a long sync can have nearly
@@ -1174,6 +1195,12 @@ export default function mainStoreActions() {
 								return
 							}
 
+							if (watchedMailboxSyncsInFlight.has(mailbox.databaseId)) {
+								logger.debug(`mailbox ${mailbox.databaseId} still has a watched-sync in flight from an earlier tick, skipping`)
+								return
+							}
+							watchedMailboxSyncsInFlight.add(mailbox.databaseId)
+
 							// Sync every query bucket already loaded for this mailbox
 							// (e.g. '' for the plain view, 'not:starred' when the user
 							// has "sort favorites separately" enabled), not just the
@@ -1201,22 +1228,26 @@ export default function mainStoreActions() {
 							const queries = Object.keys(mailbox.envelopeLists)
 							const queriesToSync = queries.length > 0 ? queries : [undefined]
 
-							const newMessagesPerQuery = []
-							for (const query of queriesToSync) {
-								const list = mailbox.envelopeLists[normalizedEnvelopeListId(query)]
-								if (list === undefined) {
-									await this.fetchEnvelopes({
+							try {
+								const newMessagesPerQuery = []
+								for (const query of queriesToSync) {
+									const list = mailbox.envelopeLists[normalizedEnvelopeListId(query)]
+									if (list === undefined) {
+										await this.fetchEnvelopes({
+											mailboxId: mailbox.databaseId,
+											query,
+										})
+									}
+
+									newMessagesPerQuery.push(await this.syncEnvelopes({
 										mailboxId: mailbox.databaseId,
 										query,
-									})
+									}))
 								}
-
-								newMessagesPerQuery.push(await this.syncEnvelopes({
-									mailboxId: mailbox.databaseId,
-									query,
-								}))
+								return newMessagesPerQuery
+							} finally {
+								watchedMailboxSyncsInFlight.delete(mailbox.databaseId)
 							}
-							return newMessagesPerQuery
 						}))
 					}))
 				const newMessages = flatMapDeep(identity, results).filter((m) => m !== undefined)

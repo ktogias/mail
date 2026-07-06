@@ -855,6 +855,90 @@ describe('Vuex store actions', () => {
 			releaseLeaderWait()
 			await leaderPromise
 		})
+
+		it('skips a mailbox whose bucket loop from an earlier tick is still in flight (not yet failed), so a new tick cannot race it', async () => {
+			// Reproduces a real production bug: isMailboxSyncRetryPending only
+			// starts tracking a mailbox once a request has actually FAILED
+			// with MailboxLockedError -- it says nothing about a call that's
+			// simply still in flight (ordinary IMAP latency, no error). A
+			// ~10-15s poller tick can easily fire again before a slower
+			// mailbox's own bucket loop from the PREVIOUS tick has finished,
+			// and without this check, syncWatchedMailboxes() would start a
+			// second, fully independent bucket loop for the same mailbox --
+			// two genuinely concurrent callers racing the same mailbox's lock
+			// acquisition. Confirmed live: a single tab, no other client
+			// involved, produced a clean, repeating 409-with-near-maximal-
+			// Retry-After cycle on one mailbox -- the signature of a real,
+			// not just advisory, held lock recurring.
+			const account13 = {
+				id: 13,
+			}
+
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: {
+					name: 'INBOX',
+					databaseId: 11,
+					specialRole: 'inbox',
+				},
+			})
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: {
+					name: 'Newsletters',
+					databaseId: 13,
+					syncInBackground: true,
+				},
+			})
+
+			// Give both mailboxes an already-loaded default bucket so the
+			// bucket loop never needs to call fetchEnvelopes().
+			store.mailboxes[11].envelopeLists[''] = []
+			store.mailboxes[13].envelopeLists[''] = []
+
+			// Mock store.syncEnvelopes() directly (not the network layer)
+			// for full, simple control over exactly when each mailbox's
+			// call resolves, with no nested handleHttpAuthErrors/mutation
+			// promise chains to account for.
+			let resolveMailbox11Sync
+			const mailbox11Calls = []
+			const mailbox13Calls = []
+			store.syncEnvelopes = vi.fn(async ({ mailboxId }) => {
+				if (mailboxId === 11) {
+					mailbox11Calls.push(1)
+					return new Promise((resolve) => {
+						resolveMailbox11Sync = () => resolve([])
+					})
+				}
+				mailbox13Calls.push(1)
+				return []
+			})
+
+			// First tick: mailbox 11's sync is still in flight (never
+			// resolved yet) when the second tick starts below. Mailbox 13's
+			// own call resolves immediately, so its bucket loop -- and
+			// watchedMailboxSyncsInFlight entry -- is fully done by the
+			// time the first tick's overall promise is awaited here (the
+			// only thing left unresolved in that Promise.all is mailbox 11).
+			const firstTickPromise = store.syncWatchedMailboxes()
+			await Promise.resolve()
+			await Promise.resolve()
+			await Promise.resolve()
+
+			expect(mailbox13Calls).toHaveLength(1)
+
+			// Second tick, firing before the first has finished with
+			// mailbox 11 -- must not start its own, concurrent attempt.
+			await store.syncWatchedMailboxes()
+
+			expect(mailbox11Calls).toHaveLength(1)
+			// Mailbox 13 still gets synced fresh every tick, regardless.
+			expect(mailbox13Calls).toHaveLength(2)
+
+			resolveMailbox11Sync()
+			await firstTickPromise
+		})
 	})
 
 	describe('sync lock coordination', () => {
