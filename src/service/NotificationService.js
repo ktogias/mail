@@ -27,7 +27,7 @@ function request() {
 	return Notification.requestPermission()
 }
 
-async function showNotification(title, body, icon) {
+async function showNotification(title, body, icon, onClick) {
 	try {
 		await request()
 	} catch (error) {
@@ -51,6 +51,9 @@ async function showNotification(title, body, icon) {
 	})
 	notification.onclick = () => {
 		window.focus()
+		if (onClick) {
+			onClick()
+		}
 		// Close the notification when clicked
 		notification.close()
 	}
@@ -85,5 +88,31 @@ export function showNewMessagesNotification(messages) {
 		t('mail', 'Nextcloud Mail'),
 		getNotificationBody(messages),
 		generateFilePath('mail', 'img', 'mail-notification.png'),
+		() => {
+			// Clicking the notification focuses the window (see
+			// showNotification) AND takes the user to the mail itself: the
+			// thread view for a single new message, or the receiving
+			// mailbox's listing when several arrived at once. All messages
+			// in one notification share a mailbox, since notifications are
+			// fired per mailbox as each one's own sync resolves.
+			//
+			// The router is imported lazily, only on an actual click: a
+			// static import here would run router.js's module-level
+			// Vue.use(Router) for everything that (transitively) imports
+			// this service -- in the real app that's harmless (main.js
+			// loads the router anyway, same module instance), but it
+			// installs a plugin-defined $route on every Vue instance,
+			// which shadows the $route mocks in component tests.
+			const [first] = messages
+			if (first?.mailboxId === undefined) {
+				return
+			}
+			const target = messages.length === 1
+				? { name: 'message', params: { mailboxId: first.mailboxId, threadId: first.databaseId } }
+				: { name: 'mailbox', params: { mailboxId: first.mailboxId } }
+			import('../router.js').then(({ default: router }) => router.push(target)).catch(() => {
+				// NavigationDuplicated: already looking at it -- fine.
+			})
+		},
 	)
 }
