@@ -14,6 +14,7 @@ use Horde_Imap_Client_Base;
 use Horde_Imap_Client_Exception;
 use Horde_Imap_Client_Ids;
 use OCA\Mail\Account;
+use OCA\Mail\Cache\HordeSyncTokenParser;
 use OCA\Mail\Contracts\IMailManager;
 use OCA\Mail\Db\Mailbox;
 use OCA\Mail\Db\MailboxMapper;
@@ -66,6 +67,7 @@ class ImapToDbSynchronizer {
 		private IMailManager $mailManager,
 		private TagMapper $tagMapper,
 		private NewMessagesClassifier $newMessagesClassifier,
+		private HordeSyncTokenParser $syncTokenParser,
 	) {
 		$this->dispatcher = $dispatcher;
 	}
@@ -392,6 +394,25 @@ class ImapToDbSynchronizer {
 			$logger
 		);
 
+		// Fast path: a single STATUS round trip instead of the three sync
+		// phases. Without QRESYNC every phase enumerates state in chunked
+		// IMAP commands (measured ~18.5s for a 26.9k-message Gmail INBOX,
+		// dominated by round trips, on EVERY poll), yet the overwhelming
+		// majority of polls find nothing changed at all. If UIDVALIDITY,
+		// UIDNEXT and HIGHESTMODSEQ all still match every phase token AND
+		// the server's message count matches the local cache (expunges are
+		// not guaranteed to bump HIGHESTMODSEQ under CONDSTORE alone),
+		// nothing is new, changed, or vanished -- skip everything. Any
+		// doubt (missing/parseless token, no CONDSTORE, STATUS failure)
+		// falls through to the normal full pass.
+		if ($this->isMailboxUnchanged($client, $mailbox, $logger)) {
+			$logger->debug("Mailbox {$mailbox->getId()} unchanged per STATUS fast path, skipping partial sync");
+			$perf->step('STATUS fast path: mailbox unchanged');
+			$perf->end();
+			return $newOrVanished;
+		}
+		$perf->step('STATUS fast path: mailbox changed or undecidable');
+
 		$uids = $knownUids ?? $this->dbMapper->findAllUids($mailbox);
 		$perf->step('get all known UIDs');
 
@@ -528,6 +549,58 @@ class ImapToDbSynchronizer {
 		$perf->end();
 
 		return $newOrVanished;
+	}
+
+	/**
+	 * One cheap STATUS round trip deciding whether a partial sync can be
+	 * skipped entirely. Returns true ONLY when it is provably safe: every
+	 * phase token parses, carries a HIGHESTMODSEQ (CONDSTORE), matches the
+	 * server's current UIDVALIDITY/UIDNEXT/HIGHESTMODSEQ exactly, and the
+	 * server's message count equals the local cache's. Anything else --
+	 * including a failed STATUS -- returns false and the normal sync runs.
+	 */
+	private function isMailboxUnchanged(Horde_Imap_Client_Base $client, Mailbox $mailbox, LoggerInterface $logger): bool {
+		try {
+			$status = $client->status(
+				$mailbox->getName(),
+				Horde_Imap_Client::STATUS_UIDVALIDITY
+				| Horde_Imap_Client::STATUS_UIDNEXT
+				| Horde_Imap_Client::STATUS_HIGHESTMODSEQ
+				| Horde_Imap_Client::STATUS_MESSAGES,
+			);
+		} catch (Throwable $e) {
+			$logger->debug("STATUS fast path failed for mailbox {$mailbox->getId()}, falling back to full partial sync: {$e->getMessage()}");
+			return false;
+		}
+
+		$uidValidity = (int)($status['uidvalidity'] ?? 0);
+		$uidNext = (int)($status['uidnext'] ?? 0);
+		$highestModSeq = (int)($status['highestmodseq'] ?? 0);
+		$messages = (int)($status['messages'] ?? -1);
+
+		// No CONDSTORE (or the server hides modseq): flag changes are
+		// undetectable via STATUS, never skip.
+		if ($uidValidity === 0 || $uidNext === 0 || $highestModSeq === 0 || $messages < 0) {
+			return false;
+		}
+
+		foreach ([$mailbox->getSyncNewToken(), $mailbox->getSyncChangedToken(), $mailbox->getSyncVanishedToken()] as $rawToken) {
+			if ($rawToken === null) {
+				return false;
+			}
+			$token = $this->syncTokenParser->parseSyncToken($rawToken);
+			if ($token->getUidValidity() !== $uidValidity
+				|| $token->getNextUid() !== $uidNext
+				|| $token->getHighestModSeq() === null
+				|| $token->getHighestModSeq() !== $highestModSeq) {
+				return false;
+			}
+		}
+
+		// Guards vanished-only changes: an EXPUNGE is not guaranteed to bump
+		// HIGHESTMODSEQ under CONDSTORE alone (that guarantee comes with
+		// QRESYNC), but it always changes the message count.
+		return $messages === $this->dbMapper->countByMailbox($mailbox);
 	}
 
 	/**

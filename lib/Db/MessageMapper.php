@@ -149,6 +149,20 @@ class MessageMapper extends QBMapper {
 		return $this->findUids($query);
 	}
 
+	public function countByMailbox(Mailbox $mailbox): int {
+		$query = $this->db->getQueryBuilder();
+
+		$query->select($query->func()->count('id'))
+			->from($this->getTableName())
+			->where($query->expr()->eq('mailbox_id', $query->createNamedParameter($mailbox->getId(), IQueryBuilder::PARAM_INT), IQueryBuilder::PARAM_INT));
+
+		$result = $query->executeQuery();
+		$count = (int)$result->fetchOne();
+		$result->closeCursor();
+
+		return $count;
+	}
+
 	public function findAllIds(Mailbox $mailbox): array {
 		$query = $this->db->getQueryBuilder();
 

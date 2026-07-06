@@ -13,6 +13,7 @@ use ChristophWurst\Nextcloud\Testing\TestCase;
 use Horde_Imap_Client_Data_Capability_Imap;
 use Horde_Imap_Client_Socket;
 use OCA\Mail\Account;
+use OCA\Mail\Cache\HordeSyncTokenParser;
 use OCA\Mail\Contracts\IMailManager;
 use OCA\Mail\Db\MailAccount;
 use OCA\Mail\Db\Mailbox;
@@ -64,6 +65,7 @@ class ImapToDbSynchronizerTest extends TestCase {
 			$this->createStub(IMailManager::class),
 			$this->createStub(TagMapper::class),
 			$this->createStub(NewMessagesClassifier::class),
+			new HordeSyncTokenParser(),
 		);
 	}
 
@@ -161,6 +163,7 @@ class ImapToDbSynchronizerTest extends TestCase {
 				$this->createStub(IMailManager::class),
 				$this->createStub(TagMapper::class),
 				$this->createStub(NewMessagesClassifier::class),
+				new HordeSyncTokenParser(),
 			])
 			->onlyMethods(['sync'])
 			->getMock();
@@ -182,5 +185,148 @@ class ImapToDbSynchronizerTest extends TestCase {
 			->with($this->callback(fn (SynchronizationEvent $event) => $event->isRebuildThreads()));
 
 		$synchronizer->syncAccount($account, $this->createStub(LoggerInterface::class));
+	}
+
+	private function buildSynchronizerWithSyncMock(Synchronizer&MockObject $imapSync): ImapToDbSynchronizer {
+		return new ImapToDbSynchronizer(
+			$this->dbMapper,
+			$this->clientFactory,
+			$this->imapMapper,
+			$this->mailboxMapper,
+			$this->createStub(DatabaseMessageMapper::class),
+			$imapSync,
+			$this->dispatcher,
+			$this->performanceLogger,
+			$this->createStub(LoggerInterface::class),
+			$this->createStub(IMailManager::class),
+			$this->createStub(TagMapper::class),
+			$this->createStub(NewMessagesClassifier::class),
+			new HordeSyncTokenParser(),
+		);
+	}
+
+	private function buildPartialSyncMailbox(): Mailbox {
+		$mailbox = new Mailbox();
+		$mailbox->setId(149);
+		$mailbox->setName('INBOX');
+		$mailbox->setAccountId(1);
+		$mailbox->setSelectable(true);
+		// base64('U100,V200,H300'): UIDNEXT 100, UIDVALIDITY 200, HIGHESTMODSEQ 300
+		$token = base64_encode('U100,V200,H300');
+		$mailbox->setSyncNewToken($token);
+		$mailbox->setSyncChangedToken($token);
+		$mailbox->setSyncVanishedToken($token);
+		return $mailbox;
+	}
+
+	private function buildStatusClient(array $status): Horde_Imap_Client_Socket&MockObject {
+		$capability = $this->createMock(Horde_Imap_Client_Data_Capability_Imap::class);
+		$capability->method('isEnabled')->with('QRESYNC')->willReturn(false);
+		$client = $this->createMock(Horde_Imap_Client_Socket::class);
+		$client->method('__get')->with('capability')->willReturn($capability);
+		$client->method('status')->willReturn($status);
+		$client->method('getSyncToken')->willReturn(base64_encode('U101,V200,H301'));
+		return $client;
+	}
+
+	public function testPartialSyncSkipsAllPhasesWhenStatusMatchesEveryToken(): void {
+		$mailAccount = new MailAccount();
+		$mailAccount->setId(1);
+		$mailAccount->setUserId('user');
+		$account = new Account($mailAccount);
+		$mailbox = $this->buildPartialSyncMailbox();
+
+		$client = $this->buildStatusClient([
+			'uidvalidity' => 200,
+			'uidnext' => 100,
+			'highestmodseq' => 300,
+			'messages' => 42,
+		]);
+		$this->dbMapper->method('countByMailbox')->with($mailbox)->willReturn(42);
+
+		$imapSync = $this->createMock(Synchronizer::class);
+		$imapSync->expects($this->never())->method('sync');
+		// Nothing moved, so no token to persist either.
+		$this->mailboxMapper->expects($this->never())->method('update');
+		$this->dispatcher->expects($this->once())
+			->method('dispatchTyped')
+			->with($this->callback(fn (SynchronizationEvent $event) => !$event->isRebuildThreads()));
+
+		$this->buildSynchronizerWithSyncMock($imapSync)->sync(
+			$account,
+			$client,
+			$mailbox,
+			$this->createStub(LoggerInterface::class),
+		);
+	}
+
+	public function testPartialSyncRunsNormallyWhenStatusDiffers(): void {
+		$mailAccount = new MailAccount();
+		$mailAccount->setId(1);
+		$mailAccount->setUserId('user');
+		$account = new Account($mailAccount);
+		$mailbox = $this->buildPartialSyncMailbox();
+
+		// UIDNEXT moved from 100 to 101: something is new.
+		$client = $this->buildStatusClient([
+			'uidvalidity' => 200,
+			'uidnext' => 101,
+			'highestmodseq' => 300,
+			'messages' => 42,
+		]);
+		$this->dbMapper->method('countByMailbox')->willReturn(42);
+		$this->dbMapper->method('findAllUids')->willReturn([]);
+		$this->dbMapper->method('findHighestUid')->willReturn(null);
+
+		$response = new \OCA\Mail\IMAP\Sync\Response([], [], []);
+		$imapSync = $this->createMock(Synchronizer::class);
+		$imapSync->expects($this->exactly(3))
+			->method('sync')
+			->willReturn($response);
+		$this->mailboxMapper->expects($this->once())->method('update');
+
+		$this->buildSynchronizerWithSyncMock($imapSync)->sync(
+			$account,
+			$client,
+			$mailbox,
+			$this->createStub(LoggerInterface::class),
+		);
+	}
+
+	public function testPartialSyncNeverSkippedWithoutAModseqCapableToken(): void {
+		$mailAccount = new MailAccount();
+		$mailAccount->setId(1);
+		$mailAccount->setUserId('user');
+		$account = new Account($mailAccount);
+		$mailbox = $this->buildPartialSyncMailbox();
+		// Token without an H part: server/token pair can't prove flags are
+		// unchanged, the fast path must not engage.
+		$token = base64_encode('U100,V200');
+		$mailbox->setSyncNewToken($token);
+		$mailbox->setSyncChangedToken($token);
+		$mailbox->setSyncVanishedToken($token);
+
+		$client = $this->buildStatusClient([
+			'uidvalidity' => 200,
+			'uidnext' => 100,
+			'highestmodseq' => 300,
+			'messages' => 42,
+		]);
+		$this->dbMapper->method('countByMailbox')->willReturn(42);
+		$this->dbMapper->method('findAllUids')->willReturn([]);
+		$this->dbMapper->method('findHighestUid')->willReturn(null);
+
+		$response = new \OCA\Mail\IMAP\Sync\Response([], [], []);
+		$imapSync = $this->createMock(Synchronizer::class);
+		$imapSync->expects($this->exactly(3))
+			->method('sync')
+			->willReturn($response);
+
+		$this->buildSynchronizerWithSyncMock($imapSync)->sync(
+			$account,
+			$client,
+			$mailbox,
+			$this->createStub(LoggerInterface::class),
+		);
 	}
 }
