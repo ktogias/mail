@@ -35,8 +35,14 @@ async function showNotification(title, body, icon) {
 		return
 	}
 
-	if (document.querySelector(':focus') !== null) {
+	// document.hasFocus(), not document.querySelector(':focus'): an element
+	// can keep :focus while its window sits in the background, which would
+	// wrongly swallow notifications for a backgrounded window. The previous
+	// check also only ever logged -- it never returned, so the notification
+	// was shown even in the window the user was actively reading.
+	if (document.hasFocus()) {
 		Logger.debug('browser is active. notification request is ignored')
+		return
 	}
 
 	const notification = new Notification(title, {
