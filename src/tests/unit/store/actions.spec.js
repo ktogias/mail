@@ -534,7 +534,7 @@ describe('Vuex store actions', () => {
 			store.fetchEnvelopes = vi.fn(async () => {})
 			store.syncEnvelopes = vi.fn(async () => {})
 
-			await store.syncInboxes()
+			await store.syncWatchedMailboxes()
 
 			expect(store.fetchEnvelopes).toHaveBeenCalledTimes(2)
 			expect(store.fetchEnvelopes).toHaveBeenNthCalledWith(1, {
@@ -610,7 +610,7 @@ describe('Vuex store actions', () => {
 			store.fetchEnvelopes = vi.fn(async () => {})
 			store.syncEnvelopes = vi.fn(async () => [{ id: 123 }, { id: 321 }])
 
-			await store.syncInboxes()
+			await store.syncWatchedMailboxes()
 
 			expect(store.fetchEnvelopes).not.toHaveBeenCalled()
 			expect(store.syncEnvelopes).toHaveBeenCalledTimes(4)
@@ -634,7 +634,7 @@ describe('Vuex store actions', () => {
 
 		it('syncs every already-loaded query bucket of a mailbox, not just the default', async () => {
 			// Reproduces a real bug: when "sort favorites separately" is on, the
-			// visible list reads from envelopeLists['not:starred'], but syncInboxes()
+			// visible list reads from envelopeLists['not:starred'], but syncWatchedMailboxes()
 			// used to only ever sync the unfiltered '' bucket -- new mail landed in
 			// the store under the wrong key and never appeared in the open view,
 			// even though the mailbox's unread counter updated correctly (a separate
@@ -663,7 +663,7 @@ describe('Vuex store actions', () => {
 			store.fetchEnvelopes = vi.fn(async () => {})
 			store.syncEnvelopes = vi.fn(async () => [])
 
-			await store.syncInboxes()
+			await store.syncWatchedMailboxes()
 
 			expect(store.fetchEnvelopes).not.toHaveBeenCalled()
 			expect(store.syncEnvelopes).toHaveBeenCalledTimes(2)
@@ -722,7 +722,7 @@ describe('Vuex store actions', () => {
 				return []
 			})
 
-			const syncPromise = store.syncInboxes()
+			const syncPromise = store.syncWatchedMailboxes()
 
 			// Give the first (still-pending) call's microtask a chance to run.
 			await Promise.resolve()
@@ -736,6 +736,124 @@ describe('Vuex store actions', () => {
 			// The second bucket's sync only fires once the first one resolves --
 			// by this point that's expected and correct, unlike above.
 			expect(store.syncEnvelopes).toHaveBeenCalledTimes(2)
+		})
+
+		it('also syncs non-inbox mailboxes flagged syncInBackground', async () => {
+			const account13 = {
+				id: 13,
+			}
+
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: {
+					name: 'INBOX',
+					databaseId: 11,
+					specialRole: 'inbox',
+				},
+			})
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: {
+					name: 'Drafts',
+					databaseId: 12,
+					specialRole: 'draft',
+				},
+			})
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: {
+					name: 'Newsletters',
+					databaseId: 13,
+					syncInBackground: true,
+				},
+			})
+
+			store.fetchEnvelopes = vi.fn(async () => {})
+			store.syncEnvelopes = vi.fn(async () => {})
+
+			await store.syncWatchedMailboxes()
+
+			// Drafts (13) has neither specialRole 'inbox' nor syncInBackground --
+			// only the inbox and the explicitly-flagged mailbox are watched.
+			expect(store.syncEnvelopes).toHaveBeenCalledTimes(2)
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 11 })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 13 })
+			expect(store.syncEnvelopes).not.toHaveBeenCalledWith({ mailboxId: 12 })
+		})
+
+		it('skips a mailbox with a sync retry already pending, without holding back any other watched mailbox', async () => {
+			// Reproduces the scenario a 10s-cadence poller must handle: one
+			// watched mailbox (e.g. a large Gmail INBOX mid a genuinely long
+			// full sync) is locked and already has its own retry chain
+			// running. Without this check, every new tick would queue up
+			// another "await the leader, then try again" continuation on top
+			// of the last one, all firing in a burst once the lock finally
+			// clears -- and, more importantly, every OTHER watched mailbox
+			// must still get synced this tick regardless.
+			const account13 = {
+				id: 13,
+			}
+
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: {
+					name: 'INBOX',
+					databaseId: 11,
+					specialRole: 'inbox',
+				},
+			})
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: {
+					name: 'Newsletters',
+					databaseId: 13,
+					syncInBackground: true,
+				},
+			})
+
+			// Mailbox 11 fails its first attempt (registering as the
+			// pending leader) and succeeds on any attempt after that --
+			// mirroring the existing "skips a doomed network request"
+			// test's pattern, so the leader's own retry chain resolves
+			// cleanly once released instead of looping forever.
+			const callCounts = {}
+			const healthyStats = { newMessages: [], changedMessages: [], vanishedMessages: [], stats: { unread: 0 } }
+			MessageService.syncEnvelopes.mockImplementation(async (accountId, mailboxId) => {
+				callCounts[mailboxId] = (callCounts[mailboxId] ?? 0) + 1
+				if (mailboxId === 11 && callCounts[mailboxId] === 1) {
+					throw new MailboxLockedError('locked')
+				}
+				return healthyStats
+			})
+
+			// Hold mailbox 11's retry wait open so it stays registered as a
+			// pending leader throughout this test, instead of immediately
+			// retrying and resolving.
+			let releaseLeaderWait
+			wait.mockImplementationOnce(() => new Promise((resolve) => {
+				releaseLeaderWait = resolve
+			}))
+
+			const leaderPromise = store.syncEnvelopes({ mailboxId: 11 })
+			// Let the leader's failed first attempt run and register itself.
+			await Promise.resolve()
+			await Promise.resolve()
+			await Promise.resolve()
+
+			await store.syncWatchedMailboxes()
+
+			// Mailbox 13 (healthy) synced normally this tick, unaffected by
+			// mailbox 11 being locked and mid-retry.
+			expect(MessageService.syncEnvelopes.mock.calls.filter(([, mailboxId]) => mailboxId === 13)).toHaveLength(1)
+			// Mailbox 11 was skipped by syncWatchedMailboxes() itself -- the
+			// only call attributable to it so far is the leader's own
+			// original (failed) attempt, not a second one from this tick.
+			expect(callCounts[11]).toBe(1)
+
+			releaseLeaderWait()
+			await leaderPromise
 		})
 	})
 

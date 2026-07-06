@@ -211,17 +211,30 @@ function transformMailboxName(account, mailbox) {
 // A mailbox sync lock is mailbox-wide, not per-query. Several independent
 // call sites can all be syncing the same mailbox concurrently (App.vue's
 // background loop across several query buckets -- now sequenced internally,
-// see syncInboxes() -- and Mailbox.vue's own per-instance timer, doubled up
-// when "sort favorites separately" renders two separate Mailbox components
-// for one mailbox). Without coordination, every one of them independently
-// re-triggers its own 1.5s retry-on-lock loop against the same lock,
-// multiplying request volume by however many call sites happen to be
+// see syncWatchedMailboxes() -- and Mailbox.vue's own per-instance timer,
+// doubled up when "sort favorites separately" renders two separate Mailbox
+// components for one mailbox). Without coordination, every one of them
+// independently re-triggers its own 1.5s retry-on-lock loop against the same
+// lock, multiplying request volume by however many call sites happen to be
 // syncing that mailbox at once -- confirmed live: a genuinely long-held
 // lock on a slow account produced a sustained ~1 request/second 409 storm.
 // This map lets only one such retry loop actually run per mailbox at a
 // time; anyone else who hits the same lock just awaits it instead of
 // starting their own.
 const pendingLockWaits = new Map()
+
+/**
+ * Whether some caller is already mid-retry against mailbox's lock.
+ *
+ * Used by syncWatchedMailboxes() to skip a mailbox entirely for the current
+ * tick rather than queue up yet another "await the leader, then try again"
+ * chain on top of an already-running one -- see the tick-piling comment
+ * there for why that matters once ticks fire every ~10s instead of once
+ * every 30-60s.
+ */
+export function isMailboxSyncRetryPending(mailboxId) {
+	return pendingLockWaits.has(mailboxId)
+}
 
 const LOCK_RETRY_BASE_MS = 1500
 const LOCK_RETRY_MAX_MS = 30 * 1000
@@ -1115,7 +1128,7 @@ export default function mainStoreActions() {
 					})
 			})
 		},
-		async syncInboxes() {
+		async syncWatchedMailboxes() {
 			// Skip superfluous requests if using passwordless authentication. They will fail anyway.
 			const passwordIsUnavailable = this.getPreference('password-is-unavailable', false)
 			const isDisabled = (account) => passwordIsUnavailable && !!account.provisioningId
@@ -1124,8 +1137,28 @@ export default function mainStoreActions() {
 				const results = await Promise.all(this.getAccounts
 					.filter((a) => !a.isUnified && !isDisabled(a))
 					.map((account) => {
-						return Promise.all(this.getMailboxes(account.id).map(async (mailbox) => {
-							if (mailbox.specialRole !== 'inbox') {
+						return Promise.all([...this.getRecursiveMailboxIterator(account.id)].map(async (mailbox) => {
+							if (mailbox.specialRole !== 'inbox' && !mailbox.syncInBackground) {
+								return
+							}
+
+							// A locked mailbox (e.g. a Gmail account's INBOX mid a
+							// genuinely long full sync) already has its own
+							// retry-on-lock chain running via pendingLockWaits,
+							// backing off on its own up to LOCK_RETRY_MAX_MS
+							// between attempts. Ticks fire every ~10s here, much
+							// faster than that backoff -- without this check,
+							// each new tick would queue up another "await the
+							// current leader, then try again" continuation on
+							// top of the last one (syncEnvelopes():1020-1027),
+							// and they'd all fire in a burst the moment the
+							// leader finally settles. Skipping instead means the
+							// stuck mailbox's own chain is left alone to retry at
+							// its own paced cadence, while every other watched
+							// mailbox keeps getting a fresh attempt every tick,
+							// completely unaffected by the stuck one.
+							if (isMailboxSyncRetryPending(mailbox.databaseId)) {
+								logger.debug(`mailbox ${mailbox.databaseId} already has a sync retry pending, skipping this tick`)
 								return
 							}
 
