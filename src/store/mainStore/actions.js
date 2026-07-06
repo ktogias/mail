@@ -2398,7 +2398,26 @@ export default function mainStoreActions() {
 			replace = false,
 			replaceMailboxId,
 		}) {
-			const idToDateInt = (id) => this.envelopes[id].dateInt
+			// A list must never break on an id whose envelope is gone from
+			// this.envelopes (left behind by an incomplete removal). Reading
+			// .dateInt off undefined threw here, which killed the WHOLE
+			// mutation -- from that moment on, the affected bucket silently
+			// rejected every new envelope: the sync response kept re-serving
+			// the same messages as "new" on every poll (their ids never made
+			// it into the list the client reports as known), the listing
+			// froze for new arrivals, and everything chained after the sync
+			// (e.g. the new-message notification) never ran. Confirmed live
+			// on a mailbox whose messages get deleted by another client
+			// between polls. Stale ids are dropped with a warning so the
+			// leaving mutation can be identified from the console.
+			const idToDateInt = (id) => this.envelopes[id]?.dateInt ?? 0
+			const dropStaleIds = (list, mailboxId) => list.filter((knownId) => {
+				if (this.envelopes[knownId] === undefined) {
+					logger.warn(`dropping stale envelope id ${knownId} from a list of mailbox ${mailboxId} -- some removal left it behind`)
+					return false
+				}
+				return true
+			})
 
 			const listId = normalizedEnvelopeListId(query)
 			const orderByDateInt = orderBy(idToDateInt, this.preferences['sort-order'] === 'newest' ? 'desc' : 'asc')
@@ -2418,7 +2437,7 @@ export default function mainStoreActions() {
 						.map((mbId) => this.mailboxes[mbId])
 						.filter((mb) => mb.specialRole && mb.specialRole === mailbox.specialRole)
 						.forEach((unifiedMailbox) => {
-							const existing = unifiedMailbox.envelopeLists[listId] || []
+							const existing = dropStaleIds(unifiedMailbox.envelopeLists[listId] || [], unifiedMailbox.databaseId)
 							Vue.set(
 								unifiedMailbox.envelopeLists,
 								listId,
@@ -2435,7 +2454,7 @@ export default function mainStoreActions() {
 
 			envelopes.forEach((envelope) => {
 				const mailbox = this.mailboxes[envelope.mailboxId]
-				const existing = mailbox.envelopeLists[listId] || []
+				const existing = dropStaleIds(mailbox.envelopeLists[listId] || [], mailbox.databaseId)
 				this.normalizeTags(envelope)
 				Vue.set(this.envelopes, envelope.databaseId, { ...this.envelopes[envelope.databaseId] || {}, ...envelope })
 				Vue.set(envelope, 'accountId', mailbox.accountId)
@@ -2448,7 +2467,7 @@ export default function mainStoreActions() {
 					.map((mbId) => this.mailboxes[mbId])
 					.filter((mb) => mb.specialRole && mb.specialRole === mailbox.specialRole)
 					.forEach((mailbox) => {
-						const existing = mailbox.envelopeLists[listId] || []
+						const existing = dropStaleIds(mailbox.envelopeLists[listId] || [], mailbox.databaseId)
 						Vue.set(
 							mailbox.envelopeLists,
 							listId,

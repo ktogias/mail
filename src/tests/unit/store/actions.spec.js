@@ -206,6 +206,37 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	it('a stale id in a bucket list must not break adding new envelopes', async () => {
+		// Regression: an id whose envelope was gone from this.envelopes
+		// (left behind by an incomplete removal) made the sort helper throw,
+		// killing the whole mutation -- the bucket then silently rejected
+		// every new envelope forever: new mail re-served as "new" on every
+		// poll, the visible listing frozen, and the new-message notification
+		// (chained after the sync) never fired.
+		normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+		const account13 = { id: 13 }
+		store.addAccountMutation(account13)
+		store.addMailboxMutation({
+			account: account13,
+			mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+		})
+		store.addEnvelopesMutation({
+			envelopes: [
+				{ databaseId: 1, mailboxId: 11, uid: 1, dateInt: 100, flags: {}, tags: {} },
+				{ databaseId: 2, mailboxId: 11, uid: 2, dateInt: 200, flags: {}, tags: {} },
+			],
+			addToUnifiedMailboxes: false,
+		})
+		// simulate whatever leaves a list id without a backing envelope
+		delete store.envelopes[2]
+
+		store.addEnvelopesMutation({
+			envelopes: [{ databaseId: 3, mailboxId: 11, uid: 3, dateInt: 300, flags: {}, tags: {} }],
+			addToUnifiedMailboxes: false,
+		})
+		expect(store.mailboxes[11].envelopeLists['']).toContain(3)
+	})
+
 	it('fetchEnvelopes() drops entries that no longer match a filtered query', async () => {
 		// A real bug: opening a saved/quick filter (e.g. "unread") that was
 		// already cached from an earlier visit showed a message that had
