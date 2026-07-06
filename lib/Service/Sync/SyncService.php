@@ -24,11 +24,25 @@ use OCA\Mail\IMAP\PreviewEnhancer;
 use OCA\Mail\IMAP\Sync\Response;
 use OCA\Mail\Service\Search\FilterStringParser;
 use OCA\Mail\Service\Search\SearchQuery;
+use OCP\AppFramework\Utility\ITimeFactory;
+use OCP\ICacheFactory;
 use Psr\Log\LoggerInterface;
 use function array_diff;
 use function array_map;
 
 class SyncService {
+	/**
+	 * How long (seconds) a completed IMAP sync of a mailbox exempts every
+	 * other caller from doing their own. Several callers poll the same
+	 * mailbox on close cadences -- every open browser window, each of its
+	 * loaded query buckets, cron -- and each HTTP request otherwise opens
+	 * its own IMAP connection (login + SELECT alone measure ~3s against
+	 * Gmail on a 26.9k-message INBOX) to re-ask a question answered moments
+	 * ago. Chosen just below the frontend's 10-15s poll tick: a single
+	 * window still gets a real sync on every one of its own ticks; only the
+	 * redundant followers inside the window ride the marker.
+	 */
+	private const SYNC_FRESHNESS_WINDOW = 8;
 
 	public function __construct(
 		private IMAPClientFactory $clientFactory,
@@ -38,6 +52,8 @@ class SyncService {
 		private PreviewEnhancer $previewEnhancer,
 		private LoggerInterface $logger,
 		private MailboxSync $mailboxSync,
+		private ICacheFactory $cacheFactory,
+		private ITimeFactory $timeFactory,
 	) {
 	}
 
@@ -89,6 +105,31 @@ class SyncService {
 			throw MailboxNotCachedException::from($mailbox);
 		}
 
+		$query = $filter === null ? null : $this->filterStringParser->parse($filter);
+
+		// Freshness gate: if ANY caller completed a real sync of this
+		// mailbox within the last few seconds (see SYNC_FRESHNESS_WINDOW),
+		// serve the database diff without opening an IMAP connection at
+		// all. Initial syncs ($partialOnly === false) always run for real,
+		// and without a distributed cache the marker is never found, so
+		// behavior degrades to exactly what it was before.
+		$freshnessCache = $this->cacheFactory->createDistributed('mail_sync_freshness');
+		$freshnessKey = (string)$mailbox->getId();
+		if ($partialOnly) {
+			$freshUntil = $freshnessCache->get($freshnessKey);
+			if ($freshUntil !== null && (int)$freshUntil >= $this->timeFactory->getTime()) {
+				$this->logger->debug("Mailbox {$mailbox->getId()} was synced moments ago by another caller, serving cached state without IMAP");
+				return $this->getDatabaseSyncChanges(
+					$account,
+					$mailbox,
+					$knownIds ?? [],
+					$lastMessageTimestamp,
+					$sortOrder,
+					$query
+				);
+			}
+		}
+
 		$client = $this->clientFactory->getClient($account);
 
 		$this->synchronizer->sync(
@@ -105,7 +146,14 @@ class SyncService {
 
 		$client->logout();
 
-		$query = $filter === null ? null : $this->filterStringParser->parse($filter);
+		// Only a completed sync (including fresh stats for the badge) may
+		// arm the gate for followers.
+		$freshnessCache->set(
+			$freshnessKey,
+			$this->timeFactory->getTime() + self::SYNC_FRESHNESS_WINDOW,
+			self::SYNC_FRESHNESS_WINDOW * 4,
+		);
+
 		return $this->getDatabaseSyncChanges(
 			$account,
 			$mailbox,

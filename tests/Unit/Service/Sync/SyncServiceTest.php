@@ -40,6 +40,9 @@ final class SyncServiceTest extends TestCase {
 	/** @var SyncService */
 	private $syncService;
 
+	private \OCP\ICache&MockObject $freshnessCache;
+	private \OCP\AppFramework\Utility\ITimeFactory&MockObject $timeFactory;
+
 	protected function setUp(): void {
 		parent::setUp();
 
@@ -47,6 +50,11 @@ final class SyncServiceTest extends TestCase {
 		$this->synchronizer = $this->createMock(ImapToDbSynchronizer::class);
 		$this->messageMapper = $this->createMock(MessageMapper::class);
 		$this->mailboxSync = $this->createMock(MailboxSync::class);
+		$this->freshnessCache = $this->createMock(\OCP\ICache::class);
+		$cacheFactory = $this->createMock(\OCP\ICacheFactory::class);
+		$cacheFactory->method('createDistributed')->willReturn($this->freshnessCache);
+		$this->timeFactory = $this->createMock(\OCP\AppFramework\Utility\ITimeFactory::class);
+		$this->timeFactory->method('getTime')->willReturn(10_000);
 
 		$this->syncService = new SyncService(
 			$this->clientFactory,
@@ -55,7 +63,9 @@ final class SyncServiceTest extends TestCase {
 			$this->messageMapper,
 			$this->createStub(PreviewEnhancer::class),
 			$this->createStub(\Psr\Log\LoggerInterface::class),
-			$this->mailboxSync
+			$this->mailboxSync,
+			$cacheFactory,
+			$this->timeFactory
 		);
 	}
 
@@ -123,5 +133,97 @@ final class SyncServiceTest extends TestCase {
 		);
 
 		$this->assertEquals($expectedResponse, $response);
+	}
+
+	public function testFreshnessGateServesTheDatabaseWithoutTouchingImap(): void {
+		$account = $this->createMock(Account::class);
+		$account->method('getUserId')->willReturn('user');
+		$mailbox = new Mailbox();
+		$mailbox->setId(149);
+		$mailbox->setMessages(42);
+		$mailbox->setUnseen(10);
+		// Mark the mailbox as cached so a partial sync is allowed.
+		$mailbox->setSyncNewToken('a');
+		$mailbox->setSyncChangedToken('b');
+		$mailbox->setSyncVanishedToken('c');
+
+		// Another caller finished a real sync moments ago.
+		$this->freshnessCache->method('get')->with('149')->willReturn(10_003);
+
+		$this->clientFactory->expects($this->never())->method('getClient');
+		$this->synchronizer->expects($this->never())->method('sync');
+		$this->mailboxSync->expects($this->never())->method('syncStats');
+		// A gated response must not re-arm the marker either.
+		$this->freshnessCache->expects($this->never())->method('set');
+
+		$response = $this->syncService->syncMailbox(
+			$account,
+			$mailbox,
+			0,
+			true,
+			null,
+			[]
+		);
+
+		$this->assertEquals(new Response([], [], [], new MailboxStats(42, 10, null)), $response);
+	}
+
+	public function testStaleFreshnessMarkerRunsARealSyncAndArmsTheGate(): void {
+		$account = $this->createMock(Account::class);
+		$account->method('getUserId')->willReturn('user');
+		$mailbox = new Mailbox();
+		$mailbox->setId(149);
+		$mailbox->setMessages(42);
+		$mailbox->setUnseen(10);
+		$mailbox->setSyncNewToken('a');
+		$mailbox->setSyncChangedToken('b');
+		$mailbox->setSyncVanishedToken('c');
+
+		$this->freshnessCache->method('get')->willReturn(null);
+		$this->clientFactory
+			->method('getClient')
+			->willReturn($this->createStub(\Horde_Imap_Client_Socket::class));
+		$this->messageMapper->method('findUidsForIds')->willReturn([]);
+		$this->synchronizer->expects($this->once())->method('sync');
+		$this->mailboxSync->expects($this->once())->method('syncStats');
+		// now (10_000) + SYNC_FRESHNESS_WINDOW (8)
+		$this->freshnessCache->expects($this->once())
+			->method('set')
+			->with('149', 10_008, $this->greaterThan(8));
+
+		$this->syncService->syncMailbox(
+			$account,
+			$mailbox,
+			0,
+			true,
+			null,
+			[]
+		);
+	}
+
+	public function testInitialSyncBypassesTheFreshnessGate(): void {
+		$account = $this->createMock(Account::class);
+		$account->method('getUserId')->willReturn('user');
+		$mailbox = new Mailbox();
+		$mailbox->setId(149);
+		$mailbox->setMessages(42);
+		$mailbox->setUnseen(10);
+
+		// Even with a fresh marker, an initial sync must run for real.
+		$this->freshnessCache->method('get')->willReturn(10_003);
+		$this->clientFactory
+			->method('getClient')
+			->willReturn($this->createStub(\Horde_Imap_Client_Socket::class));
+		$this->messageMapper->method('findUidsForIds')->willReturn([]);
+		$this->synchronizer->expects($this->once())->method('sync');
+
+		$this->syncService->syncMailbox(
+			$account,
+			$mailbox,
+			0,
+			false,
+			null,
+			[]
+		);
 	}
 }
