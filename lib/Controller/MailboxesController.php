@@ -66,7 +66,7 @@ class MailboxesController extends Controller {
 	 * headroom for everything else sharing the same budget, while still
 	 * bounding a truly runaway client.
 	 */
-	private const SYNC_RATE_LIMIT = 100;
+	private const SYNC_RATE_LIMIT = 200;
 	private const SYNC_RATE_PERIOD = Mailbox::LOCK_TIMEOUT;
 
 	/**
@@ -223,8 +223,15 @@ class MailboxesController extends Controller {
 		// sync count. (Racy by design: the marker can expire between this
 		// check and the sync -- an occasional uncounted real sync is
 		// harmless.)
+		// Also skip charging when the mailbox is already locked by another
+		// in-flight sync: this request will be served from the database
+		// (see SyncService), so it does no IMAP work either. Without this,
+		// every member of the thundering herd that piles onto a
+		// freshness-window expiry got charged although only the winner
+		// actually syncs.
 		$chargeRateLimit = $user !== null
-			&& ($init || !$this->syncService->isMailboxFresh($mailbox));
+			&& ($init || (!$this->syncService->isMailboxFresh($mailbox)
+				&& !$mailbox->hasLocks($this->timeFactory->getTime())));
 		if ($chargeRateLimit) {
 			try {
 				$this->limiter->registerUserRequest(

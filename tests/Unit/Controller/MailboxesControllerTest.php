@@ -376,7 +376,7 @@ class MailboxesControllerTest extends TestCase {
 
 		$this->limiter->expects($this->once())
 			->method('registerUserRequest')
-			->with('mail-sync-mailbox-' . $mailboxId, 100, Mailbox::LOCK_TIMEOUT, $this->anything())
+			->with('mail-sync-mailbox-' . $mailboxId, 200, Mailbox::LOCK_TIMEOUT, $this->anything())
 			->willThrowException(new class extends \Exception implements \OCP\Security\RateLimiting\IRateLimitExceededException {
 			});
 
