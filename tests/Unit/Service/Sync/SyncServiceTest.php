@@ -40,7 +40,7 @@ final class SyncServiceTest extends TestCase {
 	/** @var SyncService */
 	private $syncService;
 
-	private \OCP\ICache&MockObject $freshnessCache;
+	private \OCP\IMemcache&MockObject $freshnessCache;
 	private \OCP\AppFramework\Utility\ITimeFactory&MockObject $timeFactory;
 
 	protected function setUp(): void {
@@ -50,7 +50,7 @@ final class SyncServiceTest extends TestCase {
 		$this->synchronizer = $this->createMock(ImapToDbSynchronizer::class);
 		$this->messageMapper = $this->createMock(MessageMapper::class);
 		$this->mailboxSync = $this->createMock(MailboxSync::class);
-		$this->freshnessCache = $this->createMock(\OCP\ICache::class);
+		$this->freshnessCache = $this->createMock(\OCP\IMemcache::class);
 		$cacheFactory = $this->createMock(\OCP\ICacheFactory::class);
 		$cacheFactory->method('createDistributed')->willReturn($this->freshnessCache);
 		$this->timeFactory = $this->createMock(\OCP\AppFramework\Utility\ITimeFactory::class);
@@ -149,6 +149,7 @@ final class SyncServiceTest extends TestCase {
 
 		// Another caller finished a real sync moments ago.
 		$this->freshnessCache->method('get')->with('149')->willReturn(10_003);
+		$this->freshnessCache->method('add')->willReturn(true);
 
 		$this->clientFactory->expects($this->never())->method('getClient');
 		$this->synchronizer->expects($this->never())->method('sync');
@@ -180,6 +181,7 @@ final class SyncServiceTest extends TestCase {
 		$mailbox->setSyncVanishedToken('c');
 
 		$this->freshnessCache->method('get')->willReturn(null);
+		$this->freshnessCache->method('add')->willReturn(true);
 		$this->clientFactory
 			->method('getClient')
 			->willReturn($this->createStub(\Horde_Imap_Client_Socket::class));
@@ -213,6 +215,7 @@ final class SyncServiceTest extends TestCase {
 		$mailbox->setSyncVanishedToken('c');
 
 		$this->freshnessCache->method('get')->willReturn(null);
+		$this->freshnessCache->method('add')->willReturn(true);
 		$client = $this->createMock(\Horde_Imap_Client_Socket::class);
 		$this->clientFactory->method('getClient')->willReturn($client);
 		$this->messageMapper->method('findUidsForIds')->willReturn([]);
@@ -271,6 +274,67 @@ final class SyncServiceTest extends TestCase {
 
 		$this->assertTrue($this->syncService->isMailboxFresh($mailbox));
 		$this->assertFalse($this->syncService->isMailboxFresh($mailbox));
+	}
+
+	public function testARealSyncAlreadyInFlightServesTheDatabaseDiff(): void {
+		$account = $this->createMock(Account::class);
+		$account->method('getUserId')->willReturn('user');
+		$mailbox = new Mailbox();
+		$mailbox->setId(149);
+		$mailbox->setMessages(42);
+		$mailbox->setUnseen(10);
+		$mailbox->setSyncNewToken('a');
+		$mailbox->setSyncChangedToken('b');
+		$mailbox->setSyncVanishedToken('c');
+
+		$this->freshnessCache->method('get')->willReturn(null);
+		// Another caller holds the real-sync mutex.
+		$this->freshnessCache->method('add')->with('syncing_149', 1, 180)->willReturn(false);
+
+		$this->clientFactory->expects($this->never())->method('getClient');
+		$this->synchronizer->expects($this->never())->method('sync');
+
+		$response = $this->syncService->syncMailbox(
+			$account,
+			$mailbox,
+			0,
+			true,
+			null,
+			[]
+		);
+
+		$this->assertEquals(new Response([], [], [], new MailboxStats(42, 10, null)), $response);
+	}
+
+	public function testTheRealSyncWinnerReleasesTheMutex(): void {
+		$account = $this->createMock(Account::class);
+		$account->method('getUserId')->willReturn('user');
+		$mailbox = new Mailbox();
+		$mailbox->setId(149);
+		$mailbox->setMessages(42);
+		$mailbox->setUnseen(10);
+		$mailbox->setSyncNewToken('a');
+		$mailbox->setSyncChangedToken('b');
+		$mailbox->setSyncVanishedToken('c');
+
+		$this->freshnessCache->method('get')->willReturn(null);
+		$this->freshnessCache->method('add')->willReturn(true);
+		$this->freshnessCache->expects($this->once())
+			->method('remove')
+			->with('syncing_149');
+		$this->clientFactory->method('getClient')
+			->willReturn($this->createStub(\Horde_Imap_Client_Socket::class));
+		$this->messageMapper->method('findUidsForIds')->willReturn([]);
+		$this->synchronizer->expects($this->once())->method('sync');
+
+		$this->syncService->syncMailbox(
+			$account,
+			$mailbox,
+			0,
+			true,
+			null,
+			[]
+		);
 	}
 
 	public function testInitialSyncBypassesTheFreshnessGate(): void {

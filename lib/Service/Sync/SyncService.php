@@ -26,6 +26,7 @@ use OCA\Mail\Service\Search\FilterStringParser;
 use OCA\Mail\Service\Search\SearchQuery;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\ICacheFactory;
+use OCP\IMemcache;
 use Psr\Log\LoggerInterface;
 use function array_diff;
 use function array_map;
@@ -130,6 +131,34 @@ class SyncService {
 			}
 		}
 
+		// One real sync per mailbox at a time, across every window and
+		// bucket: the per-phase mailbox locks allow two callers whose
+		// pruned criteria differ to run heavy phases CONCURRENTLY, and on
+		// a large mailbox those parallel sessions throttle each other at
+		// the provider (measured live: single syncs of ~25s degraded to
+		// 72s each with three in flight, occupying half the mail pool).
+		// The loser of this mutex serves the database diff immediately --
+		// the winner's results land there as it progresses.
+		$syncMutexKey = 'syncing_' . $mailbox->getId();
+		$syncMutexAcquired = false;
+		if ($partialOnly && $freshnessCache instanceof IMemcache) {
+			$syncMutexAcquired = $freshnessCache->add($syncMutexKey, 1, 180);
+		} elseif ($partialOnly) {
+			// No distributed memcache with add(): no mutex, previous behavior.
+			$syncMutexAcquired = true;
+		}
+		if ($partialOnly && !$syncMutexAcquired) {
+			$this->logger->debug("Mailbox {$mailbox->getId()} already has a real sync in flight, serving current database state");
+			return $this->getDatabaseSyncChanges(
+				$account,
+				$mailbox,
+				$knownIds ?? [],
+				$lastMessageTimestamp,
+				$sortOrder,
+				$query
+			);
+		}
+
 		$client = $this->clientFactory->getClient($account);
 
 		try {
@@ -165,6 +194,9 @@ class SyncService {
 			// window 90+ seconds behind a badge that had already updated).
 			$this->logger->debug("Mailbox {$mailbox->getId()} is locked by another syncer, serving current database state instead of a retry hint");
 		} finally {
+			if ($syncMutexAcquired && $freshnessCache instanceof IMemcache) {
+				$freshnessCache->remove($syncMutexKey);
+			}
 			$client->logout();
 		}
 
