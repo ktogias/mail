@@ -79,6 +79,19 @@ export default {
 			// just once at startup) means no two windows stay in lockstep
 			// for long, however many happen to be open.
 			//
+			// Widened from 10-15s to 20-30s: the freshness gate
+			// (SyncService::SYNC_FRESHNESS_WINDOW) makes a second poller's
+			// tick cheap only while it lands inside the FIRST poller's
+			// still-fresh window -- with two independently-jittered pollers
+			// (e.g. a desktop tab plus a phone, confirmed live: opening a
+			// second device roughly doubled the real (non-gated) sync rate
+			// for the same watched mailboxes, visibly loading a
+			// resource-constrained host -- Postgres at 177% CPU, app
+			// container at 117%, sustained swap use). Doubling the tick
+			// period roughly halves the steady-state real-sync rate
+			// regardless of how many devices are open, at the cost of
+			// somewhat less immediate freshness for genuinely new mail.
+			//
 			// Still not a recursive setTimeout-after-completion: the next
 			// tick is scheduled immediately, not gated on this tick's sync
 			// call resolving, so one genuinely slow/locked mailbox can't
@@ -99,9 +112,9 @@ export default {
 							},
 						})
 					})
-				this.watchedMailboxSyncTimeout = setTimeout(tick, 10_000 + Math.random() * 5_000)
+				this.watchedMailboxSyncTimeout = setTimeout(tick, 20_000 + Math.random() * 10_000)
 			}
-			this.watchedMailboxSyncTimeout = setTimeout(tick, 10_000 + Math.random() * 5_000)
+			this.watchedMailboxSyncTimeout = setTimeout(tick, 20_000 + Math.random() * 10_000)
 		},
 	},
 }

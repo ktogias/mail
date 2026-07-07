@@ -38,4 +38,27 @@ describe('App', () => {
 		store.isExpiredSession = true
 		expect(view.vm.isExpiredSession).toBe(true)
 	})
+
+	it('ticks the watched-mailbox poller every 20-30s, not 10-15s', async () => {
+		// Widened 2026-07-08: a second independently-jittered poller (e.g. a
+		// phone alongside a desktop tab) only rides the freshness gate when
+		// its own tick happens to land inside the first poller's still-fresh
+		// window -- with the old 10-15s period, opening a second device
+		// roughly doubled the real (non-gated) sync rate for the same
+		// watched mailboxes, measurably loading a resource-constrained host.
+		vi.useFakeTimers()
+		store.syncWatchedMailboxes = vi.fn().mockResolvedValue()
+
+		view.vm.startWatchedMailboxSync()
+
+		// Nothing fires before the new floor.
+		vi.advanceTimersByTime(19_999)
+		expect(store.syncWatchedMailboxes).not.toHaveBeenCalled()
+
+		// Everything fires by the new ceiling (floor + jitter span).
+		vi.advanceTimersByTime(10_001)
+		expect(store.syncWatchedMailboxes).toHaveBeenCalledTimes(1)
+
+		vi.useRealTimers()
+	})
 })

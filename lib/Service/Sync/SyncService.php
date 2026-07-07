@@ -39,11 +39,17 @@ class SyncService {
 	 * loaded query buckets, cron -- and each HTTP request otherwise opens
 	 * its own IMAP connection (login + SELECT alone measure ~3s against
 	 * Gmail on a 26.9k-message INBOX) to re-ask a question answered moments
-	 * ago. Chosen just below the frontend's 10-15s poll tick: a single
-	 * window still gets a real sync on every one of its own ticks; only the
-	 * redundant followers inside the window ride the marker.
+	 * ago. Chosen just below the frontend's 20-30s poll tick (raised from
+	 * 8/10-15s: a second independently-jittered poller -- e.g. a second
+	 * browser window, or a phone alongside a desktop -- only rides this
+	 * window when its tick happens to land inside it, so a narrow window
+	 * relative to the tick period meant extra simultaneous pollers still
+	 * roughly doubled the real, non-gated sync rate; confirmed live on a
+	 * resource-constrained host): a single window still gets a real sync on
+	 * every one of its own ticks; only the redundant followers inside the
+	 * window ride the marker.
 	 */
-	private const SYNC_FRESHNESS_WINDOW = 8;
+	private const SYNC_FRESHNESS_WINDOW = 18;
 
 	public function __construct(
 		private IMAPClientFactory $clientFactory,

@@ -188,10 +188,10 @@ final class SyncServiceTest extends TestCase {
 		$this->messageMapper->method('findUidsForIds')->willReturn([]);
 		$this->synchronizer->expects($this->once())->method('sync');
 		$this->mailboxSync->expects($this->once())->method('syncStats');
-		// now (10_000) + SYNC_FRESHNESS_WINDOW (8)
+		// now (10_000) + SYNC_FRESHNESS_WINDOW (18)
 		$this->freshnessCache->expects($this->once())
 			->method('set')
-			->with('149', 10_008, $this->greaterThan(8));
+			->with('149', 10_018, $this->greaterThan(18));
 
 		$this->syncService->syncMailbox(
 			$account,
