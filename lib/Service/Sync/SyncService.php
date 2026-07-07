@@ -132,27 +132,41 @@ class SyncService {
 
 		$client = $this->clientFactory->getClient($account);
 
-		$this->synchronizer->sync(
-			$account,
-			$client,
-			$mailbox,
-			$this->logger,
-			$criteria,
-			$knownIds === null ? null : $this->messageMapper->findUidsForIds($mailbox, $knownIds),
-			!$partialOnly
-		);
+		try {
+			$this->synchronizer->sync(
+				$account,
+				$client,
+				$mailbox,
+				$this->logger,
+				$criteria,
+				$knownIds === null ? null : $this->messageMapper->findUidsForIds($mailbox, $knownIds),
+				!$partialOnly
+			);
 
-		$this->mailboxSync->syncStats($client, $mailbox);
+			$this->mailboxSync->syncStats($client, $mailbox);
 
-		$client->logout();
-
-		// Only a completed sync (including fresh stats for the badge) may
-		// arm the gate for followers.
-		$freshnessCache->set(
-			$freshnessKey,
-			$this->timeFactory->getTime() + self::SYNC_FRESHNESS_WINDOW,
-			self::SYNC_FRESHNESS_WINDOW * 4,
-		);
+			// Only a completed sync (including fresh stats for the badge)
+			// may arm the gate for followers.
+			$freshnessCache->set(
+				$freshnessKey,
+				$this->timeFactory->getTime() + self::SYNC_FRESHNESS_WINDOW,
+				self::SYNC_FRESHNESS_WINDOW * 4,
+			);
+		} catch (MailboxLockedException $e) {
+			if (!$partialOnly) {
+				throw $e;
+			}
+			// Another caller holds the sync lock RIGHT NOW -- its results
+			// are landing in the database as it progresses. Serving the
+			// current database diff gives this client everything known so
+			// far at zero cost, instead of a 409 whose Retry-After sends it
+			// into a capped exponential backoff (measured live: an unlucky
+			// collision at the freshness-window boundary put a focused
+			// window 90+ seconds behind a badge that had already updated).
+			$this->logger->debug("Mailbox {$mailbox->getId()} is locked by another syncer, serving current database state instead of a retry hint");
+		} finally {
+			$client->logout();
+		}
 
 		return $this->getDatabaseSyncChanges(
 			$account,
@@ -162,6 +176,19 @@ class SyncService {
 			$sortOrder,
 			$query
 		);
+	}
+
+	/**
+	 * Whether the freshness gate would serve this mailbox from the
+	 * database right now (no IMAP touched). Used by the controller to
+	 * avoid charging such requests against the sync rate limit: the
+	 * limiter exists to protect the mailbox/IMAP from being hammered,
+	 * and a gated response costs neither.
+	 */
+	public function isMailboxFresh(Mailbox $mailbox): bool {
+		$freshUntil = $this->cacheFactory->createDistributed('mail_sync_freshness')
+			->get((string)$mailbox->getId());
+		return $freshUntil !== null && (int)$freshUntil >= $this->timeFactory->getTime();
 	}
 
 	/**

@@ -215,7 +215,17 @@ class MailboxesController extends Controller {
 		$order = $sortOrder === 'newest' ? IMailSearch::ORDER_NEWEST_FIRST: IMailSearch::ORDER_OLDEST_FIRST;
 
 		$user = $this->userManager->get($effectiveUserId);
-		if ($user !== null) {
+		// A request the freshness gate will serve straight from the
+		// database touches no IMAP and costs near nothing -- charging it
+		// against the sync rate limit made the limit trip on request
+		// VOLUME (windows x query buckets) even though almost none of
+		// those requests did real work. Only requests that may actually
+		// sync count. (Racy by design: the marker can expire between this
+		// check and the sync -- an occasional uncounted real sync is
+		// harmless.)
+		$chargeRateLimit = $user !== null
+			&& ($init || !$this->syncService->isMailboxFresh($mailbox));
+		if ($chargeRateLimit) {
 			try {
 				$this->limiter->registerUserRequest(
 					'mail-sync-mailbox-' . $id,

@@ -201,6 +201,78 @@ final class SyncServiceTest extends TestCase {
 		);
 	}
 
+	public function testLockedMailboxServesTheDatabaseDiffOnPartialSync(): void {
+		$account = $this->createMock(Account::class);
+		$account->method('getUserId')->willReturn('user');
+		$mailbox = new Mailbox();
+		$mailbox->setId(149);
+		$mailbox->setMessages(42);
+		$mailbox->setUnseen(10);
+		$mailbox->setSyncNewToken('a');
+		$mailbox->setSyncChangedToken('b');
+		$mailbox->setSyncVanishedToken('c');
+
+		$this->freshnessCache->method('get')->willReturn(null);
+		$client = $this->createMock(\Horde_Imap_Client_Socket::class);
+		$this->clientFactory->method('getClient')->willReturn($client);
+		$this->messageMapper->method('findUidsForIds')->willReturn([]);
+		$this->synchronizer->expects($this->once())
+			->method('sync')
+			->willThrowException(\OCA\Mail\Exception\MailboxLockedException::from($mailbox));
+		// The lock conflict must not leak out as a 409: the other caller's
+		// sync is filling the database right now, so the current diff is
+		// served instead.
+		$this->mailboxSync->expects($this->never())->method('syncStats');
+		$this->freshnessCache->expects($this->never())->method('set');
+		$client->expects($this->once())->method('logout');
+
+		$response = $this->syncService->syncMailbox(
+			$account,
+			$mailbox,
+			0,
+			true,
+			null,
+			[]
+		);
+
+		$this->assertEquals(new Response([], [], [], new MailboxStats(42, 10, null)), $response);
+	}
+
+	public function testLockedMailboxStillPropagatesForInitialSync(): void {
+		$account = $this->createMock(Account::class);
+		$account->method('getUserId')->willReturn('user');
+		$mailbox = new Mailbox();
+		$mailbox->setId(149);
+
+		$this->freshnessCache->method('get')->willReturn(null);
+		$this->clientFactory->method('getClient')
+			->willReturn($this->createStub(\Horde_Imap_Client_Socket::class));
+		$this->messageMapper->method('findUidsForIds')->willReturn([]);
+		$this->synchronizer->method('sync')
+			->willThrowException(\OCA\Mail\Exception\MailboxLockedException::from($mailbox));
+
+		$this->expectException(\OCA\Mail\Exception\MailboxLockedException::class);
+		$this->syncService->syncMailbox(
+			$account,
+			$mailbox,
+			0,
+			false,
+			null,
+			[]
+		);
+	}
+
+	public function testIsMailboxFreshReflectsTheMarker(): void {
+		$mailbox = new Mailbox();
+		$mailbox->setId(149);
+
+		$this->freshnessCache->method('get')->with('149')
+			->willReturnOnConsecutiveCalls(10_003, null);
+
+		$this->assertTrue($this->syncService->isMailboxFresh($mailbox));
+		$this->assertFalse($this->syncService->isMailboxFresh($mailbox));
+	}
+
 	public function testInitialSyncBypassesTheFreshnessGate(): void {
 		$account = $this->createMock(Account::class);
 		$account->method('getUserId')->willReturn('user');
