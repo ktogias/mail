@@ -233,7 +233,15 @@ class SyncService {
 		$vanished = array_values(array_diff($knownIds, $stillKnownIds));
 
 		return new Response(
-			$this->previewEnhancer->process($account, $mailbox, $new),
+			// liveEnhance=false: a sync response must not block on live IMAP
+			// preview/structure enhancement. A caller with a stale bucket can
+			// legitimately receive hundreds of "new" messages in one diff --
+			// live-enhancing them ran for minutes, tied up a mail-pool worker
+			// past every timeout (measured: a steady stream of 504s, all on
+			// the big Gmail INBOX), and since the client never got the
+			// response, it re-requested the same huge diff every tick,
+			// forever. Same treatment the message-LIST path already has.
+			$this->previewEnhancer->process($account, $mailbox, $new, false, null, false),
 			$changed,
 			$vanished,
 			$mailbox->getStats()
