@@ -629,9 +629,16 @@ class ImapToDbSynchronizer {
 
 		if ($criteria & Horde_Imap_Client::SYNC_VANISHEDUIDS) {
 			$token = $parse($mailbox->getSyncVanishedToken());
+			// >= rather than ===: a server count BELOW the local one means
+			// something vanished; a server count ABOVE it (with UIDNEXT
+			// unchanged) means the local cache is missing an old message --
+			// a gap the vanished phase cannot repair anyway (observed live:
+			// a permanent off-by-one from a historical bug made this phase
+			// run its full chunked UID sweep on every single poll, finding
+			// nothing, forever).
 			if ($token !== null
 				&& $token->getNextUid() === $uidNext
-				&& $messages === $this->dbMapper->countByMailbox($mailbox)) {
+				&& $messages >= $this->dbMapper->countByMailbox($mailbox)) {
 				$criteria &= ~Horde_Imap_Client::SYNC_VANISHEDUIDS;
 			}
 		}
