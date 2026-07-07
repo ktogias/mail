@@ -40,7 +40,22 @@ class PreviewEnhancer {
 	 *
 	 * @return Message[]
 	 */
-	public function process(Account $account, Mailbox $mailbox, array $messages, bool $preLoadAvatars = false, ?string $userId = null): array {
+	public function process(Account $account, Mailbox $mailbox, array $messages, bool $preLoadAvatars = false, ?string $userId = null, bool $liveEnhance = true): array {
+		// $liveEnhance lets a caller skip the whole live-IMAP section below
+		// entirely. getClient() connects unconditionally regardless of
+		// whether anything below actually ends up needing it, and
+		// getAttachmentNames() can also make its own live call per message
+		// for an uncached attachment -- both are unbounded network hangs
+		// when the account's IMAP provider is slow or unreachable, unlike
+		// the body-structure fetch below which is at least wrapped in a
+		// catchable exception handler. Listing a folder should be able to
+		// show whatever's already cached without waiting on any of this;
+		// live enhancement stays synchronous for callers opening one
+		// specific message, where waiting is expected.
+		if (!$liveEnhance) {
+			return $messages;
+		}
+
 		$needAnalyze = array_reduce($messages, static function (array $carry, Message $message) {
 			if ($message->getStructureAnalyzed()) {
 				// Nothing to do
