@@ -232,11 +232,28 @@ export default {
 			this.error = false
 
 			logger.debug(`syncing folder ${this.mailbox.databaseId} (${this.query}) during cache initalization`)
-			this.sync(true)
+			// Missing `return` and `.catch()` here previously meant: (1) the
+			// caller's `await this.initializeCache()` awaited `undefined`,
+			// not this chain, so its own try/catch never engaged either;
+			// (2) if the forced sync failed for ANY reason -- a lock
+			// conflict from a second bucket racing the same mailbox's
+			// initial sync is a completely ordinary occurrence, not an edge
+			// case -- the `.then()` that clears loadingCacheInitialization
+			// never ran. Nothing else ever resets that flag, so the
+			// "Loading messages…" screen stayed up forever, even after the
+			// mailbox got cached moments later by the racing caller or a
+			// background poller. Confirmed live on ktogias@isi.gr's Junk
+			// folder: a 409 on the forced sync, then indefinite loading
+			// with zero further envelope fetches for that view.
+			return this.sync(true)
 				.then(() => {
 					this.loadingCacheInitialization = false
 
 					return this.loadEnvelopes()
+				})
+				.catch((error) => {
+					this.loadingCacheInitialization = false
+					throw error
 				})
 		},
 
