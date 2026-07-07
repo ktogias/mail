@@ -126,11 +126,11 @@ class SynchronizerTest extends TestCase {
 		$this->assertEquals($expected, $response);
 	}
 
-	public function testSyncFlagsViaCondstoreIsASingleUnrestrictedRoundTrip(): void {
-		// base64('U100,V200,H300'): the token carries a HIGHESTMODSEQ, and the
-		// server has CONDSTORE -- the changed set comes back from ONE
-		// unrestricted MODSEQ sync instead of one chunked command per ~10KB
-		// of known UIDs.
+	public function testSyncFlagsViaCondstoreSmallSetIsOneRestrictedRoundTrip(): void {
+		// base64('U100,V200,H300'): the token carries a HIGHESTMODSEQ and the
+		// server has CONDSTORE. A known-UID set that fits one command is
+		// passed as the ids restriction of a single MODSEQ sync -- vital for
+		// the web path, whose token only advances on background syncs.
 		$token = base64_encode('U100,V200,H300');
 		$request = new Request('abcdef', 'inbox', $token, [8, 9, 10]);
 
@@ -140,11 +140,46 @@ class SynchronizerTest extends TestCase {
 		$imapClient->method('__get')->with('capability')->willReturn($capability);
 
 		$hordeSync = $this->createMock(Horde_Imap_Client_Data_Sync::class);
-		// 999 is a changed UID we don't know about (a new message; the
-		// new-messages phase deals with it) -- it must be filtered out.
 		$hordeSync->method('__get')
 			->with('flagsuids')
-			->willReturn(new Horde_Imap_Client_Ids([8, 999]));
+			->willReturn(new Horde_Imap_Client_Ids([8]));
+		$imapClient->expects($this->once())
+			->method('sync')
+			->with(
+				$this->equalTo(new Horde_Imap_Client_Mailbox('inbox')),
+				$this->equalTo($token),
+				$this->callback(fn (array $opts) => $opts['criteria'] === Horde_Imap_Client::SYNC_FLAGSUIDS
+					&& isset($opts['ids'])),
+			)
+			->willReturn($hordeSync);
+
+		$this->synchronizer->sync(
+			$imapClient,
+			$request,
+			'user',
+			false,
+			$this->logger,
+			Horde_Imap_Client::SYNC_FLAGSUIDS,
+		);
+	}
+
+	public function testSyncFlagsViaCondstoreLargeSetIsOneUnrestrictedRoundTripIntersectedLocally(): void {
+		$token = base64_encode('U100,V200,H300');
+		// Too many UIDs for a single command: one UNRESTRICTED search, then
+		// a local intersect (unknown changed UIDs are new messages, the new
+		// phase's job).
+		$known = range(1, 8000, 2);
+		$request = new Request('abcdef', 'inbox', $token, $known);
+
+		$capability = $this->createMock(Horde_Imap_Client_Data_Capability_Imap::class);
+		$capability->method('isEnabled')->with('CONDSTORE')->willReturn(true);
+		$imapClient = $this->createMock(Horde_Imap_Client_Base::class);
+		$imapClient->method('__get')->with('capability')->willReturn($capability);
+
+		$hordeSync = $this->createMock(Horde_Imap_Client_Data_Sync::class);
+		$hordeSync->method('__get')
+			->with('flagsuids')
+			->willReturn(new Horde_Imap_Client_Ids([7, 9, 10002]));
 		$imapClient->expects($this->once())
 			->method('sync')
 			->with(
@@ -158,11 +193,12 @@ class SynchronizerTest extends TestCase {
 			->method('findByIds')
 			->willReturnCallback(function ($client, $mailbox, $ids) {
 				// First call: new messages (empty). Second: the changed set,
-				// intersected down to the known UID 8.
+				// intersected down to known UIDs (10002 dropped: unknown;
+				// 7 and 9 kept: odd numbers are in range(1, 8000, 2)).
 				static $call = 0;
 				$call++;
 				if ($call === 2) {
-					$this->assertEquals(new Horde_Imap_Client_Ids([8]), $ids);
+					$this->assertEquals(new Horde_Imap_Client_Ids([7, 9]), $ids);
 				}
 				return [];
 			});

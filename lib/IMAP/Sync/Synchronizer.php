@@ -187,6 +187,23 @@ class Synchronizer {
 		// for a 26.9k-message Gmail INBOX, entirely round-trip-bound.
 		if ($imapClient->capability->isEnabled('CONDSTORE')
 			&& $this->syncTokenParser->parseSyncToken($request->getToken())->getHighestModSeq() !== null) {
+			$chunks = chunk_uid_sequence($request->getUids(), self::UID_CHUNK_MAX_BYTES);
+			if (count($chunks) === 1) {
+				// The whole known-UID set fits one command: restrict the
+				// MODSEQ search to it. Crucial for the web path, whose sync
+				// token only advances on background (full-list) syncs -- an
+				// unrestricted search there re-covered the entire window
+				// since the last background sync on EVERY poll (measured:
+				// 14-16s Horde time plus 6-7s persisting thousands of rows,
+				// back to back, on the busy Gmail INBOX).
+				return $imapClient->sync($mailbox, $request->getToken(), [
+					'criteria' => Horde_Imap_Client::SYNC_FLAGSUIDS,
+					'ids' => $chunks[0],
+				])->flagsuids;
+			}
+			// Large known set (background sync): one unrestricted search
+			// plus a local intersect still beats one command per ~10KB
+			// UID chunk.
 			$changed = $imapClient->sync($mailbox, $request->getToken(), [
 				'criteria' => Horde_Imap_Client::SYNC_FLAGSUIDS,
 			])->flagsuids;
