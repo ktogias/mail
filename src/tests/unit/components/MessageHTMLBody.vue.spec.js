@@ -71,4 +71,41 @@ describe('MessageHTMLBody', () => {
 
 		expect(() => view.vm.onMessageFrameLoad()).not.toThrow()
 	})
+
+	it('nudges a resize once each newly-unblocked image actually finishes loading', () => {
+		// Regression: unblocking images sets `src`, which iframe-resizer's
+		// own MutationObserver reacts to immediately -- before the image
+		// has actually loaded and grown the layout. Nothing re-triggers a
+		// resize once it finally does. Confirmed live: unblocking a
+		// banner image left the iframe cut off after only its top
+		// sliver, with no way to scroll to see the rest.
+		const view = mountMessageHTMLBody()
+		const resize = vi.fn()
+		view.vm.$refs.iframe.iFrameResizer = { resize }
+
+		const img = document.createElement('img')
+		img.setAttribute('data-original-src', 'https://example.test/banner.png')
+		img.style.display = 'none'
+		const fakeDoc = {
+			querySelectorAll: vi.fn((selector) => {
+				if (selector === '[data-original-src]') {
+					return [img]
+				}
+				return []
+			}),
+		}
+		Object.defineProperty(view.vm.$refs.iframe, 'contentDocument', {
+			value: fakeDoc,
+			configurable: true,
+		})
+
+		view.vm.displayIframe()
+
+		expect(img.getAttribute('src')).toBe('https://example.test/banner.png')
+		expect(resize).not.toHaveBeenCalled()
+
+		img.dispatchEvent(new Event('load'))
+
+		expect(resize).toHaveBeenCalledTimes(1)
+	})
 })

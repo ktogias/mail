@@ -191,6 +191,20 @@ export default {
 			iframeDoc.querySelectorAll('[data-original-src]').forEach((node) => {
 				node.style.display = null
 				node.setAttribute('src', node.getAttribute('data-original-src'))
+				// Setting `src` here is a DOM mutation iframe-resizer's own
+				// MutationObserver reacts to immediately -- but the image
+				// itself loads asynchronously, so that resize captures the
+				// height BEFORE the image has actually loaded and grown
+				// the layout. Nothing re-triggers a resize once it finally
+				// does, since "an <img> finished loading" isn't itself a
+				// DOM mutation the observer would catch. Confirmed live:
+				// unblocking a banner image left the iframe cut off after
+				// only the top sliver of it, with no way to scroll to see
+				// the rest. Nudge one more resize once each image actually
+				// finishes loading, when the real final height is known.
+				node.addEventListener('load', () => {
+					this.$refs.iframe.iFrameResizer?.resize()
+				}, { once: true })
 			})
 			iframeDoc
 				.querySelectorAll('[data-original-style]')
