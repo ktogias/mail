@@ -88,6 +88,25 @@ class SyncService {
 	 */
 	private const LOAD_BUSY_THRESHOLD = 2;
 
+	/**
+	 * A client with truly empty knownIds -- a fresh browser session, or a
+	 * mailbox/query bucket never fetched before -- has no known state to
+	 * diff against, so there is no "what changed" to compute. Returning
+	 * every message the mailbox has ever received (upstream's original
+	 * answer to this, unbounded, since commit 9498ebac6 in 2020) is fine
+	 * for a small personal mailbox, but on anything with hundreds+ of
+	 * messages it turns a lightweight sync into a full-table dump the
+	 * client then has to reactively process in one go -- measured live: a
+	 * 592-message Sent folder alone produced enough main-thread work to
+	 * trigger the browser's own "page is slowing down" warning on a fresh
+	 * session, and the same mechanism against a 26.9k-message Gmail INBOX
+	 * would be far worse. Capped to a modest multiple of a single list
+	 * page so a cold-start sync seeds the client with something to show,
+	 * not its entire history -- self-healing on the next tick once the
+	 * client has real known ids to diff against instead.
+	 */
+	private const COLD_START_SYNC_LIMIT = 50;
+
 	public function __construct(
 		private IMAPClientFactory $clientFactory,
 		private ImapToDbSynchronizer $synchronizer,
@@ -315,7 +334,7 @@ class SyncService {
 		string $sortOrder,
 		?SearchQuery $query): Response {
 		if ($knownIds === []) {
-			$newIds = $this->messageMapper->findAllIds($mailbox);
+			$newIds = $this->messageMapper->findAllIds($mailbox, $sortOrder, self::COLD_START_SYNC_LIMIT);
 		} else {
 			$newIds = $this->messageMapper->findNewIds($mailbox, $knownIds, $lastMessageTimestamp, $sortOrder);
 		}

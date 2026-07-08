@@ -12,6 +12,7 @@ namespace OCA\Mail\Tests\Integration\Db;
 use ChristophWurst\Nextcloud\Testing\DatabaseTransaction;
 use ChristophWurst\Nextcloud\Testing\TestCase;
 use OCA\Mail\Account;
+use OCA\Mail\Contracts\IMailSearch;
 use OCA\Mail\Db\Mailbox;
 use OCA\Mail\Db\MessageMapper;
 use OCA\Mail\Db\TagMapper;
@@ -462,5 +463,36 @@ class MessageMapperTest extends TestCase {
 
 		$mails = $this->mapper->findIdsAfter($mailbox, 2, 1234567890 + 200, 5);
 		$this->assertEquals([], $mails);
+	}
+
+	public function testFindAllIdsCapsAndOrdersInsteadOfDumpingTheWholeMailbox(): void {
+		// A cold-start sync (empty knownIds) has nothing to diff against --
+		// this is the bounded replacement for what used to be an
+		// unconditional "return every message the mailbox has ever
+		// received" (see SyncService::COLD_START_SYNC_LIMIT).
+		$mailbox = new Mailbox();
+		$mailbox->setId(5);
+		foreach (range(1, 10) as $i) {
+			$this->timestamp = 1234567890 + $i;
+			$this->insertMessageWithId($i, $mailbox->getId());
+		}
+
+		$newest3 = $this->mapper->findAllIds($mailbox, IMailSearch::ORDER_NEWEST_FIRST, 3);
+		$this->assertEquals([10, 9, 8], $newest3);
+
+		$oldest3 = $this->mapper->findAllIds($mailbox, IMailSearch::ORDER_OLDEST_FIRST, 3);
+		$this->assertEquals([1, 2, 3], $oldest3);
+
+		// A limit larger than the mailbox's actual message count returns
+		// everything, not an error or a padded/truncated result.
+		$all = $this->mapper->findAllIds($mailbox, IMailSearch::ORDER_NEWEST_FIRST, 100);
+		$this->assertCount(10, $all);
+	}
+
+	public function testFindAllIdsOnAnEmptyMailboxReturnsNothing(): void {
+		$mailbox = new Mailbox();
+		$mailbox->setId(6);
+
+		$this->assertEquals([], $this->mapper->findAllIds($mailbox, IMailSearch::ORDER_NEWEST_FIRST, 50));
 	}
 }

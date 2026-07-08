@@ -169,6 +169,41 @@ final class SyncServiceTest extends TestCase {
 		$this->assertEquals(new Response([], [], [], new MailboxStats(42, 10, null)), $response);
 	}
 
+	public function testEmptyKnownIdsBoundsTheColdStartDumpInsteadOfReturningTheWholeMailbox(): void {
+		// A client with truly empty knownIds (a fresh browser session) has
+		// nothing to diff against -- confirmed live: an unbounded dump of a
+		// 592-message Sent folder alone was enough to visibly stall the
+		// browser's main thread. findAllIds() must be called with the sort
+		// order and a bounded limit, not just the mailbox.
+		$account = $this->createMock(Account::class);
+		$account->method('getUserId')->willReturn('user');
+		$mailbox = new Mailbox();
+		$mailbox->setId(149);
+		$mailbox->setMessages(42);
+		$mailbox->setUnseen(10);
+		$mailbox->setSyncNewToken('a');
+		$mailbox->setSyncChangedToken('b');
+		$mailbox->setSyncVanishedToken('c');
+
+		$this->freshnessCache->method('get')->with('149')->willReturn(10_003);
+		$this->freshnessCache->method('add')->willReturn(true);
+
+		$this->messageMapper->expects($this->once())
+			->method('findAllIds')
+			->with($mailbox, 'DESC', 50)
+			->willReturn([]);
+
+		$this->syncService->syncMailbox(
+			$account,
+			$mailbox,
+			0,
+			true,
+			null,
+			[],
+			'DESC'
+		);
+	}
+
 	public function testStaleFreshnessMarkerRunsARealSyncAndArmsTheGate(): void {
 		$account = $this->createMock(Account::class);
 		$account->method('getUserId')->willReturn('user');

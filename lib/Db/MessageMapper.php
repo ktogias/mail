@@ -163,12 +163,17 @@ class MessageMapper extends QBMapper {
 		return $count;
 	}
 
-	public function findAllIds(Mailbox $mailbox): array {
+	/**
+	 * @param IMailSearch::ORDER_* $sortOrder
+	 */
+	public function findAllIds(Mailbox $mailbox, string $sortOrder, int $limit): array {
 		$query = $this->db->getQueryBuilder();
 
 		$query->select('id')
 			->from($this->getTableName())
-			->where($query->expr()->eq('mailbox_id', $query->createNamedParameter($mailbox->getId(), IQueryBuilder::PARAM_INT), IQueryBuilder::PARAM_INT));
+			->where($query->expr()->eq('mailbox_id', $query->createNamedParameter($mailbox->getId(), IQueryBuilder::PARAM_INT), IQueryBuilder::PARAM_INT))
+			->orderBy('sent_at', $sortOrder === IMailSearch::ORDER_OLDEST_FIRST ? 'ASC' : 'DESC')
+			->setMaxResults($limit);
 
 		return $this->findIds($query);
 	}
