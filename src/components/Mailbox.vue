@@ -209,6 +209,27 @@ export default {
 			return
 		}
 
+		// Cold boot landing directly on a specific thread (a hard
+		// refresh, a bookmarked/shared thread URL): Thread.vue mounts at
+		// roughly the same moment as this component and fires its own
+		// thread/html/body fetches. Without this, this folder's listing
+		// fetch competes with those for the same handful of mail FPM
+		// workers at the exact same instant. A short head start here
+		// lets the thread's requests get issued and queued first,
+		// instead of racing for the pool. Confirmed live via HAR + docker
+		// stats: a burst of ~23 concurrent requests on a hard refresh
+		// queued behind each other on a 4-worker pool while the DB
+		// container was itself CPU-saturated, and the thread's own /html
+		// fetch was among the ones still queued when nginx's upstream
+		// read timeout hit -- a genuine 504, not a frontend rendering
+		// issue. Deliberately short (not the full interaction-priority
+		// window): this only needs to win the race to be queued first,
+		// not to fully finish first.
+		if (this.$route.params.threadId) {
+			this.mainStore.setInteractionPriorityMutation()
+			await wait(300)
+		}
+
 		await this.loadEnvelopes()
 		logger.debug(`syncing folder ${this.mailbox.databaseId} (${this.searchQuery}) after mount`)
 		await this.sync(false)

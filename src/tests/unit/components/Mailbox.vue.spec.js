@@ -95,4 +95,72 @@ describe('Mailbox', () => {
 		expect(view.vm.error).toBe(false)
 		expect(store.fetchEnvelopes).toHaveBeenCalledTimes(2)
 	})
+
+	it('gives a cold boot into a specific thread a head start before this folder\'s own initial listing fetch', async () => {
+		// Regression: a hard refresh landing directly on a thread URL
+		// mounts this component and Thread.vue at roughly the same
+		// moment, both firing their own fetches at once -- confirmed
+		// live to queue behind each other on the small mail FPM pool
+		// and 504 the thread's own /html fetch. See Mailbox.vue's
+		// mounted().
+		store.hasFetchedInitialEnvelopes = false
+		store.fetchEnvelopes = vi.fn().mockResolvedValue([])
+		store.syncEnvelopes = vi.fn().mockResolvedValue({})
+
+		vi.useFakeTimers()
+		try {
+			shallowMount(Mailbox, {
+				propsData: {
+					account,
+					mailbox,
+					bus: { on: vi.fn(), off: vi.fn() },
+				},
+				mocks: {
+					$route: { params: { threadId: '113097' } },
+				},
+				store,
+				localVue,
+			})
+
+			await vi.advanceTimersByTimeAsync(0)
+			expect(store.isInteractionPriorityActive()).toBe(true)
+			expect(store.fetchEnvelopes).not.toHaveBeenCalled()
+
+			await vi.advanceTimersByTimeAsync(300)
+
+			expect(store.fetchEnvelopes).toHaveBeenCalled()
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
+	it('does not delay the initial listing fetch when there is no thread in the route', async () => {
+		store.hasFetchedInitialEnvelopes = false
+		store.fetchEnvelopes = vi.fn().mockResolvedValue([])
+		store.syncEnvelopes = vi.fn().mockResolvedValue({})
+
+		vi.useFakeTimers()
+		try {
+			shallowMount(Mailbox, {
+				propsData: {
+					account,
+					mailbox,
+					bus: { on: vi.fn(), off: vi.fn() },
+				},
+				mocks: {
+					$route: { params: {} },
+				},
+				store,
+				localVue,
+			})
+
+			// No threadId in the route -- fetchEnvelopes should already be
+			// reachable without waiting out the 300ms head-start delay.
+			await vi.advanceTimersByTimeAsync(0)
+
+			expect(store.fetchEnvelopes).toHaveBeenCalled()
+		} finally {
+			vi.useRealTimers()
+		}
+	})
 })
