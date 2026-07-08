@@ -1241,6 +1241,91 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	describe('priority inbox: never send the virtual id to the server', () => {
+		// "priority" (PRIORITY_INBOX_ID) is a virtual mailbox id with no real
+		// mailbox behind it. Regression coverage for a live bug: with an
+		// explicit filter active (e.g. "not:starred" from the
+		// favorites-split view), both syncEnvelopes() and fetchEnvelopes()
+		// fell through to the generic path and sent mailboxId="priority"
+		// straight to the server, 403ing every time.
+		let account13
+		let account17
+
+		beforeEach(() => {
+			account13 = { id: 13 }
+			account17 = { id: 17 }
+			store.addAccountMutation(account13)
+			store.addAccountMutation(account17)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: { name: 'INBOX', databaseId: 5, specialRole: 'inbox' },
+			})
+			store.addMailboxMutation({
+				account: account17,
+				mailbox: { name: 'INBOX', databaseId: 10, specialRole: 'inbox' },
+			})
+		})
+
+		it('syncEnvelopes fans out to the real inbox mailboxes with the caller\'s own filter, not the virtual id', async () => {
+			MessageService.syncEnvelopes.mockResolvedValue({
+				newMessages: [],
+				changedMessages: [],
+				vanishedMessages: [],
+				stats: { unread: 0 },
+			})
+
+			await store.syncEnvelopes({ mailboxId: 'priority', query: 'not:starred' })
+
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(2)
+			const calledMailboxIds = MessageService.syncEnvelopes.mock.calls.map((call) => call[1]).sort((a, b) => a - b)
+			expect(calledMailboxIds).toEqual([5, 10])
+			for (const call of MessageService.syncEnvelopes.mock.calls) {
+				expect(call[1]).not.toBe('priority')
+				expect(call[4]).toBe('not:starred')
+			}
+		})
+
+		it('syncEnvelopes fans out across both priority queries when no filter is given', async () => {
+			MessageService.syncEnvelopes.mockResolvedValue({
+				newMessages: [],
+				changedMessages: [],
+				vanishedMessages: [],
+				stats: { unread: 0 },
+			})
+
+			await store.syncEnvelopes({ mailboxId: 'priority' })
+
+			// 2 real mailboxes x 2 priority queries
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(4)
+			const calledQueries = MessageService.syncEnvelopes.mock.calls.map((call) => call[4]).sort()
+			expect(calledQueries).toEqual(['is:pi-important', 'is:pi-important', 'is:pi-other', 'is:pi-other'])
+		})
+
+		it('fetchEnvelopes fans out to the real inbox mailboxes with the caller\'s own filter, not the virtual id', async () => {
+			MessageService.fetchEnvelopes.mockResolvedValue([])
+
+			await store.fetchEnvelopes({ mailboxId: 'priority', query: 'not:starred' })
+
+			expect(MessageService.fetchEnvelopes).toHaveBeenCalledTimes(2)
+			const calledMailboxIds = MessageService.fetchEnvelopes.mock.calls.map((call) => call[1]).sort((a, b) => a - b)
+			expect(calledMailboxIds).toEqual([5, 10])
+			for (const call of MessageService.fetchEnvelopes.mock.calls) {
+				expect(call[1]).not.toBe('priority')
+				expect(call[2]).toBe('not:starred')
+			}
+		})
+
+		it('fetchEnvelopes fans out across both priority queries when no filter is given', async () => {
+			MessageService.fetchEnvelopes.mockResolvedValue([])
+
+			await store.fetchEnvelopes({ mailboxId: 'priority' })
+
+			expect(MessageService.fetchEnvelopes).toHaveBeenCalledTimes(4)
+			const calledQueries = MessageService.fetchEnvelopes.mock.calls.map((call) => call[2]).sort()
+			expect(calledQueries).toEqual(['is:pi-important', 'is:pi-important', 'is:pi-other', 'is:pi-other'])
+		})
+	})
+
 	describe('adaptive backpressure', () => {
 		it('reflects the serverBusy field from the most recent sync response, from any caller', async () => {
 			// The signal itself (mail-pool load) is global, not tied to one

@@ -884,6 +884,41 @@ export default function mainStoreActions() {
 					)
 
 					return fetchUnifiedEnvelopes(this.getAccounts)
+				} else if (mailbox.isPriorityInbox) {
+					// Same reasoning as syncEnvelopes()'s isPriorityInbox
+					// branch (see there): "priority" is a virtual id with no
+					// real mailbox behind it. Without this branch, every
+					// call reached the generic path below and sent
+					// mailboxId=priority straight to the server -- 403,
+					// every time, since this branch didn't exist at all
+					// (unlike syncEnvelopes(), which at least had a partial,
+					// too-narrow version of it).
+					const queriesToFanOut = query === undefined ? getPrioritySearchQueries() : [query]
+					return Promise.all(queriesToFanOut.map((query) => {
+						const fetchIndividualLists = pipe(
+							map((mb) => this.fetchEnvelopes({
+								mailboxId: mb.databaseId,
+								query,
+								addToUnifiedMailboxes: false,
+							}).catch((error) => {
+								logger.error(`Failed to fetch envelopes for priority-inbox constituent mailbox ${mb.databaseId}: ${error}`, { error })
+								return []
+							})),
+							Promise.all.bind(Promise),
+							andThen(map(sliceToPage)),
+						)
+						const fetchPriorityEnvelopes = pipe(
+							findIndividualMailboxes(this.getMailboxes, mailbox.specialRole),
+							fetchIndividualLists,
+							andThen(combineEnvelopeLists(this.getPreference('sort-order'))),
+							andThen(sliceToPage),
+							andThen(tap((envelopes) => this.addEnvelopesMutation({
+								envelopes,
+								query,
+							}))),
+						)
+						return fetchPriorityEnvelopes(this.getAccounts)
+					}))
 				}
 
 				return pipe(
@@ -1072,8 +1107,22 @@ export default function mainStoreActions() {
 								query,
 								init,
 							})))))
-				} else if (mailbox.isPriorityInbox && query === undefined) {
-					return Promise.all(getPrioritySearchQueries().map((query) => {
+				} else if (mailbox.isPriorityInbox) {
+					// "priority" is a virtual id with no real mailbox behind
+					// it and must never reach the actual sync endpoint. With
+					// no explicit filter, fan out across both priority
+					// buckets (is:pi-important, is:pi-other); a caller with
+					// its own filter (e.g. "not:starred" from the
+					// favorites-split view) keeps exactly that filter
+					// instead. The old `&& query === undefined` guard let a
+					// defined query fall through to the generic path below,
+					// which sends mailboxId=priority straight to the server
+					// -- confirmed live: a steady stream of 403s on
+					// mailboxes?mailboxId=priority&filter=not:starred, every
+					// time the priority inbox's own refresh cycle ran with a
+					// favorites-split filter active.
+					const queriesToFanOut = query === undefined ? getPrioritySearchQueries() : [query]
+					return Promise.all(queriesToFanOut.map((query) => {
 						return Promise.all(this.getAccounts
 							.filter((account) => !account.isUnified && !isDisabled(account))
 							.map((account) => Promise.all(this
