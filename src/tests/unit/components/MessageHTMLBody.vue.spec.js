@@ -72,6 +72,44 @@ describe('MessageHTMLBody', () => {
 		expect(() => view.vm.onMessageFrameLoad()).not.toThrow()
 	})
 
+	it('nudges a resize once a still-loading, non-blocked image actually finishes loading', () => {
+		// Regression: the iframe's `load` event fires once its HTML
+		// document has finished parsing, not once every image it
+		// references has finished loading -- images that were never
+		// blocked (a trusted sender, or a message where blocking doesn't
+		// apply) are fetched through the image proxy, each a separate
+		// network round trip that can still be in flight at that point.
+		// Confirmed live: a visible (non-blocked) image left the message
+		// pane cut off partway through it.
+		const view = mountMessageHTMLBody()
+		const resize = vi.fn()
+		view.vm.$refs.iframe.iFrameResizer = { resize }
+
+		const stillLoadingImg = document.createElement('img')
+		Object.defineProperty(stillLoadingImg, 'complete', { value: false })
+		const alreadyCompleteImg = document.createElement('img')
+		Object.defineProperty(alreadyCompleteImg, 'complete', { value: true })
+
+		Object.defineProperty(view.vm.$refs.iframe, 'contentDocument', {
+			value: {
+				querySelectorAll: vi.fn((selector) => (selector === 'img' ? [stillLoadingImg, alreadyCompleteImg] : [])),
+			},
+			configurable: true,
+		})
+
+		view.vm.onMessageFrameLoad()
+		resize.mockClear()
+
+		// The already-complete image never gets a listener attached (it
+		// settled before onMessageFrameLoad ran, nothing to wait for) --
+		// dispatching `load` on it anyway must not trigger a resize.
+		alreadyCompleteImg.dispatchEvent(new Event('load'))
+		expect(resize).not.toHaveBeenCalled()
+
+		stillLoadingImg.dispatchEvent(new Event('load'))
+		expect(resize).toHaveBeenCalledTimes(1)
+	})
+
 	it('nudges a resize once each newly-unblocked image actually finishes loading', () => {
 		// Regression: unblocking images sets `src`, which iframe-resizer's
 		// own MutationObserver reacts to immediately -- before the image

@@ -166,6 +166,27 @@ export default {
 			// no-op if the automatic handshake already succeeded.
 			this.$refs.iframe.iFrameResizer?.resize()
 
+			// This `load` event fires once the iframe's HTML DOCUMENT has
+			// finished parsing -- not once every image it references has
+			// finished loading. Every <img> not blocked by the privacy
+			// filter (an already-trusted sender, or one of this specific
+			// message's images that was never subject to blocking) is
+			// fetched through this app's own image proxy, each a separate
+			// network round trip that can easily still be in flight at
+			// this point. Confirmed live: a visible (non-blocked) image
+			// left the message pane cut off partway through it, with no
+			// way to scroll to see the rest -- same root cause as
+			// displayIframe()'s fix below, but for images that were
+			// visible from the start rather than unblocked by a click.
+			iframeDoc.querySelectorAll('img').forEach((img) => {
+				if (img.complete) {
+					return
+				}
+				img.addEventListener('load', () => {
+					this.$refs.iframe.iFrameResizer?.resize()
+				}, { once: true })
+			})
+
 			this.$emit('load')
 			if (this.isSenderTrusted) {
 				this.displayIframe()
