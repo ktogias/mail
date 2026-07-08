@@ -5,7 +5,10 @@
 
 // injected styles
 import '../css/html-response.css'
-import '@iframe-resizer/child'
+// No longer imports '@iframe-resizer/child': the parent side
+// (MessageHTMLBody.vue) now measures this same-origin iframe directly
+// with a ResizeObserver instead of iframe-resizer's postMessage-based
+// handshake, so this script no longer has anything to respond to.
 
 // Fix width of some newsletter mails
 document.addEventListener('DOMContentLoaded', function() {

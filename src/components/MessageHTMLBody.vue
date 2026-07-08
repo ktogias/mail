@@ -49,7 +49,6 @@
 </template>
 
 <script>
-import iframeResize from '@iframe-resizer/parent'
 import { loadState } from '@nextcloud/initial-state'
 import { NcActionButton as ActionButton, NcActions as Actions } from '@nextcloud/vue'
 import PrintScout from 'printscout'
@@ -120,21 +119,22 @@ export default {
 	},
 
 	async mounted() {
-		iframeResize({
-			license: 'GPLv3',
-			log: false,
-			scrolling: true,
-		}, this.$refs.iframe)
-
 		if (this.enabledFreePrompt && this.message) {
 			this.needsTranslation = await needsTranslation(this.message.databaseId)
 		}
 	},
 
-	beforeUnmount() {
+	beforeDestroy() {
+		// NOT beforeUnmount(): in this project's Vue 2.7, the Vue-3-style
+		// hook names are only aliased for the Composition API's
+		// onBeforeUnmount()/onUnmounted() functions (see createLifeCycle()
+		// in vue.runtime.esm.js), not recognized as Options API object
+		// keys -- a component using beforeUnmount()/unmounted() here
+		// would silently never have it called at all. Confirmed directly
+		// against the installed Vue source, not just empirically.
 		scout.off('beforeprint', this.onBeforePrint)
 		scout.off('afterprint', this.onAfterPrint)
-		this.$refs.iframe.iFrameResizer.close()
+		this.resizeObserver?.disconnect()
 	},
 
 	methods: {
@@ -150,42 +150,23 @@ export default {
 					|| iframeDoc.querySelectorAll('[data-original-style]').length > 0
 					|| iframeDoc.querySelectorAll('style[data-original-content]').length > 0
 
-			// iframe-resizer's own child->parent "ready" handshake races
-			// against Vue mounting: the <iframe>'s src is already set by
-			// the time mounted() calls iframeResize() (template rendering
-			// happens first), so a small/already-cached message can finish
-			// loading -- and the child script can send its one-shot ready
-			// signal -- before the parent side has even attached its
-			// listener. Confirmed live: "no response from iframe" in the
-			// console (iframe-resizer's own 5s warning) on messages ranging
-			// from a small, simple notification email to a large, dense
-			// one -- not tied to content size or complexity, consistent
-			// with a timing race rather than the child failing to run.
-			// The native `load` event fired here is reliable regardless of
-			// that race, so nudge a fresh resize once it fires; a harmless
-			// no-op if the automatic handshake already succeeded.
-			this.$refs.iframe.iFrameResizer?.resize()
-
-			// This `load` event fires once the iframe's HTML DOCUMENT has
-			// finished parsing -- not once every image it references has
-			// finished loading. Every <img> not blocked by the privacy
-			// filter (an already-trusted sender, or one of this specific
-			// message's images that was never subject to blocking) is
-			// fetched through this app's own image proxy, each a separate
-			// network round trip that can easily still be in flight at
-			// this point. Confirmed live: a visible (non-blocked) image
-			// left the message pane cut off partway through it, with no
-			// way to scroll to see the rest -- same root cause as
-			// displayIframe()'s fix below, but for images that were
-			// visible from the start rather than unblocked by a click.
-			iframeDoc.querySelectorAll('img').forEach((img) => {
-				if (img.complete) {
-					return
-				}
-				img.addEventListener('load', () => {
-					this.$refs.iframe.iFrameResizer?.resize()
-				}, { once: true })
+			// Message HTML is same-origin (served from this app's own API,
+			// not a genuinely cross-origin iframe), so there's no need for
+			// iframe-resizer's whole postMessage-based child/parent
+			// handshake at all -- a ResizeObserver on the iframe's own
+			// body, set up directly from here, reports every layout change
+			// (initial render, images finishing loading whether blocked or
+			// not, web fonts, anything) automatically and continuously.
+			// This replaced three separate manual nudges that were each
+			// patching one specific trigger the handshake-based approach
+			// missed: the initial handshake race, images unblocked by a
+			// "Show images" click, and non-blocked images still loading
+			// asynchronously through the image proxy when `load` fired.
+			this.resizeObserver?.disconnect()
+			this.resizeObserver = new ResizeObserver((entries) => {
+				this.$refs.iframe.style.height = `${entries[0].contentRect.height}px`
 			})
+			this.resizeObserver.observe(iframeDoc.body)
 
 			this.$emit('load')
 			if (this.isSenderTrusted) {
@@ -212,20 +193,6 @@ export default {
 			iframeDoc.querySelectorAll('[data-original-src]').forEach((node) => {
 				node.style.display = null
 				node.setAttribute('src', node.getAttribute('data-original-src'))
-				// Setting `src` here is a DOM mutation iframe-resizer's own
-				// MutationObserver reacts to immediately -- but the image
-				// itself loads asynchronously, so that resize captures the
-				// height BEFORE the image has actually loaded and grown
-				// the layout. Nothing re-triggers a resize once it finally
-				// does, since "an <img> finished loading" isn't itself a
-				// DOM mutation the observer would catch. Confirmed live:
-				// unblocking a banner image left the iframe cut off after
-				// only the top sliver of it, with no way to scroll to see
-				// the rest. Nudge one more resize once each image actually
-				// finishes loading, when the real final height is known.
-				node.addEventListener('load', () => {
-					this.$refs.iframe.iFrameResizer?.resize()
-				}, { once: true })
 			})
 			iframeDoc
 				.querySelectorAll('[data-original-style]')
@@ -295,13 +262,12 @@ export default {
 .message-frame {
 	width: 100%;
 	border-radius: var(--border-radius-element);
-	// Fallback for the (hopefully now rare, see onMessageFrameLoad's
-	// resize() nudge) case where iframe-resizer's handshake never
-	// completes at all: without an explicit height, the browser default
-	// for an unsized <iframe> is ~150px, and content past that point is
-	// simply not visible in #message-container's own scroll area. This
-	// doesn't fix sizing to the real content height, but ensures a
-	// genuinely blank-looking message pane isn't the failure mode.
+	// Fallback for the brief window between the iframe's `load` event
+	// and the ResizeObserver's first callback (fires on the next paint,
+	// not synchronously): without an explicit height, the browser
+	// default for an unsized <iframe> is ~150px, and content past that
+	// point is simply not visible in #message-container's own scroll
+	// area.
 	min-height: 300px;
 }
 

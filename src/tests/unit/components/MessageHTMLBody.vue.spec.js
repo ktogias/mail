@@ -7,12 +7,25 @@ import { createLocalVue, shallowMount } from '@vue/test-utils'
 import MessageHTMLBody from '../../../components/MessageHTMLBody.vue'
 import Nextcloud from '../../../mixins/Nextcloud.js'
 
-vi.mock('@iframe-resizer/parent', () => ({
-	default: vi.fn(),
-}))
-
 const localVue = createLocalVue()
 localVue.mixin(Nextcloud)
+
+class MockResizeObserver {
+	constructor(callback) {
+		this.callback = callback
+		this.observedElements = []
+		MockResizeObserver.instances.push(this)
+	}
+
+	observe(el) {
+		this.observedElements.push(el)
+	}
+
+	disconnect() {
+		this.observedElements = []
+		this.disconnected = true
+	}
+}
 
 describe('MessageHTMLBody', () => {
 	let message
@@ -23,6 +36,12 @@ describe('MessageHTMLBody', () => {
 			from: [{ email: 'breakingnews@nytimes.com' }],
 			isSenderTrusted: false,
 		}
+		MockResizeObserver.instances = []
+		vi.stubGlobal('ResizeObserver', MockResizeObserver)
+	})
+
+	afterEach(() => {
+		vi.unstubAllGlobals()
 	})
 
 	function mountMessageHTMLBody() {
@@ -35,115 +54,79 @@ describe('MessageHTMLBody', () => {
 		})
 	}
 
-	it('nudges a fresh resize on the iframe\'s own load event, on top of the automatic handshake', () => {
-		// Regression: iframe-resizer's child->parent "ready" handshake
-		// races against Vue mounting -- the <iframe>'s src is already set
-		// by the time mounted() calls iframeResize() (template rendering
-		// happens first), so a small/already-cached message can finish
-		// loading before the parent side has attached its listener.
-		// Confirmed live: "no response from iframe" in the console on
-		// messages ranging from a small, simple notification email to a
-		// large, dense one -- not tied to content size, consistent with a
-		// timing race rather than the child script failing to run. The
-		// native `load` event is reliable regardless of that race.
-		const view = mountMessageHTMLBody()
-		const resize = vi.fn()
-		view.vm.$refs.iframe.iFrameResizer = { resize }
-		Object.defineProperty(view.vm.$refs.iframe, 'contentDocument', {
-			value: { querySelectorAll: vi.fn().mockReturnValue([]) },
-			configurable: true,
-		})
-
-		view.vm.onMessageFrameLoad()
-
-		expect(resize).toHaveBeenCalledTimes(1)
-	})
-
-	it('does not throw when the automatic handshake never attached iFrameResizer at all', () => {
-		// The nudge must not itself become a new failure mode if
-		// iframeResize() never got to run (e.g. an even earlier error).
-		const view = mountMessageHTMLBody()
-		view.vm.$refs.iframe.iFrameResizer = undefined
-		Object.defineProperty(view.vm.$refs.iframe, 'contentDocument', {
-			value: { querySelectorAll: vi.fn().mockReturnValue([]) },
-			configurable: true,
-		})
-
-		expect(() => view.vm.onMessageFrameLoad()).not.toThrow()
-	})
-
-	it('nudges a resize once a still-loading, non-blocked image actually finishes loading', () => {
-		// Regression: the iframe's `load` event fires once its HTML
-		// document has finished parsing, not once every image it
-		// references has finished loading -- images that were never
-		// blocked (a trusted sender, or a message where blocking doesn't
-		// apply) are fetched through the image proxy, each a separate
-		// network round trip that can still be in flight at that point.
-		// Confirmed live: a visible (non-blocked) image left the message
-		// pane cut off partway through it.
-		const view = mountMessageHTMLBody()
-		const resize = vi.fn()
-		view.vm.$refs.iframe.iFrameResizer = { resize }
-
-		const stillLoadingImg = document.createElement('img')
-		Object.defineProperty(stillLoadingImg, 'complete', { value: false })
-		const alreadyCompleteImg = document.createElement('img')
-		Object.defineProperty(alreadyCompleteImg, 'complete', { value: true })
-
+	function stubIframeDoc(view, extra = {}) {
 		Object.defineProperty(view.vm.$refs.iframe, 'contentDocument', {
 			value: {
-				querySelectorAll: vi.fn((selector) => (selector === 'img' ? [stillLoadingImg, alreadyCompleteImg] : [])),
+				body: {},
+				querySelectorAll: vi.fn().mockReturnValue([]),
+				...extra,
 			},
 			configurable: true,
 		})
+	}
+
+	// Message HTML is same-origin (served from this app's own API, not a
+	// genuinely cross-origin iframe), so MessageHTMLBody measures it
+	// directly with a ResizeObserver on the iframe's own body instead of
+	// iframe-resizer's postMessage-based child/parent handshake -- which
+	// needed three separate manual nudges (the initial handshake race,
+	// images unblocked by "Show images", and non-blocked images still
+	// loading through the image proxy) to cover cases where content grew
+	// after the moment it last measured. A ResizeObserver reports every
+	// one of those automatically, with no manual nudging needed.
+
+	it('observes the iframe body and applies its reported height', () => {
+		const view = mountMessageHTMLBody()
+		stubIframeDoc(view)
 
 		view.vm.onMessageFrameLoad()
-		resize.mockClear()
 
-		// The already-complete image never gets a listener attached (it
-		// settled before onMessageFrameLoad ran, nothing to wait for) --
-		// dispatching `load` on it anyway must not trigger a resize.
-		alreadyCompleteImg.dispatchEvent(new Event('load'))
-		expect(resize).not.toHaveBeenCalled()
+		const [observer] = MockResizeObserver.instances
+		expect(observer.observedElements).toEqual([view.vm.$refs.iframe.contentDocument.body])
 
-		stillLoadingImg.dispatchEvent(new Event('load'))
-		expect(resize).toHaveBeenCalledTimes(1)
+		observer.callback([{ contentRect: { height: 842 } }])
+
+		expect(view.vm.$refs.iframe.style.height).toBe('842px')
 	})
 
-	it('nudges a resize once each newly-unblocked image actually finishes loading', () => {
-		// Regression: unblocking images sets `src`, which iframe-resizer's
-		// own MutationObserver reacts to immediately -- before the image
-		// has actually loaded and grown the layout. Nothing re-triggers a
-		// resize once it finally does. Confirmed live: unblocking a
-		// banner image left the iframe cut off after only its top
-		// sliver, with no way to scroll to see the rest.
+	it('disconnects the previous observer before creating a new one on a subsequent load', () => {
 		const view = mountMessageHTMLBody()
-		const resize = vi.fn()
-		view.vm.$refs.iframe.iFrameResizer = { resize }
+		stubIframeDoc(view)
 
+		view.vm.onMessageFrameLoad()
+		const [firstObserver] = MockResizeObserver.instances
+
+		view.vm.onMessageFrameLoad()
+
+		expect(firstObserver.disconnected).toBe(true)
+		expect(MockResizeObserver.instances).toHaveLength(2)
+	})
+
+	it('disconnects the observer on unmount', () => {
+		const view = mountMessageHTMLBody()
+		stubIframeDoc(view)
+		view.vm.onMessageFrameLoad()
+		const [observer] = MockResizeObserver.instances
+
+		view.destroy()
+
+		expect(observer.disconnected).toBe(true)
+	})
+
+	it('detects blocked content and displayIframe() unblocks it without crashing', () => {
+		const view = mountMessageHTMLBody()
 		const img = document.createElement('img')
 		img.setAttribute('data-original-src', 'https://example.test/banner.png')
-		img.style.display = 'none'
-		const fakeDoc = {
-			querySelectorAll: vi.fn((selector) => {
-				if (selector === '[data-original-src]') {
-					return [img]
-				}
-				return []
-			}),
-		}
-		Object.defineProperty(view.vm.$refs.iframe, 'contentDocument', {
-			value: fakeDoc,
-			configurable: true,
+		stubIframeDoc(view, {
+			querySelectorAll: vi.fn((selector) => (selector === '[data-original-src]' ? [img] : [])),
 		})
+
+		view.vm.onMessageFrameLoad()
+		expect(view.vm.hasBlockedContent).toBe(true)
 
 		view.vm.displayIframe()
 
 		expect(img.getAttribute('src')).toBe('https://example.test/banner.png')
-		expect(resize).not.toHaveBeenCalled()
-
-		img.dispatchEvent(new Event('load'))
-
-		expect(resize).toHaveBeenCalledTimes(1)
+		expect(view.vm.hasBlockedContent).toBe(false)
 	})
 })
