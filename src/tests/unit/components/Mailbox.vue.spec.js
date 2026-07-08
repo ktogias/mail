@@ -163,4 +163,47 @@ describe('Mailbox', () => {
 			vi.useRealTimers()
 		}
 	})
+
+	it('cleans up its event bus listeners and background-refresh interval on destroy', () => {
+		// Regression: this cleanup lived in an unmounted() hook -- the
+		// Vue-3-style Composition API name, which Vue 2.7 only aliases
+		// for onUnmounted() *functions*, not Options API object keys.
+		// unmounted() as a plain method was silently never called at
+		// all, on any component in this codebase that used it -- every
+		// mailbox ever opened during a session left its own 60s
+		// background-refresh interval running forever, alongside four
+		// permanently-registered event bus listeners. Confirmed live
+		// against the installed Vue source (createLifeCycle() in
+		// vue.runtime.esm.js) before fixing it. Renamed to destroyed(),
+		// the name Vue 2's Options API actually recognizes.
+		vi.useFakeTimers()
+		try {
+			const bus = { on: vi.fn(), off: vi.fn() }
+			const view = shallowMount(Mailbox, {
+				propsData: { account, mailbox, bus },
+				store,
+				localVue,
+			})
+
+			const loadMailboxSpy = vi.spyOn(view.vm, 'loadMailbox')
+
+			view.destroy()
+
+			expect(bus.off).toHaveBeenCalledWith('load-more', expect.any(Function))
+			expect(bus.off).toHaveBeenCalledWith('delete', expect.any(Function))
+			// Not asserted as a Function: onArchive isn't actually a
+			// defined method on this component (a separate, pre-existing,
+			// unrelated quirk) -- bus.on()/bus.off() are called with the
+			// same (undefined) value both times either way.
+			expect(bus.off).toHaveBeenCalledWith('archive', view.vm.onArchive)
+			expect(bus.off).toHaveBeenCalledWith('shortcut', expect.any(Function))
+
+			// If the interval survived destroy(), advancing well past its
+			// 60s period would have called loadMailbox() again.
+			vi.advanceTimersByTime(120 * 1000)
+			expect(loadMailboxSpy).not.toHaveBeenCalled()
+		} finally {
+			vi.useRealTimers()
+		}
+	})
 })
