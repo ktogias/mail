@@ -258,6 +258,12 @@ export default {
 		},
 
 		async loadEnvelopes() {
+			// Opening/switching a folder is a direct user action -- give
+			// it priority over the background watched-mailbox poller (see
+			// setInteractionPriorityMutation() in the store). Deliberately
+			// NOT armed in loadMailbox() below, which is the 60s
+			// background-refresh interval, not a user action.
+			this.mainStore.setInteractionPriorityMutation()
 			logger.debug(`Fetching envelopes for folder ${this.mailbox.databaseId} (${this.searchQuery})`, this.mailbox)
 			if (!this.syncedMailboxes.has(this.mailbox.databaseId + (this.searchQuery ?? ''))) {
 				// Only trigger skeleton if we didn't sync envelopes yet

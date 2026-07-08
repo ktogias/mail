@@ -240,6 +240,10 @@ export default {
 		},
 
 		async resetThread() {
+			// Opening a message is a direct user action -- give it
+			// priority over the background watched-mailbox poller (see
+			// setInteractionPriorityMutation() in the store).
+			this.mainStore.setInteractionPriorityMutation()
 			this.expandedThreads = [this.initiallyExpandedEnvelopeId()]
 			this.errorMessage = ''
 			this.errorTitle = ''

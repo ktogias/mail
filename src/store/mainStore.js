@@ -18,6 +18,11 @@ export default defineStore('main', {
 		return {
 			syncTimestamp: Date.now(),
 			isExpiredSession: false,
+			// Timestamp until which a direct user action (opening a
+			// message, switching folders, starring/deleting/flagging,
+			// ...) takes priority over the background watched-mailbox
+			// poller. See setInteractionPriorityMutation().
+			interactionPriorityUntil: 0,
 			preferences: {},
 			accountsUnmapped: {
 				[UNIFIED_ACCOUNT_ID]: {

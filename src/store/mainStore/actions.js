@@ -258,6 +258,48 @@ export function isMailboxSyncRetryPending(mailboxId) {
 // lock recurring, not of the pessimistic Retry-After estimate alone.
 const watchedMailboxSyncsInFlight = new Set()
 
+// How long a direct user action (opening a message, switching folders,
+// starring/deleting/flagging, ...) gets priority over the background
+// watched-mailbox poller. Long enough to cover a normal interaction's
+// full request sequence; short enough to self-heal quickly and get out
+// of the way once the user goes idle, without needing a matching "clear"
+// call at every possible exit path (including errors) of every
+// interaction it guards -- the same self-healing-via-expiry shape as
+// the load counter TTL and the lock-retry backoff above.
+const INTERACTION_PRIORITY_WINDOW_MS = 4000
+
+// How many watched mailboxes' background syncs syncWatchedMailboxes()
+// runs concurrently. Unbounded concurrency (the previous behavior) meant
+// a single poll tick fired requests for every watched mailbox at once --
+// confirmed live via HAR: 9 mailboxes' sync responses landing and being
+// reactively processed within the same couple of seconds a user opened
+// an email, visibly starving the main thread while the message's
+// already-fetched content sat ready to render, but hadn't painted yet.
+// A small pool keeps the poller making steady progress without
+// contending that heavily with foreground work.
+const WATCHED_SYNC_CONCURRENCY = 3
+
+/**
+ * Run `fn` over `items` with at most `limit` calls in flight at once.
+ *
+ * Each item's own promise settles independently -- unlike Promise.all,
+ * one item throwing does not reject the others. Callers are expected to
+ * handle their own errors inside `fn`, matching how the previous
+ * unbounded Promise.all fan-out already behaved here.
+ */
+async function mapWithConcurrencyLimit(items, limit, fn) {
+	const results = new Array(items.length)
+	let nextIndex = 0
+	async function worker() {
+		while (nextIndex < items.length) {
+			const currentIndex = nextIndex++
+			results[currentIndex] = await fn(items[currentIndex], currentIndex)
+		}
+	}
+	await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
+	return results
+}
+
 const LOCK_RETRY_BASE_MS = 1500
 const LOCK_RETRY_MAX_MS = 30 * 1000
 // A mailbox freshly locked near the start of a long sync can have nearly
@@ -1259,123 +1301,155 @@ export default function mainStoreActions() {
 			const passwordIsUnavailable = this.getPreference('password-is-unavailable', false)
 			const isDisabled = (account) => passwordIsUnavailable && !!account.provisioningId
 
+			// A direct user action (opening a message, switching folders,
+			// starring/deleting/flagging, ...) is in progress or just
+			// happened -- give it the FPM pool and the main thread instead
+			// of starting a fresh round of background syncs right now.
+			// Anything skipped this tick gets a fresh attempt next tick,
+			// same as every other "skip, don't queue" guard below.
+			if (this.isInteractionPriorityActive()) {
+				logger.debug('interaction priority active, skipping this watched-mailbox sync tick entirely')
+				return
+			}
+
 			return handleHttpAuthErrors(async () => {
-				const results = await Promise.all(this.getAccounts
+				const mailboxTargets = this.getAccounts
 					.filter((a) => !a.isUnified && !isDisabled(a))
-					.map((account) => {
-						return Promise.all([...this.getRecursiveMailboxIterator(account.id)].map(async (mailbox) => {
-							if (mailbox.specialRole !== 'inbox' && !mailbox.syncInBackground) {
-								return
+					.flatMap((account) => [...this.getRecursiveMailboxIterator(account.id)])
+
+				const syncOneWatchedMailbox = async (mailbox) => {
+					if (mailbox.specialRole !== 'inbox' && !mailbox.syncInBackground) {
+						return
+					}
+
+					// Checked again per mailbox, not just once at the top of
+					// syncWatchedMailboxes(): the concurrency-limited pool
+					// below only pulls a new mailbox off the queue once a
+					// worker frees up, which can be seconds into an
+					// already-running tick -- if interaction priority
+					// activates mid-tick, this stops any NOT-YET-STARTED
+					// mailbox from beginning, while ones already in flight
+					// (already past this check) are left to finish rather
+					// than aborted mid-request.
+					if (this.isInteractionPriorityActive()) {
+						logger.debug(`interaction priority active, skipping mailbox ${mailbox.databaseId} for this tick`)
+						return
+					}
+
+					// A locked mailbox (e.g. a Gmail account's INBOX mid a
+					// genuinely long full sync) already has its own
+					// retry-on-lock chain running via pendingLockWaits,
+					// backing off on its own up to LOCK_RETRY_MAX_MS
+					// between attempts. Ticks fire every ~10s here, much
+					// faster than that backoff -- without this check,
+					// each new tick would queue up another "await the
+					// current leader, then try again" continuation on
+					// top of the last one (syncEnvelopes():1020-1027),
+					// and they'd all fire in a burst the moment the
+					// leader finally settles. Skipping instead means the
+					// stuck mailbox's own chain is left alone to retry at
+					// its own paced cadence, while every other watched
+					// mailbox keeps getting a fresh attempt every tick,
+					// completely unaffected by the stuck one.
+					if (isMailboxSyncRetryPending(mailbox.databaseId)) {
+						logger.debug(`mailbox ${mailbox.databaseId} already has a sync retry pending, skipping this tick`)
+						return
+					}
+
+					if (watchedMailboxSyncsInFlight.has(mailbox.databaseId)) {
+						logger.debug(`mailbox ${mailbox.databaseId} still has a watched-sync in flight from an earlier tick, skipping`)
+						return
+					}
+					watchedMailboxSyncsInFlight.add(mailbox.databaseId)
+
+					// Sync every query bucket already loaded for this mailbox
+					// (e.g. '' for the plain view, 'not:starred' when the user
+					// has "sort favorites separately" enabled), not just the
+					// unfiltered default -- new messages synced under a query
+					// nobody's envelopeLists key matches the currently
+					// displayed one are added to the store but never rendered.
+					// Falls back to the unfiltered default for a mailbox with
+					// no envelopeLists yet (never opened this session).
+					//
+					// Sequential, not Promise.all: syncEnvelopes() has its own
+					// internal retry-on-lock loop (every 1.5s) that keeps
+					// awaiting until the mailbox unlocks. A sync lock is
+					// mailbox-wide, not per-query -- firing every bucket's
+					// sync concurrently means every bucket independently
+					// re-triggers its own 1.5s retry chain against the same
+					// lock, multiplying request volume by the bucket count
+					// for as long as the mailbox stays locked (confirmed
+					// live: a genuinely long lock on the slow Gmail account
+					// produced a sustained ~1 request/second storm with two
+					// buckets loaded). Going sequential means only one
+					// bucket's sync (and its retry chain, if any) is ever
+					// in flight for a given mailbox at a time; the rest
+					// simply wait their turn, and once the lock clears they
+					// resolve immediately since nothing else needed re-sent.
+					const queries = Object.keys(mailbox.envelopeLists)
+					const queriesToSync = queries.length > 0 ? queries : [undefined]
+
+					try {
+						const newMessagesPerQuery = []
+						for (const query of queriesToSync) {
+							const list = mailbox.envelopeLists[normalizedEnvelopeListId(query)]
+							if (list === undefined) {
+								await this.fetchEnvelopes({
+									mailboxId: mailbox.databaseId,
+									query,
+								})
 							}
 
-							// A locked mailbox (e.g. a Gmail account's INBOX mid a
-							// genuinely long full sync) already has its own
-							// retry-on-lock chain running via pendingLockWaits,
-							// backing off on its own up to LOCK_RETRY_MAX_MS
-							// between attempts. Ticks fire every ~10s here, much
-							// faster than that backoff -- without this check,
-							// each new tick would queue up another "await the
-							// current leader, then try again" continuation on
-							// top of the last one (syncEnvelopes():1020-1027),
-							// and they'd all fire in a burst the moment the
-							// leader finally settles. Skipping instead means the
-							// stuck mailbox's own chain is left alone to retry at
-							// its own paced cadence, while every other watched
-							// mailbox keeps getting a fresh attempt every tick,
-							// completely unaffected by the stuck one.
-							if (isMailboxSyncRetryPending(mailbox.databaseId)) {
-								logger.debug(`mailbox ${mailbox.databaseId} already has a sync retry pending, skipping this tick`)
-								return
-							}
+							newMessagesPerQuery.push(await this.syncEnvelopes({
+								mailboxId: mailbox.databaseId,
+								query,
+							}))
+						}
 
-							if (watchedMailboxSyncsInFlight.has(mailbox.databaseId)) {
-								logger.debug(`mailbox ${mailbox.databaseId} still has a watched-sync in flight from an earlier tick, skipping`)
-								return
-							}
-							watchedMailboxSyncsInFlight.add(mailbox.databaseId)
-
-							// Sync every query bucket already loaded for this mailbox
-							// (e.g. '' for the plain view, 'not:starred' when the user
-							// has "sort favorites separately" enabled), not just the
-							// unfiltered default -- new messages synced under a query
-							// nobody's envelopeLists key matches the currently
-							// displayed one are added to the store but never rendered.
-							// Falls back to the unfiltered default for a mailbox with
-							// no envelopeLists yet (never opened this session).
-							//
-							// Sequential, not Promise.all: syncEnvelopes() has its own
-							// internal retry-on-lock loop (every 1.5s) that keeps
-							// awaiting until the mailbox unlocks. A sync lock is
-							// mailbox-wide, not per-query -- firing every bucket's
-							// sync concurrently means every bucket independently
-							// re-triggers its own 1.5s retry chain against the same
-							// lock, multiplying request volume by the bucket count
-							// for as long as the mailbox stays locked (confirmed
-							// live: a genuinely long lock on the slow Gmail account
-							// produced a sustained ~1 request/second storm with two
-							// buckets loaded). Going sequential means only one
-							// bucket's sync (and its retry chain, if any) is ever
-							// in flight for a given mailbox at a time; the rest
-							// simply wait their turn, and once the lock clears they
-							// resolve immediately since nothing else needed re-sent.
-							const queries = Object.keys(mailbox.envelopeLists)
-							const queriesToSync = queries.length > 0 ? queries : [undefined]
-
-							try {
-								const newMessagesPerQuery = []
-								for (const query of queriesToSync) {
-									const list = mailbox.envelopeLists[normalizedEnvelopeListId(query)]
-									if (list === undefined) {
-										await this.fetchEnvelopes({
-											mailboxId: mailbox.databaseId,
-											query,
-										})
-									}
-
-									newMessagesPerQuery.push(await this.syncEnvelopes({
-										mailboxId: mailbox.databaseId,
-										query,
-									}))
+						// Notify HERE, per mailbox, the moment its own sync
+						// resolved -- not after every mailbox's sync settles.
+						// The desktop notification used to wait for every
+						// other watched mailbox's sync (plus the priority
+						// inbox refresh) to settle first, so one slow/locked
+						// mailbox mid its own lock-retry chain held every
+						// notification hostage for seconds to minutes after
+						// the receiving mailbox's badge had already updated.
+						//
+						// Only explicitly unseen messages are news: a message
+						// can reach this tab's sync already read (marked seen
+						// in another window, on the phone, or via IMAP before
+						// a delayed sync caught up). flags.seen === false, not
+						// merely falsy -- same as initiallyExpandedEnvelopeId()
+						// in Thread.vue. Deduped by databaseId since several
+						// query buckets of the same mailbox can each report
+						// the same new message.
+						const notifiedIds = new Set()
+						const unseenMessages = flatMapDeep(identity, newMessagesPerQuery)
+							.filter((message) => {
+								if (message === undefined || message.flags?.seen !== false || notifiedIds.has(message.databaseId)) {
+									return false
 								}
+								notifiedIds.add(message.databaseId)
+								return true
+							})
+						if (unseenMessages.length > 0) {
+							showNewMessagesNotification(unseenMessages)
+						}
 
-								// Notify HERE, per mailbox, the moment its own sync
-								// resolved -- not after the global Promise.all below.
-								// The desktop notification used to wait for every
-								// other watched mailbox's sync (plus the priority
-								// inbox refresh) to settle first, so one slow/locked
-								// mailbox mid its own lock-retry chain held every
-								// notification hostage for seconds to minutes after
-								// the receiving mailbox's badge had already updated.
-								//
-								// Only explicitly unseen messages are news: a message
-								// can reach this tab's sync already read (marked seen
-								// in another window, on the phone, or via IMAP before
-								// a delayed sync caught up). flags.seen === false, not
-								// merely falsy -- same as initiallyExpandedEnvelopeId()
-								// in Thread.vue. Deduped by databaseId since several
-								// query buckets of the same mailbox can each report
-								// the same new message.
-								const notifiedIds = new Set()
-								const unseenMessages = flatMapDeep(identity, newMessagesPerQuery)
-									.filter((message) => {
-										if (message === undefined || message.flags?.seen !== false || notifiedIds.has(message.databaseId)) {
-											return false
-										}
-										notifiedIds.add(message.databaseId)
-										return true
-									})
-								if (unseenMessages.length > 0) {
-									showNewMessagesNotification(unseenMessages)
-								}
+						return newMessagesPerQuery
+					} finally {
+						watchedMailboxSyncsInFlight.delete(mailbox.databaseId)
+					}
+				}
 
-								return newMessagesPerQuery
-							} finally {
-								watchedMailboxSyncsInFlight.delete(mailbox.databaseId)
-							}
-						}))
-					}))
+				const results = await mapWithConcurrencyLimit(mailboxTargets, WATCHED_SYNC_CONCURRENCY, syncOneWatchedMailbox)
 				const newMessages = flatMapDeep(identity, results).filter((m) => m !== undefined)
 				if (newMessages.length === 0) {
+					return
+				}
+
+				if (this.isInteractionPriorityActive()) {
+					logger.debug('interaction priority active, skipping the priority-inbox refresh this tick')
 					return
 				}
 
@@ -1400,6 +1474,7 @@ export default function mainStoreActions() {
 			})
 		},
 		toggleEnvelopeFlagged(envelope) {
+			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
 				// Change immediately and switch back on error
 				const oldState = envelope.flags.flagged
@@ -1428,6 +1503,7 @@ export default function mainStoreActions() {
 			})
 		},
 		async toggleEnvelopeImportant(envelope) {
+			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
 				const importantLabel = '$label1'
 				const hasTag = this
@@ -1450,6 +1526,7 @@ export default function mainStoreActions() {
 			envelope,
 			seen,
 		}) {
+			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
 				// Change immediately and switch back on error
 				const oldState = envelope.flags.seen
@@ -1504,6 +1581,7 @@ export default function mainStoreActions() {
 			envelope,
 			removeEnvelope,
 		}) {
+			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
 				// Change immediately and switch back on error
 				const oldState = envelope.flags.$junk
@@ -1554,6 +1632,7 @@ export default function mainStoreActions() {
 			envelope,
 			favFlag,
 		}) {
+			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
 				// Change immediately and switch back on error
 				const oldState = envelope.flags.flagged
@@ -1585,6 +1664,7 @@ export default function mainStoreActions() {
 			envelope,
 			addTag,
 		}) {
+			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
 				const importantLabel = '$label1'
 				const hasTag = this
@@ -1676,6 +1756,7 @@ export default function mainStoreActions() {
 			})
 		},
 		async deleteMessage({ id }) {
+			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
 				this.removeEnvelopeMutation({ id })
 
@@ -1784,6 +1865,7 @@ export default function mainStoreActions() {
 			id,
 			destMailboxId,
 		}) {
+			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
 				await moveMessage(id, destMailboxId)
 				this.removeEnvelopeMutation({ id })
@@ -1795,6 +1877,7 @@ export default function mainStoreActions() {
 			unixTimestamp,
 			destMailboxId,
 		}) {
+			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
 				await snoozeMessage(id, unixTimestamp, destMailboxId)
 				this.removeEnvelopeMutation({ id })
@@ -2087,6 +2170,7 @@ export default function mainStoreActions() {
 		 * @return {boolean}
 		 */
 		async moveEnvelopeToJunk(envelope) {
+			this.setInteractionPriorityMutation()
 			const account = this.getAccount(envelope.accountId)
 			if (account.junkMailboxId === null) {
 				return false
@@ -2799,6 +2883,17 @@ export default function mainStoreActions() {
 		},
 		setServerBusyMutation(serverBusy) {
 			this.serverBusy = serverBusy
+		},
+		// Arms the interaction-priority window (see
+		// INTERACTION_PRIORITY_WINDOW_MS above) -- called at the start of
+		// every direct user action (opening a message, switching folders,
+		// starring/deleting/flagging, ...) so the background
+		// watched-mailbox poller steps out of the way while it runs.
+		setInteractionPriorityMutation() {
+			this.interactionPriorityUntil = Date.now() + INTERACTION_PRIORITY_WINDOW_MS
+		},
+		isInteractionPriorityActive() {
+			return Date.now() < this.interactionPriorityUntil
 		},
 		setFollowUpFeatureAvailableMutation(followUpFeatureAvailable) {
 			this.followUpFeatureAvailable = followUpFeatureAvailable

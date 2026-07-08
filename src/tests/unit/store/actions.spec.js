@@ -1326,6 +1326,112 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	describe('interaction priority: user actions over background sync', () => {
+		// A direct user action (opening a message, switching folders,
+		// starring/deleting/flagging, ...) arms a short priority window
+		// during which syncWatchedMailboxes() steps out of the way instead
+		// of competing for the FPM pool and the main thread.
+		let account13
+		let account17
+
+		beforeEach(() => {
+			account13 = { id: 13 }
+			account17 = { id: 17 }
+			store.addAccountMutation(account13)
+			store.addAccountMutation(account17)
+		})
+
+		it('toggleEnvelopeFlagged arms interaction priority immediately, synchronously', () => {
+			MessageService.setEnvelopeFlags.mockResolvedValue({})
+			expect(store.isInteractionPriorityActive()).toBe(false)
+
+			store.toggleEnvelopeFlagged({ databaseId: 1, flags: { flagged: false } })
+
+			expect(store.isInteractionPriorityActive()).toBe(true)
+		})
+
+		it('deleteMessage arms interaction priority immediately, synchronously', () => {
+			MessageService.deleteMessage.mockResolvedValue({})
+			expect(store.isInteractionPriorityActive()).toBe(false)
+
+			store.deleteMessage({ id: 1 })
+
+			expect(store.isInteractionPriorityActive()).toBe(true)
+		})
+
+		it('syncWatchedMailboxes skips the whole tick while interaction priority is active', async () => {
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: { name: 'INBOX', databaseId: 5, specialRole: 'inbox' },
+			})
+			store.setInteractionPriorityMutation()
+
+			await store.syncWatchedMailboxes()
+
+			expect(MessageService.syncEnvelopes).not.toHaveBeenCalled()
+		})
+
+		it('syncWatchedMailboxes limits how many mailboxes sync concurrently', async () => {
+			// 5 inbox-role mailboxes, always eligible for background sync,
+			// spread across 2 accounts.
+			const mailboxIds = [5, 10, 14, 16, 39]
+			mailboxIds.forEach((id, i) => {
+				store.addMailboxMutation({
+					account: i % 2 === 0 ? account13 : account17,
+					mailbox: { name: `INBOX-${id}`, databaseId: id, specialRole: 'inbox' },
+				})
+			})
+
+			let concurrent = 0
+			let maxConcurrent = 0
+			const pendingResolvers = []
+			MessageService.syncEnvelopes.mockImplementation(() => new Promise((resolve) => {
+				concurrent++
+				maxConcurrent = Math.max(maxConcurrent, concurrent)
+				pendingResolvers.push(() => {
+					concurrent--
+					resolve({ newMessages: [], changedMessages: [], vanishedMessages: [], stats: { unread: 0 } })
+				})
+			}))
+
+			const syncPromise = store.syncWatchedMailboxes()
+
+			// Wait for however many microtask hops it takes (fetchEnvelopes'
+			// own conditional call, handleHttpAuthErrors, the concurrency
+			// pool's workers, ...) for every worker that's going to start
+			// immediately to have actually started, without resolving any
+			// of them yet.
+			await vi.waitFor(() => {
+				if (pendingResolvers.length < 3) {
+					throw new Error(`only ${pendingResolvers.length} mailboxes have started syncing so far`)
+				}
+			})
+
+			// Mirrors WATCHED_SYNC_CONCURRENCY in actions.js: only that many
+			// of the 5 eligible mailboxes may be mid-request at once, not
+			// all 5 at once like the previous unbounded Promise.all fan-out.
+			expect(pendingResolvers.length).toBe(3)
+			expect(maxConcurrent).toBe(3)
+
+			// Resolve the first wave; the remaining 2 mailboxes should then
+			// start, keeping concurrency at or under the same limit.
+			pendingResolvers.splice(0).forEach((resolve) => resolve())
+
+			await vi.waitFor(() => {
+				if (pendingResolvers.length < 2) {
+					throw new Error(`only ${pendingResolvers.length} mailboxes have started syncing so far`)
+				}
+			})
+
+			expect(maxConcurrent).toBeLessThanOrEqual(3)
+
+			pendingResolvers.splice(0).forEach((resolve) => resolve())
+			await syncPromise
+
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(5)
+		})
+	})
+
 	describe('adaptive backpressure', () => {
 		it('reflects the serverBusy field from the most recent sync response, from any caller', async () => {
 			// The signal itself (mail-pool load) is global, not tied to one
