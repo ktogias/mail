@@ -1433,6 +1433,41 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	describe('fetchMessage: concurrent calls for the same id are deduped', () => {
+		// Thread.vue prefetches the clicked message's body in parallel
+		// with the thread listing; ThreadEnvelope.vue's own fetchMessage()
+		// call for the same id can land within milliseconds of that,
+		// before the prefetch's network request has resolved -- too soon
+		// for the `this.messages[id]` cache check alone to catch it.
+		it('only fires one network request when called twice before the first resolves', async () => {
+			let resolveFetch
+			MessageService.fetchMessage.mockReturnValue(new Promise((resolve) => {
+				resolveFetch = resolve
+			}))
+
+			const firstCall = store.fetchMessage(42)
+			const secondCall = store.fetchMessage(42)
+
+			expect(MessageService.fetchMessage).toHaveBeenCalledTimes(1)
+
+			resolveFetch({ databaseId: 42, subject: 'Hello' })
+			const [first, second] = await Promise.all([firstCall, secondCall])
+
+			expect(first).toEqual(second)
+			expect(MessageService.fetchMessage).toHaveBeenCalledTimes(1)
+		})
+
+		it('fires a fresh request for a later call once the first has resolved', async () => {
+			MessageService.fetchMessage.mockResolvedValue({ databaseId: 42, subject: 'Hello' })
+
+			await store.fetchMessage(42)
+			// Already cached in store.messages -- no second network call.
+			await store.fetchMessage(42)
+
+			expect(MessageService.fetchMessage).toHaveBeenCalledTimes(1)
+		})
+	})
+
 	describe('syncEnvelopes: malformed response retry', () => {
 		// Regression: confirmed live -- a sync response missing
 		// newMessages/changedMessages crashed with a raw TypeError and

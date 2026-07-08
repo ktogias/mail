@@ -248,6 +248,21 @@ export default {
 			this.errorMessage = ''
 			this.errorTitle = ''
 			if (this.mainStore.getPreference('layout-message-view', 'threaded') === 'threaded') {
+				// Start fetching the clicked message's body in parallel
+				// with the thread listing, instead of waiting for the
+				// thread to resolve and ThreadEnvelope.vue to mount
+				// before firing it -- removes one full round trip from
+				// the critical path in the common case (a single-message
+				// thread, or the clicked message is already the one that
+				// ends up auto-expanded). Not wasted even when
+				// initiallyExpandedEnvelopeId() picks an earlier unread
+				// message instead: this message is still part of the
+				// rendered thread. Errors are swallowed here --
+				// ThreadEnvelope.vue's own fetchMessage() call handles
+				// the real error path; fetchMessage() dedupes concurrent
+				// calls for the same id, so that call reuses this one
+				// instead of firing a second request.
+				this.mainStore.fetchMessage(this.threadId).catch(() => {})
 				await this.fetchThread()
 			}
 			this.updateSummary()

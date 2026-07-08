@@ -225,6 +225,16 @@ function transformMailboxName(account, mailbox) {
 // starting their own.
 const pendingLockWaits = new Map()
 
+// Thread.vue prefetches the clicked message's body in parallel with the
+// thread listing (instead of waiting for the thread to resolve and
+// ThreadEnvelope.vue to mount before firing it), so that call and
+// ThreadEnvelope.vue's own later fetchMessage() call for the same id can
+// land within milliseconds of each other -- before the prefetch's
+// network request has resolved, so the `this.messages[id]` cache check
+// alone wouldn't catch it. This map lets the second caller await the
+// first's in-flight request instead of firing a duplicate one.
+const pendingMessageFetches = new Map()
+
 /**
  * Whether some caller is already mid-retry against mailbox's lock.
  *
@@ -1720,7 +1730,11 @@ export default function mainStoreActions() {
 				return this.messages[id]
 			}
 
-			return handleHttpAuthErrors(async () => {
+			if (pendingMessageFetches.has(id)) {
+				return pendingMessageFetches.get(id)
+			}
+
+			const promise = handleHttpAuthErrors(async () => {
 				const message = await fetchMessage(id)
 				// Only commit if not undefined (not found)
 				if (message) {
@@ -1729,7 +1743,11 @@ export default function mainStoreActions() {
 					})
 				}
 				return message
+			}).finally(() => {
+				pendingMessageFetches.delete(id)
 			})
+			pendingMessageFetches.set(id, promise)
+			return promise
 		},
 		async fetchItineraries(id) {
 			return handleHttpAuthErrors(async () => {

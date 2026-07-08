@@ -438,4 +438,30 @@ describe('Thread', () => {
 			expect(view.vm.expandedThreads).toEqual([5003])
 		})
 	})
+
+	describe('message prefetch', () => {
+		// The clicked message's databaseId is already known from the
+		// route, before the thread listing resolves -- fetching it in
+		// parallel removes one full round trip from the critical path
+		// instead of waiting for the thread to resolve and
+		// ThreadEnvelope.vue to mount before firing it.
+		it('starts fetching the clicked message immediately, without waiting for the thread', () => {
+			store.fetchMessage = vi.fn().mockResolvedValue({ databaseId: 200 })
+			store.fetchThread = vi.fn().mockResolvedValue([])
+
+			shallowMount(Thread, {
+				mocks: {
+					$route: {
+						params: {
+							threadId: 200,
+						},
+					},
+				},
+				store,
+				localVue,
+			})
+
+			expect(store.fetchMessage).toHaveBeenCalledWith(200)
+		})
+	})
 })
