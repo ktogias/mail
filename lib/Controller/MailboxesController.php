@@ -289,7 +289,15 @@ class MailboxesController extends Controller {
 			return $response;
 		}
 
-		return new JSONResponse($syncResponse);
+		// Rides the response every watched-mailbox poll tick already makes
+		// -- no extra request -- so the frontend's background poller can
+		// widen its own tick period when the mail pool is busy (see
+		// SyncService::isServerBusy()). Deliberately not applied to
+		// user-initiated syncs (a manual refresh, opening a folder): only
+		// the automatic background poller reads this field.
+		$payload = $syncResponse->jsonSerialize();
+		$payload['serverBusy'] = $this->syncService->isServerBusy();
+		return new JSONResponse($payload);
 	}
 
 	/**

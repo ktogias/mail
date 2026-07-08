@@ -1115,6 +1115,14 @@ export default function mainStoreActions() {
 					.then((syncData) => {
 						logger.debug(`mailbox ${mailboxId} (${query}) synchronized, ${syncData.newMessages.length} new, ${syncData.changedMessages.length} changed and ${syncData.vanishedMessages.length} vanished messages`)
 
+						// Every sync response (gated or real) carries the
+						// server's current view of its own load -- keep the
+						// store's flag as fresh as the most recent response
+						// from ANY caller, not just the watched-mailbox
+						// poller, since the signal itself (mail-pool load)
+						// is global, not tied to one specific caller.
+						this.setServerBusyMutation(syncData.serverBusy === true)
+
 						const unifiedMailbox = this.getUnifiedMailbox(mailbox.specialRole)
 
 						this.addEnvelopesMutation({
@@ -2739,6 +2747,9 @@ export default function mainStoreActions() {
 		},
 		setHasFetchedInitialEnvelopesMutation(hasFetchedInitialEnvelopes) {
 			this.hasFetchedInitialEnvelopes = hasFetchedInitialEnvelopes
+		},
+		setServerBusyMutation(serverBusy) {
+			this.serverBusy = serverBusy
 		},
 		setFollowUpFeatureAvailableMutation(followUpFeatureAvailable) {
 			this.followUpFeatureAvailable = followUpFeatureAvailable

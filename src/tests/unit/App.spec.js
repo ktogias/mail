@@ -61,4 +61,27 @@ describe('App', () => {
 
 		vi.useRealTimers()
 	})
+
+	it('doubles the tick period when the server reports itself busy', async () => {
+		// this.mainStore.serverBusy reflects the serverBusy field riding
+		// the most recent sync response (see SyncService::isServerBusy()) --
+		// not a separate request. Only the automatic background poller
+		// reads it; user-initiated syncs are never slowed by this.
+		vi.useFakeTimers()
+		store.syncWatchedMailboxes = vi.fn().mockResolvedValue()
+		store.serverBusy = true
+
+		view.vm.startWatchedMailboxSync()
+
+		// Nothing fires before the new (busy) floor -- well past the
+		// normal, not-busy ceiling of 30s.
+		vi.advanceTimersByTime(39_999)
+		expect(store.syncWatchedMailboxes).not.toHaveBeenCalled()
+
+		// Everything fires by the busy ceiling (60s).
+		vi.advanceTimersByTime(20_001)
+		expect(store.syncWatchedMailboxes).toHaveBeenCalledTimes(1)
+
+		vi.useRealTimers()
+	})
 })

@@ -98,6 +98,13 @@ export default defineStore('main', {
 			calendars: [],
 			smimeCertificates: [],
 			hasFetchedInitialEnvelopes: false,
+			// Set from the serverBusy field riding every sync response (see
+			// SyncService::isServerBusy() and MessageService::syncEnvelopes()).
+			// Read only by the watched-mailbox background poller
+			// (App.vue::startWatchedMailboxSync()) when scheduling its NEXT
+			// tick -- never by user-initiated syncs, which should never be
+			// artificially slowed down.
+			serverBusy: false,
 			followUpFeatureAvailable: false,
 			contextChatFeatureAvailable: false,
 			internalAddress: [],

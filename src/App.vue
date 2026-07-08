@@ -97,6 +97,20 @@ export default {
 			// call resolving, so one genuinely slow/locked mailbox can't
 			// delay re-syncing every other watched mailbox either (see
 			// isMailboxSyncRetryPending() for the per-mailbox side of that).
+			//
+			// Adaptive backpressure: this.mainStore.serverBusy reflects the
+			// serverBusy field riding the MOST RECENT sync response, from
+			// ANY caller (see SyncService::isServerBusy(),
+			// setServerBusyMutation()) -- not a separate request. When the
+			// mail pool reports itself busy, the NEXT tick doubles its
+			// delay range instead of the normal one, on top of whatever
+			// widening every other simultaneously-open window/device is
+			// also independently applying right now. This only paces the
+			// automatic background poller; user-initiated syncs (a manual
+			// refresh, opening a folder) are never slowed by this.
+			const nextTickDelay = () => this.mainStore.serverBusy
+				? 40_000 + Math.random() * 20_000
+				: 20_000 + Math.random() * 10_000
 			const tick = () => {
 				this.mainStore.syncWatchedMailboxes()
 					.then(() => {
@@ -112,9 +126,9 @@ export default {
 							},
 						})
 					})
-				this.watchedMailboxSyncTimeout = setTimeout(tick, 20_000 + Math.random() * 10_000)
+				this.watchedMailboxSyncTimeout = setTimeout(tick, nextTickDelay())
 			}
-			this.watchedMailboxSyncTimeout = setTimeout(tick, 20_000 + Math.random() * 10_000)
+			this.watchedMailboxSyncTimeout = setTimeout(tick, nextTickDelay())
 		},
 	},
 }

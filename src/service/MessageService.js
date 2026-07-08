@@ -98,6 +98,10 @@ export async function syncEnvelopes(accountId, id, ids, lastMessageTimestamp, qu
 			changedMessages: response.data.changedMessages.map(amend),
 			vanishedMessages: response.data.vanishedMessages,
 			stats: response.data.stats,
+			// Rides every sync response for free -- see
+			// SyncService::isServerBusy() -- so the watched-mailbox poller
+			// can widen its own tick period under load.
+			serverBusy: response.data.serverBusy === true,
 		}
 	} catch (e) {
 		throw convertAxiosError(e)

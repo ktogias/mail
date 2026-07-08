@@ -1241,6 +1241,40 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	describe('adaptive backpressure', () => {
+		it('reflects the serverBusy field from the most recent sync response, from any caller', async () => {
+			// The signal itself (mail-pool load) is global, not tied to one
+			// specific caller -- any sync response, gated or real, keeps
+			// the store's flag as fresh as the most recent one seen.
+			const account13 = { id: 13 }
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+			})
+
+			MessageService.syncEnvelopes.mockResolvedValueOnce({
+				newMessages: [],
+				changedMessages: [],
+				vanishedMessages: [],
+				stats: { unread: 0 },
+				serverBusy: true,
+			})
+			await store.syncEnvelopes({ mailboxId: 11 })
+			expect(store.serverBusy).toBe(true)
+
+			MessageService.syncEnvelopes.mockResolvedValueOnce({
+				newMessages: [],
+				changedMessages: [],
+				vanishedMessages: [],
+				stats: { unread: 0 },
+				serverBusy: false,
+			})
+			await store.syncEnvelopes({ mailboxId: 11 })
+			expect(store.serverBusy).toBe(false)
+		})
+	})
+
 	describe('sync lock coordination', () => {
 		it('only retries once for a locked mailbox even when multiple queries are syncing it concurrently', async () => {
 			// A sync lock is mailbox-wide, not per-query. Two different

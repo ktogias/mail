@@ -337,6 +337,123 @@ final class SyncServiceTest extends TestCase {
 		);
 	}
 
+	public function testIsServerBusyReflectsTheGlobalLoadCounter(): void {
+		$this->freshnessCache->method('get')->with('real_syncs_in_flight')
+			->willReturnOnConsecutiveCalls(null, 1, 2, 5);
+
+		// No counter at all: never claim busy.
+		$this->assertFalse($this->syncService->isServerBusy());
+		// Below LOAD_BUSY_THRESHOLD (2): not busy.
+		$this->assertFalse($this->syncService->isServerBusy());
+		// At the threshold: busy.
+		$this->assertTrue($this->syncService->isServerBusy());
+		// Above it: still busy.
+		$this->assertTrue($this->syncService->isServerBusy());
+	}
+
+	public function testIsServerBusyNeverClaimsBusyWithoutADistributedMemcache(): void {
+		$cacheFactory = $this->createMock(\OCP\ICacheFactory::class);
+		// A plain ICache, not IMemcache -- no inc()/dec()/add() available.
+		$cacheFactory->method('createDistributed')->willReturn($this->createStub(\OCP\ICache::class));
+		$syncService = new SyncService(
+			$this->clientFactory,
+			$this->synchronizer,
+			$this->createStub(FilterStringParser::class),
+			$this->messageMapper,
+			$this->createStub(PreviewEnhancer::class),
+			$this->createStub(\Psr\Log\LoggerInterface::class),
+			$this->mailboxSync,
+			$cacheFactory,
+			$this->timeFactory
+		);
+
+		$this->assertFalse($syncService->isServerBusy());
+	}
+
+	public function testARealSyncIncrementsAndDecrementsTheGlobalLoadCounter(): void {
+		$account = $this->createMock(Account::class);
+		$account->method('getUserId')->willReturn('user');
+		$mailbox = new Mailbox();
+		$mailbox->setId(149);
+		$mailbox->setMessages(42);
+		$mailbox->setUnseen(10);
+		$mailbox->setSyncNewToken('a');
+		$mailbox->setSyncChangedToken('b');
+		$mailbox->setSyncVanishedToken('c');
+
+		$this->freshnessCache->method('get')->willReturn(null);
+		// add() is called for TWO different keys (the per-mailbox mutex and
+		// the global load counter) -- track calls manually rather than a
+		// single strict ->with() matcher, which can only pin one call site.
+		$addCalls = [];
+		$this->freshnessCache->method('add')->willReturnCallback(
+			function (string $key, $value, int $ttl) use (&$addCalls) {
+				$addCalls[] = [$key, $value, $ttl];
+				return true;
+			}
+		);
+		$this->clientFactory->method('getClient')
+			->willReturn($this->createStub(\Horde_Imap_Client_Socket::class));
+		$this->messageMapper->method('findUidsForIds')->willReturn([]);
+		$this->synchronizer->method('sync')->willReturn(true);
+
+		$this->freshnessCache->expects($this->once())->method('inc')
+			->with('real_syncs_in_flight');
+		$this->freshnessCache->expects($this->once())->method('dec')
+			->with('real_syncs_in_flight');
+
+		$this->syncService->syncMailbox($account, $mailbox, 0, true, null, []);
+
+		$this->assertContains(['real_syncs_in_flight', 0, 120], $addCalls);
+	}
+
+	public function testTheLoadCounterIsDecrementedEvenWhenTheSyncThrows(): void {
+		$account = $this->createMock(Account::class);
+		$account->method('getUserId')->willReturn('user');
+		$mailbox = new Mailbox();
+		$mailbox->setId(149);
+
+		// Initial sync ($partialOnly = false): no mutex involved at all,
+		// isolating that the load counter's inc/dec is unconditional on
+		// "a real sync is happening", not tied to the mutex outcome.
+		$this->freshnessCache->method('get')->willReturn(null);
+		$this->clientFactory->method('getClient')
+			->willReturn($this->createStub(\Horde_Imap_Client_Socket::class));
+		$this->messageMapper->method('findUidsForIds')->willReturn([]);
+		$this->synchronizer->method('sync')
+			->willThrowException(\OCA\Mail\Exception\MailboxLockedException::from($mailbox));
+
+		$this->freshnessCache->expects($this->once())->method('inc')
+			->with('real_syncs_in_flight');
+		$this->freshnessCache->expects($this->once())->method('dec')
+			->with('real_syncs_in_flight');
+
+		$this->expectException(\OCA\Mail\Exception\MailboxLockedException::class);
+		$this->syncService->syncMailbox($account, $mailbox, 0, false, null, []);
+	}
+
+	public function testALostMutexRaceNeverIncrementsTheLoadCounter(): void {
+		$account = $this->createMock(Account::class);
+		$account->method('getUserId')->willReturn('user');
+		$mailbox = new Mailbox();
+		$mailbox->setId(149);
+		$mailbox->setMessages(42);
+		$mailbox->setUnseen(10);
+		$mailbox->setSyncNewToken('a');
+		$mailbox->setSyncChangedToken('b');
+		$mailbox->setSyncVanishedToken('c');
+
+		$this->freshnessCache->method('get')->willReturn(null);
+		// Another caller holds the real-sync mutex -- this caller never
+		// gets anywhere near a real sync, so it must not touch the load
+		// counter at all (it isn't the one doing real work).
+		$this->freshnessCache->method('add')->with('syncing_149', 1, 180)->willReturn(false);
+		$this->freshnessCache->expects($this->never())->method('inc');
+		$this->freshnessCache->expects($this->never())->method('dec');
+
+		$this->syncService->syncMailbox($account, $mailbox, 0, true, null, []);
+	}
+
 	public function testInitialSyncBypassesTheFreshnessGate(): void {
 		$account = $this->createMock(Account::class);
 		$account->method('getUserId')->willReturn('user');

@@ -452,4 +452,52 @@ class MailboxesControllerTest extends TestCase {
 		$this->assertEquals(409, $response->getStatus());
 		$this->assertEquals((string)Mailbox::LOCK_TIMEOUT, $response->getHeaders()['Retry-After']);
 	}
+
+	public function testSyncSurfacesServerBusyAlongsideTheNormalResponseBody(): void {
+		// serverBusy rides the response every watched-mailbox poll tick
+		// already makes -- no extra request -- so the frontend's background
+		// poller can widen its own tick period when the mail pool is busy.
+		$mailboxId = 13;
+		$mailbox = new Mailbox();
+		$mailbox->setId($mailboxId);
+		$mailbox->setAccountId(28);
+		$account = $this->createStub(Account::class);
+		$this->mailManager->method('getMailbox')->willReturn($mailbox);
+		$this->accountService->method('find')->willReturn($account);
+		$this->syncService->method('isMailboxFresh')->willReturn(true);
+		$this->syncService->method('syncMailbox')->willReturn(
+			new \OCA\Mail\IMAP\Sync\Response([], [], [], new MailboxStats(1, 0, null))
+		);
+		$this->syncService->method('isServerBusy')->willReturn(true);
+
+		$response = $this->controller->sync($mailboxId);
+
+		$this->assertEquals(200, $response->getStatus());
+		$data = $response->getData();
+		$this->assertTrue($data['serverBusy']);
+		// The normal sync payload shape must still be intact underneath.
+		$this->assertArrayHasKey('newMessages', $data);
+		$this->assertArrayHasKey('changedMessages', $data);
+		$this->assertArrayHasKey('vanishedMessages', $data);
+		$this->assertArrayHasKey('stats', $data);
+	}
+
+	public function testSyncSurfacesServerNotBusyWhenLoadIsLow(): void {
+		$mailboxId = 13;
+		$mailbox = new Mailbox();
+		$mailbox->setId($mailboxId);
+		$mailbox->setAccountId(28);
+		$account = $this->createStub(Account::class);
+		$this->mailManager->method('getMailbox')->willReturn($mailbox);
+		$this->accountService->method('find')->willReturn($account);
+		$this->syncService->method('isMailboxFresh')->willReturn(true);
+		$this->syncService->method('syncMailbox')->willReturn(
+			new \OCA\Mail\IMAP\Sync\Response([], [], [], new MailboxStats(1, 0, null))
+		);
+		$this->syncService->method('isServerBusy')->willReturn(false);
+
+		$response = $this->controller->sync($mailboxId);
+
+		$this->assertFalse($response->getData()['serverBusy']);
+	}
 }
