@@ -6,8 +6,10 @@ import axios from '@nextcloud/axios'
 import { generateUrl } from '@nextcloud/router'
 import { curry } from 'ramda'
 import { convertAxiosError } from '../errors/convert.js'
+import MalformedSyncResponseError from '../errors/MalformedSyncResponseError.js'
 import SyncIncompleteError from '../errors/SyncIncompleteError.js'
 import { parseErrorResponse } from '../http/ErrorResponseParser.js'
+import logger from '../logger.js'
 
 const amendEnvelopeWithIds = curry((accountId, envelope) => ({
 	accountId,
@@ -90,6 +92,23 @@ export async function syncEnvelopes(accountId, id, ids, lastMessageTimestamp, qu
 
 		if (response.status === 202) {
 			throw new SyncIncompleteError()
+		}
+
+		if (!Array.isArray(response.data?.newMessages) || !Array.isArray(response.data?.changedMessages)) {
+			// Confirmed live: a 200 response whose body was missing
+			// newMessages/changedMessages crashed on the .map() calls
+			// below with a raw, uninformative TypeError instead of a
+			// clear, retriable error -- the mailbox was then left
+			// silently out of sync until the next unrelated refresh, with
+			// no automatic retry (unlike MailboxLockedError/
+			// SyncIncompleteError, which do retry). Root cause not yet
+			// pinned down -- seen only under heavy concurrent load on a
+			// resource-constrained NAS. Until it is, log the actual
+			// response body for the next occurrence and let
+			// syncEnvelopes() (mainStore/actions.js) retry once instead
+			// of giving up immediately.
+			logger.error('Sync response for mailbox is missing the expected fields', { mailboxId: id, data: response.data })
+			throw new MalformedSyncResponseError(`Malformed sync response for mailbox ${id}`)
 		}
 
 		const amend = amendEnvelopeWithIds(accountId)

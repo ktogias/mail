@@ -34,6 +34,7 @@ import {
 } from 'ramda'
 import Vue from 'vue'
 import MailboxLockedError from '../../errors/MailboxLockedError.js'
+import MalformedSyncResponseError from '../../errors/MalformedSyncResponseError.js'
 import { matchError } from '../../errors/match.js'
 import SyncIncompleteError from '../../errors/SyncIncompleteError.js'
 import { handleHttpAuthErrors } from '../../http/sessionExpiryHandler.js'
@@ -1128,6 +1129,14 @@ export default function mainStoreActions() {
 			// retried, used to grow the backoff delay (see
 			// computeLockRetryDelayMs above).
 			lockRetryAttempt = 0,
+			// Internal only: whether a malformed sync response (see
+			// MalformedSyncResponseError below) has already been
+			// retried once for this call. Capped at one retry -- if
+			// the server is genuinely, persistently returning a
+			// malformed body (not just a transient glitch under
+			// load), retrying forever would just add to the load that
+			// may have caused it in the first place.
+			malformedResponseRetried = false,
 		}) {
 			return handleHttpAuthErrors(async () => {
 				logger.debug(`starting mailbox sync of ${mailboxId} (${query})`)
@@ -1255,6 +1264,19 @@ export default function mainStoreActions() {
 									mailboxId,
 									query,
 									init,
+								})
+							},
+							[MalformedSyncResponseError.getName()]: (error) => {
+								if (malformedResponseRetried) {
+									logger.error(`Sync response for mailbox ${mailboxId} (${query}) was malformed again after a retry, giving up`, { error })
+									throw error
+								}
+								logger.warn(`Sync response for mailbox ${mailboxId} (${query}) was malformed, retrying once`, { error })
+								return this.syncEnvelopes({
+									mailboxId,
+									query,
+									init,
+									malformedResponseRetried: true,
 								})
 							},
 							[MailboxLockedError.getName()]: (error) => {

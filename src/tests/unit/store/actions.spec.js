@@ -6,6 +6,7 @@
 import { createPinia, setActivePinia } from 'pinia'
 import { curry, range, reverse } from 'ramda'
 import MailboxLockedError from '../../../errors/MailboxLockedError.js'
+import MalformedSyncResponseError from '../../../errors/MalformedSyncResponseError.js'
 import * as AccountService from '../../../service/AccountService.js'
 import * as MailboxService from '../../../service/MailboxService.js'
 import * as MessageService from '../../../service/MessageService.js'
@@ -1429,6 +1430,45 @@ describe('Vuex store actions', () => {
 			await syncPromise
 
 			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(5)
+		})
+	})
+
+	describe('syncEnvelopes: malformed response retry', () => {
+		// Regression: confirmed live -- a sync response missing
+		// newMessages/changedMessages crashed with a raw TypeError and
+		// was treated as a generic, non-retried failure (unlike
+		// MailboxLockedError/SyncIncompleteError, which do retry). Root
+		// cause not yet pinned down (seen only under heavy concurrent
+		// load), but a single transient glitch shouldn't leave the
+		// mailbox stuck out of sync until an unrelated refresh.
+		let account13
+
+		beforeEach(() => {
+			account13 = { id: 13 }
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+			})
+		})
+
+		it('retries once after a malformed response and succeeds', async () => {
+			MessageService.syncEnvelopes
+				.mockRejectedValueOnce(new MalformedSyncResponseError('Malformed sync response for mailbox 11'))
+				.mockResolvedValueOnce({ newMessages: [], changedMessages: [], vanishedMessages: [], stats: { unread: 0 } })
+
+			const result = await store.syncEnvelopes({ mailboxId: 11 })
+
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(2)
+			expect(result).toEqual([])
+		})
+
+		it('gives up after a second consecutive malformed response instead of retrying forever', async () => {
+			MessageService.syncEnvelopes.mockRejectedValue(new MalformedSyncResponseError('Malformed sync response for mailbox 11'))
+
+			await expect(store.syncEnvelopes({ mailboxId: 11 })).rejects.toThrow(MalformedSyncResponseError)
+
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(2)
 		})
 	})
 

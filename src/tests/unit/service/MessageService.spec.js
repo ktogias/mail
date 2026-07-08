@@ -53,4 +53,48 @@ describe('service/MessageService test suite', () => {
 			},
 		})
 	})
+
+	describe('syncEnvelopes', () => {
+		beforeEach(() => {
+			generateUrl.mockReturnValue('/generated-url')
+		})
+
+		it('returns the envelopes on a well-formed response', async () => {
+			axios.post.mockResolvedValueOnce({
+				status: 200,
+				data: {
+					newMessages: [{ databaseId: 1 }],
+					changedMessages: [{ databaseId: 2 }],
+					vanishedMessages: [3],
+					stats: { unread: 1 },
+					serverBusy: false,
+				},
+			})
+
+			const result = await MessageService.syncEnvelopes(13, 21, [], null, undefined, false, 'newest')
+
+			expect(result.newMessages).toEqual([{ accountId: 13, databaseId: 1 }])
+			expect(result.changedMessages).toEqual([{ accountId: 13, databaseId: 2 }])
+			expect(result.vanishedMessages).toEqual([3])
+		})
+
+		it('throws a clear, catchable error instead of crashing on a malformed response body', async () => {
+			// Regression: confirmed live -- a 200 response whose body was
+			// missing newMessages/changedMessages crashed with a raw,
+			// uninformative TypeError ("can't access property map,
+			// undefined") instead of a clear, retriable error. Root cause
+			// not yet pinned down (seen only under heavy concurrent load),
+			// but the client must not crash on it either way.
+			axios.post.mockResolvedValueOnce({
+				status: 200,
+				data: {
+					message: 'Too many sync attempts for mailbox 21, please slow down',
+					type: 'OCA\\Mail\\Exception\\MailboxLockedException',
+				},
+			})
+
+			await expect(MessageService.syncEnvelopes(13, 21, [], null, undefined, false, 'newest'))
+				.rejects.toThrow('Malformed sync response for mailbox 21')
+		})
+	})
 })
