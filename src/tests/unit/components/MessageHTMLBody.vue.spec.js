@@ -75,18 +75,32 @@ describe('MessageHTMLBody', () => {
 	// after the moment it last measured. A ResizeObserver reports every
 	// one of those automatically, with no manual nudging needed.
 
-	it('observes the iframe body and applies its reported height', () => {
+	it('observes the iframe body and applies its scrollHeight, not contentRect', () => {
+		// scrollHeight, not entries[0].contentRect.height: the injected
+		// html-response.css sets `html { overflow-y: hidden }` (to avoid
+		// a double scrollbar alongside #message-container's own), and
+		// contentRect reports the body's own laid-out box, which can
+		// under-report once any ancestor in the chain clips overflow.
+		// Confirmed live: content was still cut off using contentRect
+		// even with only the blocked-image placeholder showing (no real
+		// image loading involved, ruling out a timing race).
 		const view = mountMessageHTMLBody()
-		stubIframeDoc(view)
+		stubIframeDoc(view, { body: { scrollHeight: 842 } })
 
 		view.vm.onMessageFrameLoad()
 
 		const [observer] = MockResizeObserver.instances
 		expect(observer.observedElements).toEqual([view.vm.$refs.iframe.contentDocument.body])
 
-		observer.callback([{ contentRect: { height: 842 } }])
+		observer.callback()
 
 		expect(view.vm.$refs.iframe.style.height).toBe('842px')
+
+		// A later callback (any layout change) re-reads scrollHeight
+		// fresh rather than relying on stale entry data.
+		view.vm.$refs.iframe.contentDocument.body.scrollHeight = 1200
+		observer.callback()
+		expect(view.vm.$refs.iframe.style.height).toBe('1200px')
 	})
 
 	it('disconnects the previous observer before creating a new one on a subsequent load', () => {

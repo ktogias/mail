@@ -2746,7 +2746,17 @@ export default function mainStoreActions() {
 						const list = mailbox.envelopeLists[listId]
 						const idx = list.indexOf(id)
 						if (idx < 0) {
-							logger.warn('envelope does not exist in unified mailbox', { mailboxId: mailbox.databaseId, id, listId, list })
+							// Not a warning: this envelope simply doesn't
+							// match this particular query bucket (e.g. a
+							// non-starred message isn't in the "is:starred"
+							// list) -- expected for most of a unified/
+							// priority mailbox's several buckets on every
+							// single removal. Confirmed live: this fired
+							// dozens of times per removal, each carrying a
+							// full object dump, inconsistent with the
+							// identical situation for the envelope's own
+							// mailbox lists just above, which already
+							// continues silently.
 							continue
 						}
 						logger.debug('envelope removed from unified mailbox', { mailboxId: mailbox.databaseId, id })

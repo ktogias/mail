@@ -163,8 +163,20 @@ export default {
 			// "Show images" click, and non-blocked images still loading
 			// asynchronously through the image proxy when `load` fired.
 			this.resizeObserver?.disconnect()
-			this.resizeObserver = new ResizeObserver((entries) => {
-				this.$refs.iframe.style.height = `${entries[0].contentRect.height}px`
+			this.resizeObserver = new ResizeObserver(() => {
+				// scrollHeight, not entries[0].contentRect.height: the
+				// injected html-response.css sets `html { overflow-y:
+				// hidden }` (to avoid a double scrollbar alongside
+				// #message-container's own), and contentRect reports the
+				// body's own laid-out box, which can under-report once any
+				// ancestor in the chain clips overflow -- confirmed live,
+				// content was still cut off using contentRect even with
+				// only the blocked-image placeholder showing (no
+				// real-image loading involved at all, ruling out a timing
+				// race). scrollHeight explicitly measures the full
+				// content including anything clipped, same measurement
+				// onBeforePrint() below already uses successfully.
+				this.$refs.iframe.style.height = `${iframeDoc.body.scrollHeight}px`
 			})
 			this.resizeObserver.observe(iframeDoc.body)
 
