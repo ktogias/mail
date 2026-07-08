@@ -150,6 +150,22 @@ export default {
 					|| iframeDoc.querySelectorAll('[data-original-style]').length > 0
 					|| iframeDoc.querySelectorAll('style[data-original-content]').length > 0
 
+			// iframe-resizer's own child->parent "ready" handshake races
+			// against Vue mounting: the <iframe>'s src is already set by
+			// the time mounted() calls iframeResize() (template rendering
+			// happens first), so a small/already-cached message can finish
+			// loading -- and the child script can send its one-shot ready
+			// signal -- before the parent side has even attached its
+			// listener. Confirmed live: "no response from iframe" in the
+			// console (iframe-resizer's own 5s warning) on messages ranging
+			// from a small, simple notification email to a large, dense
+			// one -- not tied to content size or complexity, consistent
+			// with a timing race rather than the child failing to run.
+			// The native `load` event fired here is reliable regardless of
+			// that race, so nudge a fresh resize once it fires; a harmless
+			// no-op if the automatic handshake already succeeded.
+			this.$refs.iframe.iFrameResizer?.resize()
+
 			this.$emit('load')
 			if (this.isSenderTrusted) {
 				this.displayIframe()
@@ -244,6 +260,14 @@ export default {
 .message-frame {
 	width: 100%;
 	border-radius: var(--border-radius-element);
+	// Fallback for the (hopefully now rare, see onMessageFrameLoad's
+	// resize() nudge) case where iframe-resizer's handshake never
+	// completes at all: without an explicit height, the browser default
+	// for an unsized <iframe> is ~150px, and content past that point is
+	// simply not visible in #message-container's own scroll area. This
+	// doesn't fix sizing to the real content height, but ensures a
+	// genuinely blank-looking message pane isn't the failure mode.
+	min-height: 300px;
 }
 
 :deep(.button-vue__icon) {
