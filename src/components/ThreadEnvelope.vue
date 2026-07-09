@@ -62,7 +62,9 @@
 				tabindex="0"
 				@click="$emit('toggle-expand', $event)"
 				@keydown.enter="$emit('toggle-expand', $event)"
-				@keydown.space.prevent="$emit('toggle-expand', $event)">
+				@keydown.space.prevent="$emit('toggle-expand', $event)"
+				@mouseenter="onEnvelopeMouseEnter"
+				@mouseleave="onEnvelopeMouseLeave">
 				<div class="envelope__header__left__sender-subject-tags">
 					<div class="sender" :class="{ 'sender--expanded': expanded }">
 						{{ envelope.from && envelope.from[0] ? envelope.from[0].label : '' }}
@@ -418,6 +420,7 @@ import { isPgpText } from '../crypto/pgp.js'
 import { matchError } from '../errors/match.js'
 import NoTrashMailboxConfiguredError from '../errors/NoTrashMailboxConfiguredError.js'
 import logger from '../logger.js'
+import HoverPrefetchMixin from '../mixins/HoverPrefetchMixin.js'
 import { buildRecipients as buildReplyRecipients } from '../ReplyBuilder.js'
 import { smartReply } from '../service/AiIntergrationsService.js'
 import { unsubscribe } from '../service/ListService.js'
@@ -473,6 +476,8 @@ export default {
 		ReplyAllIcon,
 		SourceModal,
 	},
+
+	mixins: [HoverPrefetchMixin],
 
 	props: {
 		envelope: {
@@ -828,6 +833,21 @@ export default {
 			}
 
 			this.loading = Loading.Done
+		},
+
+		onEnvelopeMouseEnter() {
+			// Already expanded (or expanding): fetchMessage() below is
+			// already in flight or done, nothing to prefetch.
+			if (this.expanded) {
+				return
+			}
+			this.startHoverPrefetch(() => {
+				this.mainStore.fetchMessage(this.envelope.databaseId).catch(() => {})
+			})
+		},
+
+		onEnvelopeMouseLeave() {
+			this.cancelHoverPrefetch()
 		},
 
 		async fetchMessage() {

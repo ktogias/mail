@@ -445,4 +445,71 @@ describe('Envelope', () => {
 			expect(view.find('iconbullet-stub').exists()).toBe(false)
 		})
 	})
+
+	describe('hover prefetch', () => {
+		// Gmail-style: start fetching a row's message+thread while the
+		// pointer is still hovering, so the data is already there by the
+		// time a deliberate click happens.
+		beforeEach(() => {
+			vi.useFakeTimers()
+			store.fetchMessage = vi.fn().mockResolvedValue({})
+			store.fetchThread = vi.fn().mockResolvedValue([])
+		})
+
+		afterEach(() => {
+			vi.useRealTimers()
+		})
+
+		function mountEnvelope(flagOverrides = {}) {
+			return shallowMount(Envelope, {
+				mocks: { $route },
+				propsData: {
+					mailbox: {
+						specialRole: '',
+						databaseId: '3',
+						myAcls: undefined,
+					},
+					data: {
+						accountId: 123,
+						databaseId: 999,
+						from: [{ email: 'info@test.com' }],
+						flags: { seen: false, flagged: false, $junk: false, answered: false, hasAttachments: false, draft: false, ...flagOverrides },
+					},
+				},
+				store,
+				localVue,
+			})
+		}
+
+		it('prefetches the message and thread after hovering past the debounce delay', async () => {
+			const view = mountEnvelope()
+
+			view.vm.onEnvelopeMouseEnter()
+			expect(store.fetchMessage).not.toHaveBeenCalled()
+
+			await vi.advanceTimersByTimeAsync(200)
+
+			expect(store.fetchMessage).toHaveBeenCalledWith(999)
+			expect(store.fetchThread).toHaveBeenCalledWith(999)
+		})
+
+		it('does not prefetch when the pointer leaves before the delay elapses', async () => {
+			const view = mountEnvelope()
+
+			view.vm.onEnvelopeMouseEnter()
+			view.vm.onEnvelopeMouseLeave()
+			await vi.advanceTimersByTimeAsync(500)
+
+			expect(store.fetchMessage).not.toHaveBeenCalled()
+		})
+
+		it('does not prefetch drafts, which open the composer instead of a thread', async () => {
+			const view = mountEnvelope({ draft: true })
+
+			view.vm.onEnvelopeMouseEnter()
+			await vi.advanceTimersByTimeAsync(500)
+
+			expect(store.fetchMessage).not.toHaveBeenCalled()
+		})
+	})
 })

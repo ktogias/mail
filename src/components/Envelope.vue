@@ -30,7 +30,9 @@
 		@delete="onDelete"
 		@toggle-important="onToggleImportant"
 		@toggle-seen="onToggleSeen"
-		@update:menuOpen="closeMoreAndSnoozeOptions">
+		@update:menuOpen="closeMoreAndSnoozeOptions"
+		@mouseenter.native="onEnvelopeMouseEnter"
+		@mouseleave.native="onEnvelopeMouseLeave">
 		<template #icon>
 			<div v-if="!compactMode">
 				<Star
@@ -573,6 +575,7 @@ import NoTrashMailboxConfiguredError
 	from '../errors/NoTrashMailboxConfiguredError.js'
 import logger from '../logger.js'
 import AttachmentMixin from '../mixins/AttachmentMixin.js'
+import HoverPrefetchMixin from '../mixins/HoverPrefetchMixin.js'
 import { buildRecipients as buildReplyRecipients } from '../ReplyBuilder.js'
 import { FOLLOW_UP_TAG_LABEL } from '../store/constants.js'
 import useMainStore from '../store/mainStore.js'
@@ -633,7 +636,7 @@ export default {
 		draggableEnvelope: DraggableEnvelopeDirective,
 	},
 
-	mixins: [AttachmentMixin],
+	mixins: [AttachmentMixin, HoverPrefetchMixin],
 
 	props: {
 		withReply: {
@@ -1140,6 +1143,22 @@ export default {
 					templateMessageId: this.data.databaseId,
 				})
 			}
+		},
+
+		onEnvelopeMouseEnter() {
+			// Drafts open the composer, not a thread view -- nothing here
+			// to prefetch. Mirrors link()'s own draft check above.
+			if (this.draft) {
+				return
+			}
+			this.startHoverPrefetch(() => {
+				this.mainStore.fetchMessage(this.data.databaseId).catch(() => {})
+				this.mainStore.fetchThread(this.data.databaseId).catch(() => {})
+			})
+		},
+
+		onEnvelopeMouseLeave() {
+			this.cancelHoverPrefetch()
 		},
 
 		onSelectMultiple() {
