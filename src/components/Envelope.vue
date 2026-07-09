@@ -1525,18 +1525,6 @@ export default {
 		-webkit-line-clamp: 2;
 		-webkit-box-orient: vertical;
 
-		// -webkit-line-clamp is known to cache its "how many lines fit"
-		// calculation and not recompute it after certain incremental DOM
-		// updates -- confirmed live as envelope rows permanently
-		// overlapping right after "Load more" or a resize-driven layout
-		// switch (both cause many sibling rows to reflow at once), not
-		// fixed by scrolling (no forced reflow) but fixed by an actual
-		// window resize (forces one). Containment stops this box's
-		// clamp calculation from being perturbed by transient layout
-		// changes in siblings, e.g. our own .list-leave-active taking a
-		// leaving row out of flow mid-transition.
-		contain: layout style;
-
 		.material-design-icon {
 			display: inline;
 
