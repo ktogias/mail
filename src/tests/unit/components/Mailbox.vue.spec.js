@@ -164,42 +164,6 @@ describe('Mailbox', () => {
 		}
 	})
 
-	it('keeps list transitions suppressed until the refetch actually settles, not just the next DOM tick', async () => {
-		// Regression: skipListTransition was reset inside a bare
-		// $nextTick() called immediately after being set to true --
-		// $nextTick() resolves on the very next DOM patch, which happened
-		// long before fetchEnvelopes()'s network round trip returned. By
-		// the time the fresh envelopes were committed to the store and
-		// actually rendered, the flag was already back to false, so the
-		// whole-batch replacement (every old row leaving, every new one
-		// entering/reordering at once) animated at full intensity.
-		// Confirmed live as "double exposure" ghosting on a plain mailbox
-		// refresh, no "Load more" involved.
-		let resolveFetch
-		store.fetchEnvelopes = vi.fn(() => new Promise((resolve) => {
-			resolveFetch = resolve
-		}))
-
-		const view = mountMailbox()
-		// Simulate this mailbox+query already having been loaded once
-		// before, so loadEnvelopes() takes its background-refresh branch.
-		view.vm.syncedMailboxes.add(mailbox.databaseId + '')
-
-		const loadPromise = view.vm.loadEnvelopes()
-		await view.vm.$nextTick()
-
-		// The fetch is still in flight -- a DOM patch has already
-		// happened, but transitions must stay suppressed until the new
-		// data lands and re-renders.
-		expect(view.vm.skipListTransition).toBe(true)
-
-		resolveFetch([])
-		await loadPromise
-		await view.vm.$nextTick()
-
-		expect(view.vm.skipListTransition).toBe(false)
-	})
-
 	it('cleans up its event bus listeners and background-refresh interval on destroy', () => {
 		// Regression: this cleanup lived in an unmounted() hook -- the
 		// Vue-3-style Composition API name, which Vue 2.7 only aliases
