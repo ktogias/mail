@@ -131,6 +131,7 @@
 							</NcPopover>
 						</div>
 						<Mailbox
+							v-if="followUpQuery"
 							v-show="hasFollowUpEnvelopes"
 							:load-more-label="t('mail', 'Load more follow ups')"
 							:account="unifiedAccount"
@@ -519,6 +520,21 @@ export default {
 		},
 
 		appendToSearch(str) {
+			// followUpQuery is undefined when no follow-up tag exists on
+			// the instance -- concatenating it produced the literal string
+			// "... undefined", which the backend's query parser treats as
+			// a free-text search term. That fired the heaviest query the
+			// app has (threaded self-join + two recipients JOINs +
+			// ILIKE '%undefined%') against every priority-inbox section
+			// on every load: confirmed live as 16 concurrent copies each
+			// running for 38-51 MINUTES on a 27k-message INBOX, pinning
+			// the DB at 300% CPU and starving every other request -- the
+			// actual root cause behind the recurring mailbox sync
+			// 502s/504s attributed to "mailbox 149 being slow".
+			if (str === undefined || str === null) {
+				return this.searchQuery
+			}
+
 			if (this.searchQuery === undefined) {
 				return str
 			}

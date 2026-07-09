@@ -66,6 +66,46 @@ describe('MailboxThread', () => {
 		expect(otherMailbox.isVisible()).toBe(false)
 	})
 
+	describe('appendToSearch', () => {
+		// followUpQuery is undefined when no follow-up tag exists on the
+		// instance -- concatenating it produced the literal string
+		// "... undefined", which the backend treats as a free-text search
+		// term and answers with its heaviest query (threaded self-join +
+		// two recipients JOINs + ILIKE '%undefined%'). Confirmed live as
+		// 16 concurrent copies each running 38-51 minutes on a
+		// 27k-message INBOX, starving every other request.
+		it('never concatenates an undefined query into the search string', () => {
+			const wrapper = mountThread()
+
+			wrapper.setData({ searchQuery: 'mentions:false match:allof' })
+
+			expect(wrapper.vm.appendToSearch(undefined)).toBe('mentions:false match:allof')
+			expect(wrapper.vm.appendToSearch(null)).toBe('mentions:false match:allof')
+		})
+
+		it('returns the plain string when there is no active search', () => {
+			const wrapper = mountThread()
+
+			expect(wrapper.vm.appendToSearch('is:starred')).toBe('is:starred')
+			expect(wrapper.vm.appendToSearch(undefined)).toBeUndefined()
+		})
+
+		it('mounts the follow-up section only when a follow-up tag actually exists', () => {
+			// v-show alone only hides it visually -- the Mailbox still
+			// mounted and fetched, previously with the poisoned
+			// "... undefined" query.
+			const withoutTag = mountThread()
+			expect(withoutTag.vm.followUpQuery).toBeUndefined()
+			const mailboxCountWithoutTag = withoutTag.findAll('mailbox-stub').length
+
+			store.tags = { 77: { id: 77, imapLabel: '$follow_up', displayName: 'Follow up' } }
+			const withTag = mountThread()
+			expect(withTag.vm.followUpQuery).toBeTruthy()
+
+			expect(withTag.findAll('mailbox-stub').length).toBe(mailboxCountWithoutTag + 1)
+		})
+	})
+
 	it("shows the 'Other' section once it actually has envelopes, even if Important is empty", () => {
 		seedEnvelope(priorityOtherQuery, 2)
 		// priorityImportantQuery deliberately left empty
