@@ -177,7 +177,7 @@
 					class="envelope__preview-text"
 					:title="data.summary ? t('mail', 'This summary was AI generated') : null">
 					<NcAssistantIcon v-if="data.summary" :size="15" class="envelope__preview-text__icon" />
-					{{ previewTextForSubtitle }}
+					{{ isEncrypted ? t('mail', 'Encrypted message') : data.summary ? data.summary.trim() : data.previewText.trim() }}
 				</div>
 			</div>
 		</template>
@@ -584,29 +584,6 @@ import { messageDateTime, shortRelativeDatetime } from '../util/shortRelativeDat
 import { translateTagDisplayName } from '../util/tag.js'
 import { hiddenTags } from './tags.js'
 
-// -webkit-line-clamp (used previously here) is a known-flaky browser
-// hack: it can cache its "how many lines fit" calculation and fail to
-// recompute after certain incremental DOM updates, confirmed live as
-// permanently overlapping rows surviving both a CSS containment fix
-// and a hard refresh. Truncating in JS to a fixed character budget
-// (roughly two lines' worth at the default font size) sidesteps the
-// whole class of bug: there is no browser line-counting algorithm
-// left to go stale.
-const PREVIEW_TEXT_MAX_LENGTH = 140
-
-/**
- * @param {string} text Text to truncate
- * @return {string}
- */
-function truncatePreviewText(text) {
-	if (text.length <= PREVIEW_TEXT_MAX_LENGTH) {
-		return text
-	}
-	const cut = text.slice(0, PREVIEW_TEXT_MAX_LENGTH)
-	const lastSpace = cut.lastIndexOf(' ')
-	return (lastSpace > 0 ? cut.slice(0, lastSpace) : cut) + '…'
-}
-
 export default {
 	name: 'Envelope',
 	components: {
@@ -897,17 +874,6 @@ export default {
 				})
 			}
 			return escapeHtml(subject)
-		},
-
-		/**
-		 * @return {string}
-		 */
-		previewTextForSubtitle() {
-			if (this.isEncrypted) {
-				return this.t('mail', 'Encrypted message')
-			}
-			const text = this.data.summary ? this.data.summary.trim() : this.data.previewText.trim()
-			return truncatePreviewText(text)
 		},
 
 		storeActions() {
@@ -1550,20 +1516,26 @@ export default {
 	}
 	&__preview-text {
 		color: var(--color-text-maxcontrast);
-		font-weight: initial;
-
-		// Truncated to a fixed character budget in JS (see
-		// truncatePreviewText()) instead of relying on -webkit-line-clamp,
-		// which is known to cache its "how many lines fit" calculation and
-		// fail to recompute after certain incremental DOM updates --
-		// confirmed live as envelope rows permanently overlapping right
-		// after "Load more" or a resize-driven layout switch, surviving
-		// even a hard refresh and a CSS containment attempt. max-height +
-		// overflow here is just a defensive backstop in case the
-		// character budget ever underestimates actual rendered width, not
-		// the primary truncation mechanism.
-		max-height: calc(var(--default-font-size) * var(--default-line-height) * 2);
 		overflow: hidden;
+		font-weight: initial;
+		max-height: calc(var(--default-font-size) * var(--default-line-height) * 2);
+
+		/* Weird CSS hacks to make text ellipsize without white-space: nowrap */
+		display: -webkit-box;
+		-webkit-line-clamp: 2;
+		-webkit-box-orient: vertical;
+
+		// -webkit-line-clamp is known to cache its "how many lines fit"
+		// calculation and not recompute it after certain incremental DOM
+		// updates -- confirmed live as envelope rows permanently
+		// overlapping right after "Load more" or a resize-driven layout
+		// switch (both cause many sibling rows to reflow at once), not
+		// fixed by scrolling (no forced reflow) but fixed by an actual
+		// window resize (forces one). Containment stops this box's
+		// clamp calculation from being perturbed by transient layout
+		// changes in siblings, e.g. our own .list-leave-active taking a
+		// leaving row out of flow mid-transition.
+		contain: layout style;
 
 		.material-design-icon {
 			display: inline;
