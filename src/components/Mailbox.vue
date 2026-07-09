@@ -286,14 +286,24 @@ export default {
 			// background-refresh interval, not a user action.
 			this.mainStore.setInteractionPriorityMutation()
 			logger.debug(`Fetching envelopes for folder ${this.mailbox.databaseId} (${this.searchQuery})`, this.mailbox)
-			if (!this.syncedMailboxes.has(this.mailbox.databaseId + (this.searchQuery ?? ''))) {
+			const alreadySynced = this.syncedMailboxes.has(this.mailbox.databaseId + (this.searchQuery ?? ''))
+			if (!alreadySynced) {
 				// Only trigger skeleton if we didn't sync envelopes yet
 				this.loadingEnvelopes = true
 			} else {
+				// Set now, before the fetch, but only reset once the fetch
+				// has actually settled (see the `finally` below) -- $nextTick()
+				// resolves on the very next DOM patch, which, set here,
+				// landed long before `fetchEnvelopes()`'s network round trip
+				// even returned. That meant `skipListTransition` was back to
+				// false well before the fresh envelopes were committed to
+				// the store and actually rendered, so the whole-batch
+				// replacement (every old row leaving, every new one
+				// entering/reordering at once) ran with transitions still
+				// enabled -- confirmed live as the "double exposure"
+				// ghosting on a plain mailbox refresh, no "Load more"
+				// involved.
 				this.skipListTransition = true
-				this.$nextTick(() => {
-					this.skipListTransition = false
-				})
 			}
 
 			this.loadingCacheInitialization = false
@@ -335,32 +345,55 @@ export default {
 						this.error = error
 					},
 				})
+			} finally {
+				if (alreadySynced) {
+					this.$nextTick(() => {
+						this.skipListTransition = false
+					})
+				}
 			}
 		},
 
 		async loadMore() {
-			if (!this.expanded && this.envelopesToShow.length < this.envelopes.length) {
-				logger.debug('expanding envelope list')
-				this.expanded = true
-				return
-			}
-
-			logger.debug('fetching next envelope page')
-			this.loadingMore = true
-
+			// Both branches below can reveal/add a whole page of rows to
+			// the envelope list at once (the already-fetched-but-hidden
+			// "expanded" reveal is often the bigger burst, since it's
+			// everything the initial, deliberately small
+			// initialPageSize left out, appearing in a single reactivity
+			// tick) -- animating a dozen-plus simultaneous FLIP
+			// enters/reorders is exactly the "double exposure" ghosting
+			// scenario the transition CSS comment in EnvelopeList.vue
+			// calls out as worst-case. See the same guard in
+			// loadEnvelopes()/sync() above.
+			this.skipListTransition = true
 			try {
-				const envelopes = await this.mainStore.fetchNextEnvelopePage({
-					mailboxId: this.mailbox.databaseId,
-					query: this.searchQuery,
-				})
-				if (envelopes.length === 0) {
-					logger.info('envelope list end reached')
-					this.endReached = true
+				if (!this.expanded && this.envelopesToShow.length < this.envelopes.length) {
+					logger.debug('expanding envelope list')
+					this.expanded = true
+					return
 				}
-			} catch (error) {
-				logger.error('could not fetch next envelope page', { error })
+
+				logger.debug('fetching next envelope page')
+				this.loadingMore = true
+
+				try {
+					const envelopes = await this.mainStore.fetchNextEnvelopePage({
+						mailboxId: this.mailbox.databaseId,
+						query: this.searchQuery,
+					})
+					if (envelopes.length === 0) {
+						logger.info('envelope list end reached')
+						this.endReached = true
+					}
+				} catch (error) {
+					logger.error('could not fetch next envelope page', { error })
+				} finally {
+					this.loadingMore = false
+				}
 			} finally {
-				this.loadingMore = false
+				this.$nextTick(() => {
+					this.skipListTransition = false
+				})
 			}
 		},
 
@@ -555,6 +588,17 @@ export default {
 			}
 
 			this.refreshing = true
+			// mounted() always calls sync(false) right after the initial
+			// loadEnvelopes(), on every single mount -- hard refresh
+			// included. By then the list is already rendered, so any
+			// envelopes syncEnvelopes() adds/reorders are a change to an
+			// existing transition-group, not a first paint: without this
+			// guard, that background reconciliation animated at full
+			// intensity, unconditionally, on every page load. Confirmed
+			// live as the "double exposure" ghosting on a plain refresh
+			// with no "Load more" involved (see the same guard, and the
+			// same $nextTick-timing pitfall, in loadEnvelopes() above).
+			this.skipListTransition = true
 			try {
 				await this.mainStore.syncEnvelopes({
 					mailboxId: this.mailbox.databaseId,
@@ -582,6 +626,9 @@ export default {
 				logger.debug(`finished sync'ing folder ${this.mailbox.databaseId} (${this.searchQuery})`, { init })
 
 				this.mainStore.updateSyncTimestamp()
+				this.$nextTick(() => {
+					this.skipListTransition = false
+				})
 			}
 		},
 
