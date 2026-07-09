@@ -128,9 +128,45 @@ class Html {
 	}
 
 	/**
+	 * Merge multiple concatenated HTML documents into a single one.
+	 *
+	 * Some senders (confirmed live: TechTarget newsletters) prepend a
+	 * minimal tracking document to the real message, producing a body
+	 * like `<html><body><img tracker></body></html><html>...actual
+	 * newsletter...</html>`. Browsers and most mail clients are lenient
+	 * and render everything, but HTMLPurifier's lexer only extracts the
+	 * FIRST <body>...</body> region -- so the entire real message was
+	 * silently dropped and the rendered mail was blank (only the
+	 * tracking pixel and, separately, the <style> blocks survived,
+	 * since Filter.ExtractStyleBlocks regex-scans the raw input before
+	 * lexing).
+	 *
+	 * When more than one <body> region exists, their inner contents are
+	 * concatenated into a single document. Inputs with zero or one
+	 * <body> are returned unchanged.
+	 */
+	private static function mergeConcatenatedHtmlDocuments(string $mailBody): string {
+		if (preg_match_all('!<body[^>]*>(.*?)</body>!is', $mailBody, $bodyMatches) < 2) {
+			return $mailBody;
+		}
+
+		// <style> blocks living OUTSIDE the body regions (i.e. in the
+		// documents' heads) must survive the merge too -- the ones
+		// inside a body are already part of its captured content.
+		$outsideBodies = preg_replace('!<body[^>]*>.*?</body>!is', '', $mailBody);
+		preg_match_all('!<style[^>]*>.*?</style>!is', $outsideBodies, $styleMatches);
+
+		return '<html><body>'
+			. implode('', $styleMatches[0])
+			. implode('', $bodyMatches[1])
+			. '</body></html>';
+	}
+
+	/**
 	 * @param list<IMAPAttachment> $inlineAttachments
 	 */
 	public function sanitizeHtmlMailBody(int $messageId, string $mailBody, array $inlineAttachments): string {
+		$mailBody = self::mergeConcatenatedHtmlDocuments($mailBody);
 		$inlineAttachments = $this->addAttachmentUrl($messageId, $inlineAttachments);
 
 		$config = HTMLPurifier_Config::createDefault();

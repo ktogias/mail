@@ -118,6 +118,43 @@ class HtmlTest extends TestCase {
 		$this->assertStringContainsString('data-cid="image001@example.com"', $result);
 	}
 
+	public function testSanitizeHtmlMailBodyKeepsContentOfConcatenatedHtmlDocuments(): void {
+		// Some senders (confirmed live: TechTarget newsletters) prepend a
+		// minimal tracking document to the real message. HTMLPurifier's
+		// lexer only extracts the FIRST <body> region, so the entire
+		// real message was silently dropped and the mail rendered blank.
+		$urlGenerator = Server::get(IURLGenerator::class);
+		$request = $this->createStub(IRequest::class);
+		$hmacGenerator = $this->createStub(ProxyHmacGenerator::class);
+
+		$html = new Html($urlGenerator, $request, $hmacGenerator);
+
+		$mailBody = implode('', [
+			'<!DOCTYPE html>',
+			'<html><body><p></p><img src="https://tracker.example.com/open?x" height="2" width="3" alt=""></body></html>',
+			'<html lang="en"><head><title></title>',
+			'<style>.headline{color:red}</style>',
+			'</head><body><h1 class="headline">The actual newsletter content</h1></body></html>',
+		]);
+
+		$result = $html->sanitizeHtmlMailBody(42, $mailBody, []);
+
+		$this->assertStringContainsString('The actual newsletter content', $result);
+		$this->assertStringContainsString('.headline', $result);
+	}
+
+	public function testSanitizeHtmlMailBodyLeavesASingleDocumentAlone(): void {
+		$urlGenerator = Server::get(IURLGenerator::class);
+		$request = $this->createStub(IRequest::class);
+		$hmacGenerator = $this->createStub(ProxyHmacGenerator::class);
+
+		$html = new Html($urlGenerator, $request, $hmacGenerator);
+
+		$result = $html->sanitizeHtmlMailBody(42, '<html><body><p>Ordinary single-document mail</p></body></html>', []);
+
+		$this->assertStringContainsString('Ordinary single-document mail', $result);
+	}
+
 	public function testSanitizeStyleSheet() {
 		$blockedUrl = '/apps/mail/img/blocked-image.png';
 		$urlGenerator = self::createMock(IURLGenerator::class);
