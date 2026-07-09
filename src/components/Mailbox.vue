@@ -717,9 +717,23 @@ export default {
 </script>
 
 <style lang="scss" scoped>
-.mailbox {
-	height: 100%;
-}
+// height: 100% here (unconditional, since :class only ADDS
+// 'empty-content' on top of this always-present class) made every
+// single Mailbox instance -- including each of the priority inbox's
+// four stacked sections -- fight to be 100% of .app-content-list's
+// own height, an ambiguous quantity: that ancestor (Nextcloud core)
+// is itself an auto-sized flex column with max-height/overflow-y:auto,
+// not a fixed height. A percentage height on a flex item inside an
+// indeterminate-height flex container is a well-known, browser-
+// inconsistent CSS footgun, particularly across incremental reflows
+// (adding rows via "Load more", a resize-driven layout-mode switch)
+// vs. a full one -- confirmed live as envelope rows permanently
+// overlapping, present even on a fresh hard refresh (so not a
+// transition/timing issue), fixed by an actual window resize (forces
+// a full flex recalculation) but not by scrolling (touches no flex
+// sizing at all). The empty/error state's own centering already has
+// its own height: 100% below -- this rule was redundant there and
+// actively harmful for the normal, non-empty case.
 
 // Fix vertical space between sections in priority inbox
 .nameimportant {
