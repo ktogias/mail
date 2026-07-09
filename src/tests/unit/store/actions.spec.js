@@ -896,6 +896,110 @@ describe('Vuex store actions', () => {
 			expect(store.envelopes[900].tags).toBe(tagsBefore)
 		})
 
+		it('a flag just set locally survives a sync response that still reports the pre-change value', () => {
+			// toggleEnvelopeSeen() sets the flag optimistically and awaits its
+			// own PUT to confirm it, but a completely independent sync
+			// request (the watched-mailbox poller, or another Mailbox
+			// instance's own sync() firing because the user switched
+			// threads) can resolve AFTER that PUT and still report the
+			// message's PRE-PUT flags -- the server reports every known
+			// message as "changed" on every sync, not a real changed set.
+			// Confirmed live: marking a message read updated the list
+			// correctly, then reverted to unread/bold the moment the user
+			// opened a different thread.
+			const account13 = { id: 13 }
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+			})
+			store.addEnvelopesMutation({
+				envelopes: [{ databaseId: 901, mailboxId: 11, uid: 1, flags: { seen: false }, tags: {} }],
+				addToUnifiedMailboxes: false,
+			})
+
+			store.flagEnvelopeMutation({
+				envelope: store.envelopes[901],
+				flag: 'seen',
+				value: true,
+			})
+			expect(store.envelopes[901].flags.seen).toBe(true)
+
+			// A stale sync response for the same message, still reporting
+			// the flag as it was before the user's own change.
+			store.updateEnvelopeMutation({
+				envelope: { databaseId: 901, mailboxId: 11, flags: { seen: false }, tags: {} },
+			})
+
+			expect(store.envelopes[901].flags.seen).toBe(true)
+		})
+
+		it('a recently-changed flag also survives a full listing refresh reporting the pre-change value', () => {
+			const account13 = { id: 13 }
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+			})
+			store.addEnvelopesMutation({
+				envelopes: [{ databaseId: 902, mailboxId: 11, uid: 1, flags: { seen: false }, tags: {} }],
+				addToUnifiedMailboxes: false,
+			})
+
+			store.flagEnvelopeMutation({
+				envelope: store.envelopes[902],
+				flag: 'seen',
+				value: true,
+			})
+
+			// A full fetchEnvelopes()-style listing refresh (replace: true),
+			// still reflecting the pre-change server state.
+			store.addEnvelopesMutation({
+				envelopes: [{ databaseId: 902, mailboxId: 11, uid: 1, flags: { seen: false }, tags: {} }],
+				query: undefined,
+				replace: true,
+				replaceMailboxId: 11,
+				addToUnifiedMailboxes: false,
+			})
+
+			expect(store.envelopes[902].flags.seen).toBe(true)
+		})
+
+		it('stops protecting a flag once the grace window has actually elapsed', () => {
+			vi.useFakeTimers()
+			try {
+				const account13 = { id: 13 }
+				store.addAccountMutation(account13)
+				store.addMailboxMutation({
+					account: account13,
+					mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+				})
+				store.addEnvelopesMutation({
+					envelopes: [{ databaseId: 903, mailboxId: 11, uid: 1, flags: { seen: false }, tags: {} }],
+					addToUnifiedMailboxes: false,
+				})
+
+				store.flagEnvelopeMutation({
+					envelope: store.envelopes[903],
+					flag: 'seen',
+					value: true,
+				})
+
+				vi.advanceTimersByTime(30 * 1000)
+
+				store.updateEnvelopeMutation({
+					envelope: { databaseId: 903, mailboxId: 11, flags: { seen: false }, tags: {} },
+				})
+
+				// Long past the grace window: a subsequent sync reporting
+				// seen:false is a genuine, later server-side change (e.g.
+				// read on another device) and must win.
+				expect(store.envelopes[903].flags.seen).toBe(false)
+			} finally {
+				vi.useRealTimers()
+			}
+		})
+
 		it('notifies a message only once even when several query buckets of the mailbox report it', async () => {
 			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
 

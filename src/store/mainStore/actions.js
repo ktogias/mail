@@ -235,6 +235,56 @@ const pendingLockWaits = new Map()
 // first's in-flight request instead of firing a duplicate one.
 const pendingMessageFetches = new Map()
 
+// toggleEnvelopeSeen()/toggleEnvelopeJunk()/markEnvelopeFavoriteOrUnfavorite()
+// all optimistically set a flag via flagEnvelopeMutation() and await their
+// own PUT to confirm it -- but a completely independent sync request
+// (the watched-mailbox poller, or another Mailbox instance's own sync()
+// firing because the user switched threads) can resolve AFTER that PUT
+// and still report the message's PRE-PUT flags: SyncService.php reports
+// every known message as "changed" on every sync, not a real changed
+// set (see updateEnvelopeMutation() below), so this isn't a rare edge
+// case -- any sync racing the PUT will do it. Confirmed live: marking a
+// message read updated the list correctly, then reverted to
+// unread/bold the moment the user opened a different thread. This map
+// lets a flag mutation protect itself from being clobbered by a stale
+// sync response for a short window after being set.
+const RECENT_FLAG_CHANGE_GRACE_MS = 20 * 1000
+const recentFlagChanges = new Map()
+
+/**
+ * A flag this client changed moments ago (see flagEnvelopeMutation())
+ * wins over whatever a sync/listing response says, since that response
+ * may have been generated before the server-side change actually
+ * landed. Anything NOT recently changed locally still comes straight
+ * from the server.
+ *
+ * @param {string|number} envelopeId
+ * @param {object} incomingFlags
+ * @return {object}
+ */
+function withRecentFlagOverrides(envelopeId, incomingFlags) {
+	const perEnvelope = recentFlagChanges.get(envelopeId)
+	if (!perEnvelope) {
+		return incomingFlags
+	}
+	const now = Date.now()
+	let overridden
+	for (const [flag, change] of perEnvelope) {
+		if (change.expiresAt <= now) {
+			perEnvelope.delete(flag)
+			continue
+		}
+		if (incomingFlags[flag] !== change.value) {
+			overridden = overridden || { ...incomingFlags }
+			overridden[flag] = change.value
+		}
+	}
+	if (perEnvelope.size === 0) {
+		recentFlagChanges.delete(envelopeId)
+	}
+	return overridden || incomingFlags
+}
+
 /**
  * Whether some caller is already mid-retry against mailbox's lock.
  *
@@ -2620,7 +2670,7 @@ export default function mainStoreActions() {
 				const mailbox = this.mailboxes[replaceMailboxId]
 				envelopes.forEach((envelope) => {
 					this.normalizeTags(envelope)
-					Vue.set(this.envelopes, envelope.databaseId, { ...this.envelopes[envelope.databaseId] || {}, ...envelope })
+					Vue.set(this.envelopes, envelope.databaseId, { ...this.envelopes[envelope.databaseId] || {}, ...envelope, flags: withRecentFlagOverrides(envelope.databaseId, envelope.flags) })
 					Vue.set(envelope, 'accountId', mailbox.accountId)
 				})
 				Vue.set(mailbox.envelopeLists, listId, uniq(orderByDateInt(envelopes.map((e) => e.databaseId))))
@@ -2650,7 +2700,7 @@ export default function mainStoreActions() {
 				const mailbox = this.mailboxes[envelope.mailboxId]
 				const existing = dropStaleIds(mailbox.envelopeLists[listId] || [], mailbox.databaseId)
 				this.normalizeTags(envelope)
-				Vue.set(this.envelopes, envelope.databaseId, { ...this.envelopes[envelope.databaseId] || {}, ...envelope })
+				Vue.set(this.envelopes, envelope.databaseId, { ...this.envelopes[envelope.databaseId] || {}, ...envelope, flags: withRecentFlagOverrides(envelope.databaseId, envelope.flags) })
 				Vue.set(envelope, 'accountId', mailbox.accountId)
 				Vue.set(mailbox.envelopeLists, listId, uniq(orderByDateInt(this.appendOrReplaceEnvelopeId(existing, envelope))))
 				if (!addToUnifiedMailboxes) {
@@ -2676,6 +2726,9 @@ export default function mainStoreActions() {
 				return
 			}
 			this.normalizeTags(envelope)
+
+			const flags = withRecentFlagOverrides(envelope.databaseId, envelope.flags)
+
 			// Skip no-op updates: the server's sync response reports EVERY
 			// known message as "changed" on EVERY sync (SyncService.php still
 			// carries the upstream TODO for computing a real changed set), and
@@ -2685,8 +2738,8 @@ export default function mainStoreActions() {
 			// dependent re-renders per minute, for values that hadn't changed
 			// at all -- measured live as a browser tab ballooning by hundreds
 			// of MB per minute until earlyoom killed it.
-			if (!isEqual(existing.flags, envelope.flags)) {
-				Vue.set(existing, 'flags', envelope.flags)
+			if (!isEqual(existing.flags, flags)) {
+				Vue.set(existing, 'flags', flags)
 			}
 			if (!isEqual(existing.tags, envelope.tags)) {
 				Vue.set(existing, 'tags', envelope.tags)
@@ -2707,6 +2760,13 @@ export default function mainStoreActions() {
 				}
 			}
 			Vue.set(envelope.flags, flag, value)
+
+			let perEnvelope = recentFlagChanges.get(envelope.databaseId)
+			if (!perEnvelope) {
+				perEnvelope = new Map()
+				recentFlagChanges.set(envelope.databaseId, perEnvelope)
+			}
+			perEnvelope.set(flag, { value, expiresAt: Date.now() + RECENT_FLAG_CHANGE_GRACE_MS })
 		},
 		addTagMutation({ tag }) {
 			Vue.set(this.tags, tag.id, tag)
