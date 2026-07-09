@@ -2126,6 +2126,33 @@ describe('Vuex store actions', () => {
 			expect(store.accountsUnmapped[7].error).toBe(false)
 			expect(MailboxService.fetchAll).toHaveBeenCalledWith(7, true)
 		})
+
+		it('still returns the updated account when the follow-up mailbox sync fails', async () => {
+			// The "Reconnect Google account" flow calls updateAccount()
+			// BEFORE opening the OAuth consent popup, and the forced
+			// mailbox sync inside it cannot work while the account's token
+			// is expired -- that's the whole reason the user is
+			// reconnecting. Letting the sync failure reject the action
+			// aborted the flow before the popup code was ever reached, so
+			// the token could never be renewed. Confirmed live against a
+			// Gmail account whose refresh token Google had expired.
+			const account = {
+				id: 7,
+				personalNamespace: '',
+				mailboxes: [],
+				error: true,
+			}
+			store.addAccountMutation(account)
+
+			const updatedAccount = { id: 7, personalNamespace: '', mailboxes: [] }
+			AccountService.update.mockResolvedValue(updatedAccount)
+			MailboxService.fetchAll.mockRejectedValue(new Error('IMAP error synchronizing account 7: token expired'))
+
+			const returned = await store.updateAccount({ accountId: 7 })
+
+			expect(returned).toEqual(updatedAccount)
+			expect(store.accountsUnmapped[7].error).toBe(false)
+		})
 	})
 
 	describe('toggleEnvelopeSeen thread-wide unread correction', () => {

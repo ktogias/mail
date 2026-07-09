@@ -499,7 +499,21 @@ export default function mainStoreActions() {
 				const account = await updateAccount(config)
 				logger.debug('account updated', { account })
 				this.editAccountMutation({ ...account, error: false })
-				await this.syncMailboxesForAccount(this.accountsUnmapped[account.id])
+				// Non-fatal: the account update itself already succeeded.
+				// Failing here failed the whole action -- which broke OAuth
+				// reconnection outright, a chicken-and-egg deadlock: the
+				// "Reconnect Google account" flow calls this action BEFORE
+				// opening the consent popup, this forced sync can't work
+				// while the account's token is expired (that's the whole
+				// reason the user is reconnecting), so the throw aborted the
+				// flow before the popup code was ever reached, and the token
+				// could never be renewed. Confirmed live against a Gmail
+				// account whose refresh token Google had expired.
+				try {
+					await this.syncMailboxesForAccount(this.accountsUnmapped[account.id])
+				} catch (error) {
+					logger.warn(`Could not sync mailboxes for updated account ${account.id} -- continuing, the update itself succeeded`, { error })
+				}
 				return account
 			})
 		},
