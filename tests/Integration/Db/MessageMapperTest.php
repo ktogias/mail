@@ -274,6 +274,111 @@ class MessageMapperTest extends TestCase {
 	}
 
 	/**
+	 * Recipient matches run as EXISTS probes against mail_recipients
+	 * instead of INNER JOINs (see recipientTermsMatchExists()): the JOINs
+	 * multiplied the row set by the recipients per message and needed a
+	 * SELECT DISTINCT to fold the duplicates back out. Same results, one
+	 * row per message from the start.
+	 */
+	public function testFindIdsByQueryMatchesRecipientsWithoutDuplicates(): void {
+		$mailbox = new Mailbox();
+		$mailbox->setId(3);
+		$searchQuery = new SearchQuery();
+		$searchQuery->setThreaded(false);
+		$searchQuery->addFrom('alice');
+		$sortOrder = 'DESC';
+
+		$messages = [
+			// Two FROM rows both matching "alice" -- with the old JOIN this
+			// message appeared twice before DISTINCT.
+			['id' => 20, 'uid' => 320, 'message_id' => '<r1@rcpt.com>', 'subject' => 'From Alice', 'sent_at' => 1000],
+			// "alice" appears only as TO -- must NOT match a from: search.
+			['id' => 21, 'uid' => 321, 'message_id' => '<r2@rcpt.com>', 'subject' => 'To Alice', 'sent_at' => 2000],
+			// No recipients at all -- must not match either.
+			['id' => 22, 'uid' => 322, 'message_id' => '<r3@rcpt.com>', 'subject' => 'No recipients', 'sent_at' => 3000],
+		];
+		foreach ($messages as $value) {
+			$qb = $this->db->getQueryBuilder();
+			$qb->insert($this->mapper->getTableName())->values([
+				'id' => $qb->createNamedParameter($value['id'], IQueryBuilder::PARAM_INT),
+				'uid' => $qb->createNamedParameter($value['uid'], IQueryBuilder::PARAM_INT),
+				'message_id' => $qb->createNamedParameter($value['message_id']),
+				'mailbox_id' => $qb->createNamedParameter(3, IQueryBuilder::PARAM_INT),
+				'subject' => $qb->createNamedParameter($value['subject']),
+				'sent_at' => $qb->createNamedParameter($value['sent_at'], IQueryBuilder::PARAM_INT),
+			])->executeStatement();
+		}
+
+		$recipients = [
+			// TYPE_FROM = 0, TYPE_TO = 1 (Recipient::TYPE_*)
+			['message_id' => 20, 'type' => 0, 'label' => 'Alice One', 'email' => 'alice@example.com'],
+			['message_id' => 20, 'type' => 0, 'label' => 'Alice Two', 'email' => 'alice@elsewhere.com'],
+			['message_id' => 21, 'type' => 1, 'label' => 'Alice One', 'email' => 'alice@example.com'],
+			['message_id' => 21, 'type' => 0, 'label' => 'Bob', 'email' => 'bob@example.com'],
+		];
+		foreach ($recipients as $value) {
+			$rqb = $this->db->getQueryBuilder();
+			$rqb->insert('mail_recipients')->values([
+				'message_id' => $rqb->createNamedParameter($value['message_id'], IQueryBuilder::PARAM_INT),
+				'type' => $rqb->createNamedParameter($value['type'], IQueryBuilder::PARAM_INT),
+				'label' => $rqb->createNamedParameter($value['label']),
+				'email' => $rqb->createNamedParameter($value['email']),
+			])->executeStatement();
+		}
+
+		$result = $this->mapper->findIdsByQuery($mailbox, $searchQuery, $sortOrder, null, null);
+
+		self::assertEquals([20], $result);
+	}
+
+	/**
+	 * The 'anyof' match combines recipient and subject terms with OR
+	 * instead of AND -- the free-text search path.
+	 */
+	public function testFindIdsByQueryAnyofMatchesRecipientOrSubject(): void {
+		$mailbox = new Mailbox();
+		$mailbox->setId(3);
+		$searchQuery = new SearchQuery();
+		$searchQuery->setThreaded(false);
+		$searchQuery->setMatch('anyof');
+		$searchQuery->addFrom('alice');
+		$searchQuery->addSubject('alice');
+		$sortOrder = 'DESC';
+
+		$messages = [
+			// Matches via sender.
+			['id' => 30, 'uid' => 330, 'message_id' => '<s1@any.com>', 'subject' => 'Nothing relevant', 'sent_at' => 1000],
+			// Matches via subject only.
+			['id' => 31, 'uid' => 331, 'message_id' => '<s2@any.com>', 'subject' => 'About alice, again', 'sent_at' => 2000],
+			// Matches neither.
+			['id' => 32, 'uid' => 332, 'message_id' => '<s3@any.com>', 'subject' => 'Unrelated', 'sent_at' => 3000],
+		];
+		foreach ($messages as $value) {
+			$qb = $this->db->getQueryBuilder();
+			$qb->insert($this->mapper->getTableName())->values([
+				'id' => $qb->createNamedParameter($value['id'], IQueryBuilder::PARAM_INT),
+				'uid' => $qb->createNamedParameter($value['uid'], IQueryBuilder::PARAM_INT),
+				'message_id' => $qb->createNamedParameter($value['message_id']),
+				'mailbox_id' => $qb->createNamedParameter(3, IQueryBuilder::PARAM_INT),
+				'subject' => $qb->createNamedParameter($value['subject']),
+				'sent_at' => $qb->createNamedParameter($value['sent_at'], IQueryBuilder::PARAM_INT),
+			])->executeStatement();
+		}
+
+		$rqb = $this->db->getQueryBuilder();
+		$rqb->insert('mail_recipients')->values([
+			'message_id' => $rqb->createNamedParameter(30, IQueryBuilder::PARAM_INT),
+			'type' => $rqb->createNamedParameter(0, IQueryBuilder::PARAM_INT),
+			'label' => $rqb->createNamedParameter('Alice'),
+			'email' => $rqb->createNamedParameter('alice@example.com'),
+		])->executeStatement();
+
+		$result = $this->mapper->findIdsByQuery($mailbox, $searchQuery, $sortOrder, null, null);
+
+		self::assertEquals([31, 30], $result);
+	}
+
+	/**
 	 * The non-threaded path is unaffected by the above: a flag filter still
 	 * applies to each message individually, not thread-wide.
 	 */
