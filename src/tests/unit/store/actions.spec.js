@@ -1325,6 +1325,46 @@ describe('Vuex store actions', () => {
 			const calledQueries = MessageService.fetchEnvelopes.mock.calls.map((call) => call[2]).sort()
 			expect(calledQueries).toEqual(['is:pi-important', 'is:pi-important', 'is:pi-other', 'is:pi-other'])
 		})
+
+		it('fetchNextEnvelopes ("Load more") fans out to the real inbox mailboxes with the caller\'s own filter, not the virtual id', async () => {
+			// Regression: this "Load more" pagination path had no
+			// isPriorityInbox branch at all (unlike fetchEnvelopes()/
+			// syncEnvelopes() above, which at least had a too-narrow one)
+			// -- every "Load more" tap inside a priority-inbox section
+			// fell straight through to the generic path and sent
+			// mailboxId="priority" to the server, 403ing every time and
+			// silently never loading anything further.
+			let nextId = 2000
+			MessageService.fetchEnvelopes.mockImplementation(async () => [{
+				databaseId: nextId++,
+				dateInt: 500,
+				mailboxId: 5,
+				flags: {},
+			}])
+
+			// Seed one known envelope per real mailbox (and, via the
+			// already-fixed fan-out, the "priority" mailbox's own merged
+			// list) -- fewer than `quantity`, so fetchNextEnvelopes()'s
+			// own local-data-sufficiency check correctly decides a real
+			// fetch is still needed.
+			await store.fetchEnvelopes({ mailboxId: 'priority', query: 'is:pi-important' })
+			MessageService.fetchEnvelopes.mockClear()
+			MessageService.fetchEnvelopes.mockImplementation(async (accountId, mailboxId) => [{
+				databaseId: nextId++,
+				dateInt: 400,
+				mailboxId,
+				flags: {},
+			}])
+
+			await store.fetchNextEnvelopes({ mailboxId: 'priority', query: 'is:pi-important', quantity: 20 })
+
+			expect(MessageService.fetchEnvelopes.mock.calls.length).toBeGreaterThan(0)
+			for (const call of MessageService.fetchEnvelopes.mock.calls) {
+				expect(call[1]).not.toBe('priority')
+				expect([5, 10]).toContain(call[1])
+				expect(call[2]).toBe('is:pi-important')
+			}
+		})
 	})
 
 	describe('interaction priority: user actions over background sync', () => {

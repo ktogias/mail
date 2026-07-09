@@ -1009,83 +1009,96 @@ export default function mainStoreActions() {
 			return handleHttpAuthErrors(async () => {
 				const mailbox = this.getMailbox(mailboxId)
 
-				if (mailbox.isUnified) {
-					const getIndivisualLists = curry((query, m) => this.getEnvelopes(m.databaseId, query))
-					const individualCursor = curry((query, m) => prop('dateInt', last(this.getEnvelopes(m.databaseId, query))))
-					const cursor = individualCursor(query, mailbox)
+				if (mailbox.isUnified || mailbox.isPriorityInbox) {
+					// "priority" and "unified" are virtual ids with no real
+					// mailbox behind them and must never reach the actual
+					// fetch endpoint -- same reasoning as fetchEnvelopes()/
+					// syncEnvelopes()'s isPriorityInbox branches elsewhere in
+					// this file. This "Load more" pagination path was missing
+					// the equivalent branch entirely until now: falling
+					// through to the generic path below sent
+					// mailboxId=priority straight to the server on every
+					// "Load more" tap inside a priority-inbox section,
+					// 403ing every time and silently never loading more
+					// messages (the tap just did nothing, repeatably).
+					const fetchNextFannedOutPage = async (query, allowRecursiveFetch = rec) => {
+						const getIndivisualLists = curry((query, m) => this.getEnvelopes(m.databaseId, query))
+						const individualCursor = curry((query, m) => prop('dateInt', last(this.getEnvelopes(m.databaseId, query))))
+						const cursor = individualCursor(query, mailbox)
 
-					if (cursor === undefined) {
-						throw new Error('Unified list has no tail')
-					}
-					const newestFirst = this.getPreference('sort-order') === 'newest'
-					const nextLocalUnifiedEnvelopes = pipe(
-						findIndividualMailboxes(this.getMailboxes, mailbox.specialRole),
-						map(getIndivisualLists(query)),
-						combineEnvelopeLists(this.getPreference('sort-order')),
-						filter(where({
-							dateInt: newestFirst ? gt(cursor) : lt(cursor),
-						})),
-						slice(0, quantity),
-					)
-					// We know the next envelopes based on local data
-					// We have to fetch individual envelopes only if it ends in the known
-					// next fetch. If it ends after, we have all the relevant data already.
-					const needsFetch = curry((query, nextEnvelopes, mb) => {
-						const c = individualCursor(query, mb)
-						if (nextEnvelopes.length < quantity) {
-							return true
+						if (cursor === undefined) {
+							throw new Error('Unified list has no tail')
 						}
+						const newestFirst = this.getPreference('sort-order') === 'newest'
+						const nextLocalEnvelopes = pipe(
+							findIndividualMailboxes(this.getMailboxes, mailbox.specialRole),
+							map(getIndivisualLists(query)),
+							combineEnvelopeLists(this.getPreference('sort-order')),
+							filter(where({
+								dateInt: newestFirst ? gt(cursor) : lt(cursor),
+							})),
+							slice(0, quantity),
+						)
+						// We know the next envelopes based on local data
+						// We have to fetch individual envelopes only if it ends in the known
+						// next fetch. If it ends after, we have all the relevant data already.
+						const needsFetch = curry((query, nextEnvelopes, mb) => {
+							const c = individualCursor(query, mb)
+							if (nextEnvelopes.length < quantity) {
+								return true
+							}
 
-						if (this.getPreference('sort-order') === 'newest') {
-							return c >= last(nextEnvelopes).dateInt
-						} else {
-							return c <= last(nextEnvelopes).dateInt
-						}
-					})
-
-					const mailboxesToFetch = (accounts) => pipe(
-						findIndividualMailboxes(this.getMailboxes, mailbox.specialRole),
-						tap((mbs) => logger.info('individual mailboxes', { mbs })),
-						filter(needsFetch(query, nextLocalUnifiedEnvelopes(accounts))),
-					)(accounts)
-					const mbs = mailboxesToFetch(this.getAccounts)
-
-					if (rec && mbs.length) {
-						logger.debug('not enough local envelopes for the next unified page. ' + mbs.length + ' fetches required', {
-							mailboxes: mbs.map((mb) => mb.databaseId),
+							if (this.getPreference('sort-order') === 'newest') {
+								return c >= last(nextEnvelopes).dateInt
+							} else {
+								return c <= last(nextEnvelopes).dateInt
+							}
 						})
-						// Same reasoning as fetchEnvelopes() above: one account
-						// failing must not fail pagination for every other
-						// account sharing this unified mailbox.
-						return pipe(
-							map((mb) => this.fetchNextEnvelopes({
-								mailboxId: mb.databaseId,
-								query,
-								quantity,
-								addToUnifiedMailboxes: false,
-							}).catch((error) => {
-								logger.error(`Failed to fetch next envelopes for unified constituent mailbox ${mb.databaseId}: ${error}`, { error })
-								return []
-							})),
-							Promise.all.bind(Promise),
-							andThen(() => this.fetchNextEnvelopes({
-								mailboxId,
-								query,
-								quantity,
-								rec: false,
-								addToUnifiedMailboxes: true,
-							})),
-						)(mbs)
+
+						const mailboxesToFetch = (accounts) => pipe(
+							findIndividualMailboxes(this.getMailboxes, mailbox.specialRole),
+							tap((mbs) => logger.info('individual mailboxes', { mbs })),
+							filter(needsFetch(query, nextLocalEnvelopes(accounts))),
+						)(accounts)
+						const mbs = mailboxesToFetch(this.getAccounts)
+
+						if (allowRecursiveFetch && mbs.length) {
+							logger.debug('not enough local envelopes for the next fanned-out page. ' + mbs.length + ' fetches required', {
+								mailboxes: mbs.map((mb) => mb.databaseId),
+							})
+							// Same reasoning as fetchEnvelopes() above: one account
+							// failing must not fail pagination for every other
+							// account sharing this unified/priority mailbox.
+							return pipe(
+								map((mb) => this.fetchNextEnvelopes({
+									mailboxId: mb.databaseId,
+									query,
+									quantity,
+									addToUnifiedMailboxes: false,
+								}).catch((error) => {
+									logger.error(`Failed to fetch next envelopes for fanned-out constituent mailbox ${mb.databaseId}: ${error}`, { error })
+									return []
+								})),
+								Promise.all.bind(Promise),
+								andThen(() => fetchNextFannedOutPage(query, false)),
+							)(mbs)
+						}
+
+						const envelopes = nextLocalEnvelopes(this.getAccounts)
+						logger.debug('next fanned-out page can be built locally and consists of ' + envelopes.length + ' envelopes', { addToUnifiedMailboxes })
+						this.addEnvelopesMutation({
+							query,
+							envelopes,
+							addToUnifiedMailboxes,
+						})
+						return envelopes
 					}
 
-					const envelopes = nextLocalUnifiedEnvelopes(this.getAccounts)
-					logger.debug('next unified page can be built locally and consists of ' + envelopes.length + ' envelopes', { addToUnifiedMailboxes })
-					this.addEnvelopesMutation({
-						query,
-						envelopes,
-						addToUnifiedMailboxes,
-					})
-					return envelopes
+					if (mailbox.isPriorityInbox && query === undefined) {
+						const results = await Promise.all(getPrioritySearchQueries().map((query) => fetchNextFannedOutPage(query)))
+						return flatten(results)
+					}
+					return fetchNextFannedOutPage(query)
 				}
 
 				const list = mailbox.envelopeLists[normalizedEnvelopeListId(query)]
