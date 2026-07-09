@@ -482,7 +482,15 @@ export default {
 	// The content are two lines of text and respect the 1.5 line height
 	--list-item-border-radius: var(--border-radius-element, 32px);
 	--list-item-height: calc(4 * var(--default-line-height));
-	height: var(--list-item-height);
+	// A row whose actual content (subject + a 2-line-clamped preview-text
+	// snippet, in the default multiline layout) needs more room than this
+	// fixed budget must never be silently clipped or, worse, left
+	// unclipped to paint straight through into the next row -- confirmed
+	// live as permanently overlapping envelope text, reproducible on a
+	// fresh, transition-free first load. min-height (not height) lets a
+	// taller row push the next one down instead, the same way the
+	// one-line variant below already handles it via `height: unset`.
+	min-height: var(--list-item-height);
 
 	// General styles
 	box-sizing: border-box;
@@ -674,7 +682,7 @@ export default {
 		display: flex;
 		flex: 1 1 auto;
 		align-items: start;
-		height: var(--list-item-height);
+		min-height: var(--list-item-height);
 		min-width: 0;
 
 		// This is handled by the parent container
