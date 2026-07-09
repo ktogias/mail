@@ -174,10 +174,11 @@
 							:collapsible="true"
 							:bus="bus" />
 						<SectionTitle
-							v-show="hasImportantEnvelopes"
+							v-show="hasOtherEnvelopes"
 							class="app-content-list-item section-title other"
 							:name="t('mail', 'Other')" />
 						<Mailbox
+							v-show="hasOtherEnvelopes"
 							class="nameother"
 							:load-more-label="t('mail', 'Load more other messages')"
 							:account="unifiedAccount"
@@ -338,6 +339,15 @@ export default {
 			const map = this.mainStore.getEnvelopes(
 				this.unifiedInbox.databaseId,
 				this.appendToSearch(this.priorityImportantQuery),
+			)
+			const envelopes = Array.isArray(map) ? map : Array.from(map?.values() || [])
+			return envelopes.length > 0
+		},
+
+		hasOtherEnvelopes() {
+			const map = this.mainStore.getEnvelopes(
+				this.unifiedInbox.databaseId,
+				this.appendToSearch(this.priorityOtherQuery),
 			)
 			const envelopes = Array.isArray(map) ? map : Array.from(map?.values() || [])
 			return envelopes.length > 0
