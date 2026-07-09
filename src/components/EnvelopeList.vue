@@ -662,28 +662,6 @@ div {
 	transition: all calc(var(--animation-slow) / 2);
 }
 
-// Vue's transition-group FLIP animation repositions every remaining
-// sibling (the "move" part) at the same time a removed one (an
-// envelope row, the "Load more" row, or the loading spinner -- all
-// siblings inside the same transition-group) is still shrinking out
-// in place. Without taking the leaving item out of normal flow, the
-// still-in-flow, shrinking old content visually overlaps the
-// already-repositioned new content underneath/around it for the
-// length of the transition -- confirmed live: a "double exposure"
-// ghosting of two different rows' text superimposed at the same
-// position, worst right after a burst of several envelopes being
-// added/reordered at once (e.g. right after a successful "Load
-// more"), small-scale even on an otherwise idle list (a stray "+"
-// from the hidden "Load more" row bleeding into the row below it).
-// Standard, documented fix: take it out of flow during its own leave
-// transition. Only .list-leave-active needs this --
-// .multiselect-header-leave-active is a single, non-reordering
-// element with nothing beside it to overlap.
-.list-leave-active {
-	position: absolute;
-	width: 100%;
-}
-
 .multiselect-header-enter,
 .multiselect-header-leave-to,
 .list-enter,
