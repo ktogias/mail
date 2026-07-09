@@ -307,6 +307,41 @@ export default {
 
 				this.loading = false
 			} catch (error) {
+				// Same staleness check as the success path above -- without
+				// it, a fetchThread() call superseded by a newer one could
+				// reject after the user had already navigated elsewhere and
+				// unconditionally stomp errorMessage for whatever thread is
+				// now open.
+				if (threadId !== parseInt(this.$route.params.threadId, 10)) {
+					logger.debug('A stale fetchThread() rejected after the user navigated away; ignoring', {
+						oldId: threadId,
+						newId: this.$route.params.threadId,
+						error,
+					})
+					return
+				}
+
+				// this.thread reads straight from the shared store, not
+				// from anything only this call would have populated -- the
+				// store's fetchThread() action has no caching/dedup at all
+				// (unlike fetchMessage()), so hover-prefetch (Envelope.vue)
+				// firing its own independent fetchThread() for the same id
+				// can race this one: if THAT call already succeeded and
+				// committed the thread to the store, the data is already
+				// correctly loaded and rendering regardless of why this
+				// specific, now-redundant call rejected. Confirmed live: a
+				// thread that visibly loaded fine flipped to "Δεν βρέθηκε"
+				// moments later, only reproducible on desktop (hover exists
+				// there, not on mobile touch).
+				if (this.thread.length > 0) {
+					logger.debug('fetchThread() rejected, but the thread is already loaded (a concurrent call must have succeeded); ignoring', {
+						threadId,
+						error,
+					})
+					this.loading = false
+					return
+				}
+
 				logger.error('could not load envelope thread', { threadId, error })
 				if (error?.response?.status === 403) {
 					this.errorTitle = t('mail', 'Could not load your message thread')

@@ -439,6 +439,80 @@ describe('Thread', () => {
 		})
 	})
 
+	describe('stale fetchThread() rejections', () => {
+		// The store's fetchThread() action has no caching/dedup at all
+		// (unlike fetchMessage()), so hover-prefetch (Envelope.vue) firing
+		// its own independent fetchThread() call for the same id can race
+		// this component's own call. Confirmed live: a thread that visibly
+		// loaded fine flipped to "Δεν βρέθηκε" moments later, only
+		// reproducible on desktop (hover exists there, not on mobile touch).
+		it('ignores a rejection once the thread is already loaded (a concurrent call must have succeeded)', async () => {
+			let reject
+			store.fetchThread = vi.fn().mockReturnValue(new Promise((_resolve, r) => { reject = r }))
+
+			const view = shallowMount(Thread, {
+				mocks: {
+					$route: { params: { threadId: 300 } },
+				},
+				store,
+				localVue,
+			})
+
+			// getEnvelope()/getEnvelopesByThreadRootId() already return a
+			// fully-populated thread for 300, as if a concurrent call (e.g.
+			// hover prefetch) had already committed it to the store.
+			expect(view.vm.thread.length).toBeGreaterThan(0)
+
+			reject(new Error('boom'))
+			await Promise.resolve()
+			await Promise.resolve()
+
+			expect(view.vm.errorMessage).toBe('')
+		})
+
+		it('ignores a rejection for a thread the user already navigated away from', async () => {
+			let reject
+			store.fetchThread = vi.fn().mockReturnValue(new Promise((_resolve, r) => { reject = r }))
+
+			const view = shallowMount(Thread, {
+				mocks: {
+					$route: { params: { threadId: 900 } },
+				},
+				store,
+				localVue,
+			})
+
+			// Simulate having navigated to a different thread before the
+			// original call's promise settles.
+			view.vm.$route.params.threadId = 901
+
+			reject(new Error('boom'))
+			await Promise.resolve()
+			await Promise.resolve()
+
+			expect(view.vm.errorMessage).toBe('')
+		})
+
+		it('still shows the error when the thread genuinely failed to load and nothing superseded it', async () => {
+			let reject
+			store.fetchThread = vi.fn().mockReturnValue(new Promise((_resolve, r) => { reject = r }))
+
+			const view = shallowMount(Thread, {
+				mocks: {
+					$route: { params: { threadId: 900 } },
+				},
+				store,
+				localVue,
+			})
+
+			reject(new Error('boom'))
+			await Promise.resolve()
+			await Promise.resolve()
+
+			expect(view.vm.errorMessage).toBeTruthy()
+		})
+	})
+
 	describe('message prefetch', () => {
 		// The clicked message's databaseId is already known from the
 		// route, before the thread listing resolves -- fetching it in
