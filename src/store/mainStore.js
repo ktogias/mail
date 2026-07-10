@@ -110,6 +110,13 @@ export default defineStore('main', {
 			// tick -- never by user-initiated syncs, which should never be
 			// artificially slowed down.
 			serverBusy: false,
+			// How many new-mail notification bursts have fired since the
+			// user last engaged (tab shown, window focused, any input).
+			// Drives the hidden-tab poller's engagement decay: unengaged
+			// notifications progressively widen the background tick, any
+			// engagement resets it. See startWatchedMailboxSync() in
+			// App.vue.
+			unengagedNotificationBursts: 0,
 			followUpFeatureAvailable: false,
 			contextChatFeatureAvailable: false,
 			internalAddress: [],

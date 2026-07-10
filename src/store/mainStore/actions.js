@@ -1405,7 +1405,25 @@ export default function mainStoreActions() {
 					})
 			})
 		},
-		async syncWatchedMailboxes() {
+		/**
+		 * @param {object} options
+		 * @param {boolean} options.lightweight Sync only ONE representative
+		 *                                      query bucket per watched
+		 *                                      mailbox and skip the
+		 *                                      priority-inbox refresh. Used
+		 *                                      by hidden tabs (see
+		 *                                      App.vue): enough for a full,
+		 *                                      timely new-mail notification
+		 *                                      (the sync response carries
+		 *                                      sender/subject/preview), at a
+		 *                                      fraction of a full tick's
+		 *                                      request volume -- the rest of
+		 *                                      the UI state is reconciled by
+		 *                                      the immediate full tick that
+		 *                                      fires when the tab becomes
+		 *                                      visible again.
+		 */
+		async syncWatchedMailboxes({ lightweight = false } = {}) {
 			// Skip superfluous requests if using passwordless authentication. They will fail anyway.
 			const passwordIsUnavailable = this.getPreference('password-is-unavailable', false)
 			const isDisabled = (account) => passwordIsUnavailable && !!account.provisioningId
@@ -1496,7 +1514,16 @@ export default function mainStoreActions() {
 					// simply wait their turn, and once the lock clears they
 					// resolve immediately since nothing else needed re-sent.
 					const queries = Object.keys(mailbox.envelopeLists)
-					const queriesToSync = queries.length > 0 ? queries : [undefined]
+					let queriesToSync = queries.length > 0 ? queries : [undefined]
+					if (lightweight) {
+						// One representative bucket is enough to pull new
+						// messages into the store and fire the notification:
+						// prefer the unfiltered bucket when it's loaded,
+						// otherwise whichever bucket happens to be first.
+						// The remaining buckets read the same store and are
+						// reconciled by the full tick on tab activation.
+						queriesToSync = queries.includes('') ? [''] : [queriesToSync[0]]
+					}
 
 					try {
 						const newMessagesPerQuery = []
@@ -1543,6 +1570,7 @@ export default function mainStoreActions() {
 							})
 						if (unseenMessages.length > 0) {
 							showNewMessagesNotification(unseenMessages)
+							this.notificationBurstFiredMutation()
 						}
 
 						return newMessagesPerQuery
@@ -1554,6 +1582,14 @@ export default function mainStoreActions() {
 				const results = await mapWithConcurrencyLimit(mailboxTargets, WATCHED_SYNC_CONCURRENCY, syncOneWatchedMailbox)
 				const newMessages = flatMapDeep(identity, results).filter((m) => m !== undefined)
 				if (newMessages.length === 0) {
+					return
+				}
+
+				if (lightweight) {
+					// Nobody is looking at the priority inbox right now --
+					// its sections are reconciled by the full tick that
+					// fires on tab activation.
+					logger.debug('lightweight tick, skipping the priority-inbox refresh')
 					return
 				}
 
@@ -3020,6 +3056,14 @@ export default function mainStoreActions() {
 		},
 		setServerBusyMutation(serverBusy) {
 			this.serverBusy = serverBusy
+		},
+		notificationBurstFiredMutation() {
+			this.unengagedNotificationBursts++
+		},
+		resetNotificationEngagementMutation() {
+			if (this.unengagedNotificationBursts !== 0) {
+				this.unengagedNotificationBursts = 0
+			}
 		},
 		// Arms the interaction-priority window (see
 		// INTERACTION_PRIORITY_WINDOW_MS above) -- called at the start of

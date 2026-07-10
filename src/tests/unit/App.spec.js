@@ -62,6 +62,109 @@ describe('App', () => {
 		vi.useRealTimers()
 	})
 
+	describe('attention-aware polling', () => {
+		// Page Visibility API best practice (and React Query's default
+		// model): no full-rate background refetching in hidden tabs,
+		// revalidate on focus. Measured before this change: 1599 sync
+		// POSTs per 10 minutes across the household's open tabs.
+		function setVisibility(state) {
+			Object.defineProperty(document, 'visibilityState', {
+				value: state,
+				configurable: true,
+			})
+		}
+
+		afterEach(() => {
+			setVisibility('visible')
+			vi.useRealTimers()
+		})
+
+		it('hidden tab: slows to 60-120s and syncs lightweight', () => {
+			vi.useFakeTimers()
+			store.syncWatchedMailboxes = vi.fn().mockResolvedValue()
+			setVisibility('hidden')
+
+			view.vm.startWatchedMailboxSync()
+
+			vi.advanceTimersByTime(59_999)
+			expect(store.syncWatchedMailboxes).not.toHaveBeenCalled()
+
+			vi.advanceTimersByTime(60_002)
+			expect(store.syncWatchedMailboxes).toHaveBeenCalledTimes(1)
+			expect(store.syncWatchedMailboxes).toHaveBeenCalledWith({ lightweight: true })
+		})
+
+		it('visible tab: keeps the full-sync cadence and passes lightweight: false', () => {
+			vi.useFakeTimers()
+			store.syncWatchedMailboxes = vi.fn().mockResolvedValue()
+
+			view.vm.startWatchedMailboxSync()
+			vi.advanceTimersByTime(30_001)
+
+			expect(store.syncWatchedMailboxes).toHaveBeenCalledWith({ lightweight: false })
+		})
+
+		it('visible but idle: slows to 60-90s while staying on full syncs', () => {
+			vi.useFakeTimers()
+			// Deterministic jitter: every delay collapses to its base
+			// (visibleActive: 20s, visibleIdle: 60s), so the timeline is
+			// exact instead of a range.
+			const random = vi.spyOn(Math, 'random').mockReturnValue(0)
+			store.syncWatchedMailboxes = vi.fn().mockResolvedValue()
+
+			view.vm.startWatchedMailboxSync()
+			// Simulate 10 minutes without input: the first tick fires on
+			// the visibleActive schedule it was drawn with (t=20s); its
+			// follow-up must be drawn from the idle range (t=20s+60s=80s).
+			view.vm.lastActivity = Date.now() - 10 * 60_000
+
+			vi.advanceTimersByTime(20_001)
+			expect(store.syncWatchedMailboxes).toHaveBeenCalledTimes(1)
+			expect(store.syncWatchedMailboxes).toHaveBeenLastCalledWith({ lightweight: false })
+			view.vm.lastActivity = Date.now() - 10 * 60_000
+
+			vi.advanceTimersByTime(59_998) // t=79_999
+			expect(store.syncWatchedMailboxes).toHaveBeenCalledTimes(1)
+			vi.advanceTimersByTime(2) // t=80_001
+			expect(store.syncWatchedMailboxes).toHaveBeenCalledTimes(2)
+
+			random.mockRestore()
+		})
+
+		it('unengaged notification bursts widen the hidden delay (engagement decay)', () => {
+			vi.useFakeTimers()
+			store.syncWatchedMailboxes = vi.fn().mockResolvedValue()
+			setVisibility('hidden')
+			// min(1.5^3, 4) = 3.375 -> hidden range becomes 202.5-405s.
+			store.unengagedNotificationBursts = 3
+
+			view.vm.startWatchedMailboxSync()
+
+			vi.advanceTimersByTime(202_499)
+			expect(store.syncWatchedMailboxes).not.toHaveBeenCalled()
+			vi.advanceTimersByTime(202_506)
+			expect(store.syncWatchedMailboxes).toHaveBeenCalledTimes(1)
+		})
+
+		it('becoming visible fires an immediate full tick and resets the engagement decay', () => {
+			vi.useFakeTimers()
+			store.syncWatchedMailboxes = vi.fn().mockResolvedValue()
+			setVisibility('hidden')
+			store.unengagedNotificationBursts = 3
+
+			view.vm.startWatchedMailboxSync()
+			expect(store.syncWatchedMailboxes).not.toHaveBeenCalled()
+
+			setVisibility('visible')
+			document.dispatchEvent(new Event('visibilitychange'))
+			vi.advanceTimersByTime(1)
+
+			expect(store.syncWatchedMailboxes).toHaveBeenCalledTimes(1)
+			expect(store.syncWatchedMailboxes).toHaveBeenCalledWith({ lightweight: false })
+			expect(store.unengagedNotificationBursts).toBe(0)
+		})
+	})
+
 	it('doubles the tick period when the server reports itself busy', async () => {
 		// this.mainStore.serverBusy reflects the serverBusy field riding
 		// the most recent sync response (see SyncService::isServerBusy()) --

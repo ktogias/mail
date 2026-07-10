@@ -1082,6 +1082,48 @@ describe('Vuex store actions', () => {
 			})
 		})
 
+		it('lightweight tick: syncs only the unfiltered bucket and skips the priority refresh', async () => {
+			// Hidden tabs poll in lightweight mode (see App.vue): one
+			// representative bucket per watched mailbox is enough for a
+			// complete, timely new-mail notification; the full UI state is
+			// reconciled by the immediate full tick on tab activation.
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+
+			const account13 = {
+				id: 13,
+			}
+
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: {
+					name: 'INBOX',
+					databaseId: 11,
+					specialRole: 'inbox',
+				},
+			})
+
+			store.mailboxes[11].envelopeLists[''] = []
+			store.mailboxes[11].envelopeLists['not:starred'] = []
+
+			const newMessage = { databaseId: 778, flags: { seen: false } }
+			store.fetchEnvelopes = vi.fn(async () => {})
+			store.syncEnvelopes = vi.fn(async ({ mailboxId }) => mailboxId === 11 ? [newMessage] : [])
+
+			await store.syncWatchedMailboxes({ lightweight: true })
+
+			// Only one bucket synced -- the unfiltered one.
+			expect(store.syncEnvelopes).toHaveBeenCalledTimes(1)
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({
+				mailboxId: 11,
+				query: '',
+			})
+			// The notification still fired (that's the whole point).
+			expect(NotificationService.showNewMessagesNotification).toHaveBeenCalledWith([newMessage])
+			// No priority-inbox refresh: no sync against the unified inbox.
+			expect(store.syncEnvelopes).not.toHaveBeenCalledWith(expect.objectContaining({ mailboxId: 'unified' }))
+		})
+
 		it('syncs a mailbox\'s query buckets sequentially, not concurrently', async () => {
 			// syncEnvelopes() has its own internal retry-on-lock loop that keeps
 			// awaiting until the mailbox unlocks (every 1.5s, see its own
