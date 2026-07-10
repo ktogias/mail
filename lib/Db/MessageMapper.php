@@ -1001,15 +1001,49 @@ class MessageMapper extends QBMapper {
 			$select->setMaxResults($limit);
 		}
 
-		if ($uids !== null) {
-			return array_flat_map(function (array $chunk) use ($qb, $select) {
-				$qb->setParameter('uids', $chunk, IQueryBuilder::PARAM_INT_ARRAY);
-				return array_map(static fn (Message $message) => $message->getId(), $this->findEntities($select));
-			}, array_chunk($uids, 1000));
+		return $this->executeWithSearchTimeout(function () use ($qb, $select, $uids) {
+			if ($uids !== null) {
+				return array_flat_map(function (array $chunk) use ($qb, $select) {
+					$qb->setParameter('uids', $chunk, IQueryBuilder::PARAM_INT_ARRAY);
+					return array_map(static fn (Message $message) => $message->getId(), $this->findEntities($select));
+				}, array_chunk($uids, 1000));
+			}
+
+			return array_map(static fn (Message $message) => $message->getId(), $this->findEntities($select));
+		});
+	}
+
+	/**
+	 * Cap the execution time of a search query (PostgreSQL only).
+	 *
+	 * The search is by far the heaviest query of this app, and nothing
+	 * else in the stack limits a runaway instance's lifetime: a single
+	 * pathological search was observed live running for 51 minutes (16
+	 * concurrent copies, database pinned, every other request starving
+	 * behind them). A generous cap -- two orders of magnitude above the
+	 * measured normal case -- turns that failure mode into one cleanly
+	 * failed request instead of a full-instance outage.
+	 *
+	 * Deliberately scoped to THIS session and reset right after, never
+	 * set at the role/database level: migrations, repair steps, cron
+	 * jobs and other apps' queries legitimately run long and must not
+	 * inherit any cap.
+	 *
+	 * @template T
+	 * @param callable(): T $fn
+	 * @return T
+	 */
+	private function executeWithSearchTimeout(callable $fn) {
+		if ($this->db->getDatabaseProvider() !== IDBConnection::PLATFORM_POSTGRES) {
+			return $fn();
 		}
 
-		$result = array_map(static fn (Message $message) => $message->getId(), $this->findEntities($select));
-		return $result;
+		$this->db->executeStatement("SET statement_timeout = '60s'");
+		try {
+			return $fn();
+		} finally {
+			$this->db->executeStatement('RESET statement_timeout');
+		}
 	}
 
 	public function findIdsGloballyByQuery(IUser $user, SearchQuery $query, ?int $limit, ?array $uids = null): array {
@@ -1118,14 +1152,16 @@ class MessageMapper extends QBMapper {
 			$select->setMaxResults($limit);
 		}
 
-		if ($uids !== null) {
-			return array_flat_map(function (array $chunk) use ($select) {
-				$select->setParameter('uids', $chunk, IQueryBuilder::PARAM_INT_ARRAY);
-				return array_map(static fn (Message $message) => $message->getId(), $this->findEntities($select));
-			}, array_chunk($uids, 1000));
-		}
+		return $this->executeWithSearchTimeout(function () use ($select, $uids) {
+			if ($uids !== null) {
+				return array_flat_map(function (array $chunk) use ($select) {
+					$select->setParameter('uids', $chunk, IQueryBuilder::PARAM_INT_ARRAY);
+					return array_map(static fn (Message $message) => $message->getId(), $this->findEntities($select));
+				}, array_chunk($uids, 1000));
+			}
 
-		return array_map(static fn (Message $message) => $message->getId(), $this->findEntities($select));
+			return array_map(static fn (Message $message) => $message->getId(), $this->findEntities($select));
+		});
 	}
 
 	/**
