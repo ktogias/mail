@@ -502,12 +502,26 @@ export default {
 	created() {
 		this.mainStore.setCurrentViewMailboxIdMutation(this.$route?.params?.mailboxId)
 		this.handleMailto()
-	},
-
-	async mounted() {
+		// Set here, not in mounted(): Vue mounts children bottom-up
+		// (child created+mounted, THEN parent mounted), so setting this
+		// in mounted() meant every child Mailbox instance's OWN initial
+		// mount fetch always ran first with the stale, un-filtered
+		// searchQuery, immediately followed by a second, corrected fetch
+		// once this component's mounted() set 'not:starred' and the prop
+		// change hit each child's searchQuery watcher -- one wasted
+		// request per section, every single page load with "sort
+		// favorites separately" enabled (confirmed live via HAR:
+		// is:pi-important/is:pi-other requests aborted and immediately
+		// re-issued with not:starred added). Setting it here, in
+		// created() (which DOES run before any child's created/mounted),
+		// makes every child's very first request already carry the
+		// correct filter.
 		if (this.sortFavorites) {
 			this.searchQuery = 'not:starred'
 		}
+	},
+
+	async mounted() {
 		setTimeout(this.saveStartMailbox, START_MAILBOX_DEBOUNCE)
 		if (this.isThreadShown) {
 			await this.fetchEnvelopes()

@@ -118,4 +118,23 @@ describe('MailboxThread', () => {
 		expect(otherTitle.isVisible()).toBe(true)
 		expect(otherMailbox.isVisible()).toBe(true)
 	})
+
+	it("applies the sort-favorites 'not:starred' filter before any child Mailbox mounts", () => {
+		// Vue mounts children bottom-up (child created+mounted, THEN
+		// parent mounted()) -- setting searchQuery in mounted() meant
+		// every child's own first fetch always ran with the stale,
+		// unfiltered query, immediately superseded by a second, corrected
+		// fetch once this component's mounted() ran and the prop change
+		// hit the child's own watcher (confirmed live via HAR: every
+		// priority section's initial request aborted and re-issued with
+		// not:starred added, on every single page load with this setting
+		// on). Setting it in created() -- which the Vue lifecycle
+		// guarantees runs before any child's created/mounted -- means the
+		// prop passed to children is already correct on their first read.
+		store.savePreferenceMutation({ key: 'sort-favorites', value: 'true' })
+
+		const wrapper = mountThread()
+
+		expect(wrapper.vm.searchQuery).toBe('not:starred')
+	})
 })
