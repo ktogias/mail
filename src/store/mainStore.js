@@ -23,6 +23,12 @@ export default defineStore('main', {
 			// ...) takes priority over the background watched-mailbox
 			// poller. See setInteractionPriorityMutation().
 			interactionPriorityUntil: 0,
+			// In-flight fetchEnvelopes() calls per mailbox+query list
+			// key -- lets the UI show a loading state for an envelope
+			// list that is still empty because its fetch hasn't
+			// returned yet (e.g. the priority-inbox sections during a
+			// search, which are otherwise hidden entirely).
+			envelopeFetchCounts: {},
 			preferences: {},
 			accountsUnmapped: {
 				[UNIFIED_ACCOUNT_ID]: {

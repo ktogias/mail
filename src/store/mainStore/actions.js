@@ -971,6 +971,22 @@ export default function mainStoreActions() {
 				return this.getEnvelope(id)
 			})
 		},
+		envelopeFetchStartedMutation({ mailboxId, query }) {
+			const key = mailboxId + '::' + normalizedEnvelopeListId(query)
+			Vue.set(this.envelopeFetchCounts, key, (this.envelopeFetchCounts[key] ?? 0) + 1)
+		},
+		envelopeFetchFinishedMutation({ mailboxId, query }) {
+			const key = mailboxId + '::' + normalizedEnvelopeListId(query)
+			const count = (this.envelopeFetchCounts[key] ?? 1) - 1
+			if (count <= 0) {
+				Vue.delete(this.envelopeFetchCounts, key)
+			} else {
+				Vue.set(this.envelopeFetchCounts, key, count)
+			}
+		},
+		isFetchingEnvelopes(mailboxId, query) {
+			return (this.envelopeFetchCounts[mailboxId + '::' + normalizedEnvelopeListId(query)] ?? 0) > 0
+		},
 		fetchEnvelopes({
 			mailboxId,
 			query,
@@ -978,6 +994,7 @@ export default function mainStoreActions() {
 			includeCacheBuster = false,
 			signal,
 		}) {
+			this.envelopeFetchStartedMutation({ mailboxId, query })
 			return handleHttpAuthErrors(async () => {
 				const mailbox = this.getMailbox(mailboxId)
 
@@ -1085,6 +1102,8 @@ export default function mainStoreActions() {
 						replaceMailboxId: mailboxId,
 					}))),
 				)(mailbox.accountId, mailboxId, query, undefined, PAGE_SIZE, this.getPreference('sort-order'), this.getPreference('layout-message-view'), includeCacheBuster ? mailbox.cacheBuster : undefined, signal)
+			}).finally(() => {
+				this.envelopeFetchFinishedMutation({ mailboxId, query })
 			})
 		},
 		async fetchNextEnvelopePage({

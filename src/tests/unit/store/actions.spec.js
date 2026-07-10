@@ -418,6 +418,58 @@ describe('Vuex store actions', () => {
 		expect(MessageService.fetchEnvelopes).toHaveBeenCalledTimes(5)
 	})
 
+	describe('fetchEnvelopes marks its list as in-flight', () => {
+		// MailboxThread's priority sections are v-shown on "has
+		// envelopes"; during a search every list is empty until the
+		// fetch returns, so without this marker all sections (and their
+		// loading skeletons) vanished into a blank white list.
+		beforeEach(() => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			const account = {
+				id: 13,
+				personalNamespace: '',
+				mailboxes: [],
+			}
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: {
+					id: 'INBOX',
+					name: 'INBOX',
+					databaseId: 11,
+					accountId: 13,
+					specialRole: 'inbox',
+				},
+			})
+		})
+
+		it('is fetching while the request is pending, per mailbox+query, and clears on success', async () => {
+			let resolveFetch
+			MessageService.fetchEnvelopes.mockReturnValue(new Promise((resolve) => {
+				resolveFetch = resolve
+			}))
+
+			const promise = store.fetchEnvelopes({ mailboxId: 11, query: 'subject:x' })
+
+			expect(store.isFetchingEnvelopes(11, 'subject:x')).toBe(true)
+			expect(store.isFetchingEnvelopes(11, 'subject:y')).toBe(false)
+			expect(store.isFetchingEnvelopes(11, undefined)).toBe(false)
+
+			resolveFetch([])
+			await promise
+
+			expect(store.isFetchingEnvelopes(11, 'subject:x')).toBe(false)
+		})
+
+		it('clears the marker when the fetch rejects, so a failed search cannot leave a phantom skeleton', async () => {
+			MessageService.fetchEnvelopes.mockRejectedValueOnce(new Error('boom'))
+
+			await expect(store.fetchEnvelopes({ mailboxId: 11, query: 'subject:x' })).rejects.toThrow('boom')
+
+			expect(store.isFetchingEnvelopes(11, 'subject:x')).toBe(false)
+		})
+	})
+
 	it('fetches the next individual page', async () => {
 		const msgs1 = reverse(range(30, 40))
 		const page1 = reverse(range(10, 30))

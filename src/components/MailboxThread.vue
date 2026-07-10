@@ -336,20 +336,28 @@ export default {
 			return this.mainStore.getEnvelopes(this.mailbox.databaseId, this.query).length > 0
 		},
 
+		// The has*Envelopes computeds gate each section's v-show. They
+		// deliberately count an in-flight fetch as "has": with a pending
+		// search every section's list is empty, so all sections (and the
+		// loading skeletons inside their Mailbox components) used to be
+		// hidden at once -- the user typed a term and stared at a blank
+		// white list until the results landed.
 		hasImportantEnvelopes() {
-			const map = this.mainStore.getEnvelopes(
-				this.unifiedInbox.databaseId,
-				this.appendToSearch(this.priorityImportantQuery),
-			)
+			const query = this.appendToSearch(this.priorityImportantQuery)
+			if (this.mainStore.isFetchingEnvelopes(this.unifiedInbox.databaseId, query)) {
+				return true
+			}
+			const map = this.mainStore.getEnvelopes(this.unifiedInbox.databaseId, query)
 			const envelopes = Array.isArray(map) ? map : Array.from(map?.values() || [])
 			return envelopes.length > 0
 		},
 
 		hasOtherEnvelopes() {
-			const map = this.mainStore.getEnvelopes(
-				this.unifiedInbox.databaseId,
-				this.appendToSearch(this.priorityOtherQuery),
-			)
+			const query = this.appendToSearch(this.priorityOtherQuery)
+			if (this.mainStore.isFetchingEnvelopes(this.unifiedInbox.databaseId, query)) {
+				return true
+			}
+			const map = this.mainStore.getEnvelopes(this.unifiedInbox.databaseId, query)
 			const envelopes = Array.isArray(map) ? map : Array.from(map?.values() || [])
 			return envelopes.length > 0
 		},
@@ -363,10 +371,13 @@ export default {
 				return false
 			}
 			const mailbox = this.mailbox.isPriorityInbox ? this.unifiedInbox : this.mailbox
-			const envelopes = this.mainStore.getEnvelopes(
-				mailbox.databaseId,
-				this.appendToSearch(this.favoriteQuery),
-			)
+			const query = this.appendToSearch(this.favoriteQuery)
+			if (this.mainStore.isFetchingEnvelopes(mailbox.databaseId, query)) {
+				// See hasImportantEnvelopes() -- pending fetch counts as
+				// "has" so the section's loading skeleton is visible.
+				return true
+			}
+			const envelopes = this.mainStore.getEnvelopes(mailbox.databaseId, query)
 			return envelopes.length > 0
 		},
 
@@ -378,6 +389,13 @@ export default {
 				return false
 			}
 
+			// The fetch key matches what the section's Mailbox actually
+			// requests (appendToSearch), unlike the envelope-list lookup
+			// below which predates the search append.
+			if (this.mainStore.isFetchingEnvelopes(FOLLOW_UP_MAILBOX_ID, this.appendToSearch(this.followUpQuery))) {
+				// See hasImportantEnvelopes().
+				return true
+			}
 			const map = this.mainStore.getEnvelopes(FOLLOW_UP_MAILBOX_ID, this.followUpQuery)
 			const envelopes = Array.isArray(map) ? map : Array.from(map?.values() || [])
 			return envelopes.length > 0
