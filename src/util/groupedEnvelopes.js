@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+import { getCanonicalLocale } from '@nextcloud/l10n'
+
 export function groupEnvelopesByDate(envelopes, syncTimestamp, sortOrder = 'newest') {
 	const now = new Date(syncTimestamp)
 
@@ -64,8 +66,12 @@ export function groupEnvelopesByDate(envelopes, syncTimestamp, sortOrder = 'newe
 	const monthOrder = Object.keys(monthsMap).map(Number)
 	monthOrder.sort((a, b) => (sortOrder === 'newest' ? b - a : a - b))
 	for (const m of monthOrder) {
+		// The user's Nextcloud locale, not the OS/browser default -- same
+		// convention as formatDateTime.js and the rest of the app (and
+		// what makes this deterministic under test, where the locale is
+		// pinned to 'en').
 		const monthName = new Date(now.getFullYear(), m, 1)
-			.toLocaleString('default', { month: 'long' })
+			.toLocaleString(getCanonicalLocale(), { month: 'long' })
 		groups[monthName] = monthsMap[m]
 		sortOrder === 'newest' ? groupOrder.push(monthName) : groupOrder.unshift(monthName)
 	}
