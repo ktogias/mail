@@ -8,8 +8,8 @@
 		:class="{ 'empty-content': (!hasMessages && !loadingEnvelopes) || error }">
 		<Error
 			v-if="error"
-			:error="t('mail', 'Could not open folder')"
-			message=""
+			:error="errorTitle"
+			:message="errorMessage"
 			role="alert" />
 		<LoadingSkeleton v-else-if="loadingEnvelopes" :number-of-lines="20" />
 		<Loading
@@ -180,6 +180,32 @@ export default {
 
 		showLoadMore() {
 			return !this.endReached && this.paginate === 'manual'
+		},
+
+		// A search-in-body term is the one search mode that isn't a local
+		// database query -- it makes a live IMAP round-trip to the mail
+		// server (see MailSearch::getIdsLocally() server-side), an order
+		// of magnitude slower than everything else search does, and
+		// prone to hit the server's 20s timeout on a large mailbox. The
+		// generic "Could not open folder" left no way to tell that apart
+		// from a genuine failure (confirmed live: a 504 on a body search
+		// looked identical to any other broken folder).
+		isBodySearchTimeout() {
+			return this.error?.response?.status === 504 && (this.searchQuery ?? '').includes('body:')
+		},
+
+		errorTitle() {
+			if (this.isBodySearchTimeout) {
+				return this.t('mail', 'Message body search is taking too long')
+			}
+			return this.t('mail', 'Could not open folder')
+		},
+
+		errorMessage() {
+			if (this.isBodySearchTimeout) {
+				return this.t('mail', 'Searching message content contacts the mail server directly and can be slow on large mailboxes. Try again, or search without message content.')
+			}
+			return ''
 		},
 	},
 

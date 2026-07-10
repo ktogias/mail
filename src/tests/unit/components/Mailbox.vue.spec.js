@@ -76,6 +76,51 @@ describe('Mailbox', () => {
 		})
 	})
 
+	describe('body-search timeout messaging', () => {
+		// Search-in-body is the one search mode that isn't a local
+		// database query -- it makes a live IMAP round-trip to the mail
+		// server, an order of magnitude slower than everything else
+		// search does, and prone to hitting the server's 504 timeout on
+		// a large mailbox. The generic "Could not open folder" gave no
+		// way to tell that apart from a genuine failure (confirmed
+		// live).
+		function error504() {
+			const error = new Error('Gateway Timeout')
+			error.response = { status: 504 }
+			return error
+		}
+
+		it('shows a distinct message for a 504 while a body search is active', async () => {
+			store.fetchEnvelopes = vi.fn().mockRejectedValue(error504())
+
+			const view = mountMailbox({ searchQuery: 'body:euseful' })
+			await view.vm.loadEnvelopes()
+
+			expect(view.vm.errorTitle).toBe('Message body search is taking too long')
+			expect(view.vm.errorMessage).not.toBe('')
+		})
+
+		it('keeps the generic message for a 504 with no body search active', async () => {
+			store.fetchEnvelopes = vi.fn().mockRejectedValue(error504())
+
+			const view = mountMailbox({ searchQuery: 'subject:euseful' })
+			await view.vm.loadEnvelopes()
+
+			expect(view.vm.errorTitle).toBe('Could not open folder')
+			expect(view.vm.errorMessage).toBe('')
+		})
+
+		it('keeps the generic message for a non-504 error even with a body search active', async () => {
+			store.fetchEnvelopes = vi.fn().mockRejectedValue(new Error('boom'))
+
+			const view = mountMailbox({ searchQuery: 'body:euseful' })
+			await view.vm.loadEnvelopes()
+
+			expect(view.vm.errorTitle).toBe('Could not open folder')
+			expect(view.vm.errorMessage).toBe('')
+		})
+	})
+
 	it('resets loadingCacheInitialization when the forced init sync fails, instead of hanging forever', async () => {
 		// Regression: a missing `return`/`.catch()` meant that if the forced
 		// sync() a not-yet-cached mailbox needs failed for ANY reason -- a
