@@ -130,35 +130,57 @@ class Html {
 	/**
 	 * Merge multiple concatenated HTML documents into a single one.
 	 *
-	 * Some senders (confirmed live: TechTarget newsletters) prepend a
-	 * minimal tracking document to the real message, producing a body
-	 * like `<html><body><img tracker></body></html><html>...actual
-	 * newsletter...</html>`. Browsers and most mail clients are lenient
-	 * and render everything, but HTMLPurifier's lexer only extracts the
-	 * FIRST <body>...</body> region -- so the entire real message was
-	 * silently dropped and the rendered mail was blank (only the
-	 * tracking pixel and, separately, the <style> blocks survived,
-	 * since Filter.ExtractStyleBlocks regex-scans the raw input before
+	 * Some senders prepend a minimal tracking document to the real
+	 * message. Two variants confirmed live:
+	 *  - TechTarget: `<html><body><img tracker></body></html>
+	 *    <html>...newsletter with its own <body>...</html>`
+	 *  - Meetup: `<html><head>...</head><body><img tracker></body>
+	 *    </html><html>...58KB newsletter with NO <body> tag at all,
+	 *    content directly under <html>...</html>`
+	 *
+	 * Browsers and most mail clients render such malformed input
+	 * leniently, but HTMLPurifier's lexer extracts only the FIRST
+	 * <body>...</body> region -- so the entire real message was
+	 * silently dropped and the mail rendered blank: just the tracking
+	 * pixel plus the <style> blocks (those survive separately, since
+	 * Filter.ExtractStyleBlocks regex-scans the raw input before
 	 * lexing).
 	 *
-	 * When more than one <body> region exists, their inner contents are
-	 * concatenated into a single document. Inputs with zero or one
-	 * <body> are returned unchanged.
+	 * When the input contains more than one <html> document or more
+	 * than one <body> region, everything is merged into a single
+	 * document, in the original order: body regions are unwrapped to
+	 * their inner content, head blocks are dropped (their <style>
+	 * blocks are carried over), and stray <html>/doctype wrappers are
+	 * removed. Ordinary single-document inputs are returned unchanged.
 	 */
 	private static function mergeConcatenatedHtmlDocuments(string $mailBody): string {
-		if (preg_match_all('!<body[^>]*>(.*?)</body>!is', $mailBody, $bodyMatches) < 2) {
+		$htmlCount = preg_match_all('/<html[\s>]/i', $mailBody);
+		$bodyCount = preg_match_all('/<body[\s>]/i', $mailBody);
+		if ($htmlCount <= 1 && $bodyCount <= 1) {
 			return $mailBody;
 		}
 
 		// <style> blocks living OUTSIDE the body regions (i.e. in the
 		// documents' heads) must survive the merge too -- the ones
-		// inside a body are already part of its captured content.
+		// inside a body are already part of its kept content.
 		$outsideBodies = preg_replace('!<body[^>]*>.*?</body>!is', '', $mailBody);
 		preg_match_all('!<style[^>]*>.*?</style>!is', $outsideBodies, $styleMatches);
 
+		$content = $mailBody;
+		// Doctype declarations have no place mid-document.
+		$content = preg_replace('/<!DOCTYPE[^>]*>/i', '', $content);
+		// Head blocks are dropped wholesale -- their styles were
+		// captured above, nothing else in them survives purification
+		// anyway.
+		$content = preg_replace('!<head[^>]*>.*?</head>!is', '', $content);
+		// Unwrap body regions to their inner content, in place.
+		$content = preg_replace('!<body[^>]*>(.*?)</body>!is', '$1', $content);
+		// Drop the html wrappers themselves.
+		$content = preg_replace('!</?html[^>]*>!i', '', $content);
+
 		return '<html><body>'
 			. implode('', $styleMatches[0])
-			. implode('', $bodyMatches[1])
+			. $content
 			. '</body></html>';
 	}
 

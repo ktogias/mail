@@ -143,6 +143,34 @@ class HtmlTest extends TestCase {
 		$this->assertStringContainsString('.headline', $result);
 	}
 
+	public function testSanitizeHtmlMailBodyKeepsContentOfBodylessSecondDocument(): void {
+		// Meetup variant (confirmed live): the tracking document has the
+		// ONLY <body> in the whole input; the real newsletter follows as
+		// a second <html> document with NO <body> tag at all, its content
+		// sitting directly under <html>. The first-body extraction then
+		// keeps just the tracking pixel.
+		$urlGenerator = Server::get(IURLGenerator::class);
+		$request = $this->createStub(IRequest::class);
+		$hmacGenerator = $this->createStub(ProxyHmacGenerator::class);
+
+		$html = new Html($urlGenerator, $request, $hmacGenerator);
+
+		$mailBody = implode('', [
+			'<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">',
+			'<html xmlns="http://www.w3.org/1999/xhtml"><head><style>.pixel{display:none}</style></head>',
+			'<body><img src="https://tracker.example.com/open?x" width="1" height="1" alt=""></body></html>',
+			'<html xmlns="http://www.w3.org/1999/xhtml" style="background-color: #ffffff;">',
+			'<style>.headline{color:red}</style>',
+			'<table><tr><td><h1 class="headline">The actual bodyless newsletter content</h1></td></tr></table>',
+			'</html>',
+		]);
+
+		$result = $html->sanitizeHtmlMailBody(42, $mailBody, []);
+
+		$this->assertStringContainsString('The actual bodyless newsletter content', $result);
+		$this->assertStringContainsString('.headline', $result);
+	}
+
 	public function testSanitizeHtmlMailBodyLeavesASingleDocumentAlone(): void {
 		$urlGenerator = Server::get(IURLGenerator::class);
 		$request = $this->createStub(IRequest::class);
