@@ -53,6 +53,7 @@ class ImapMessageFetcher {
 	private array $scheduling = [];
 	private bool $hasHtmlMessage = false;
 	private string $rawReferences = '';
+	private ?string $rawSubject = null;
 	private string $dispositionNotificationTo = '';
 	private bool $hasDkimSignature = false;
 	private array $phishingDetails = [];
@@ -513,6 +514,25 @@ class ImapMessageFetcher {
 	}
 
 	private function decodeSubject(Horde_Imap_Client_Data_Envelope $envelope): string {
+		// Horde's own encoded-word decoding depends on its charset
+		// conversion backend, and on common setups (measured on Alpine:
+		// limited mbstring, no working iconv fallback inside Horde) it
+		// silently mangles charsets it can't convert -- a subject in
+		// windows-1253 (or its Java alias "Cp1253", as sent by e.g.
+		// Eurobank's mailer) came out as latin1 mojibake
+		// ("ÅíçìÝñùóç..."), while PHP's own iconv on the same box
+		// converts both labels perfectly. So when the raw header
+		// contains encoded-words, decode them ourselves via iconv
+		// first; any word iconv can't handle falls back to Horde's
+		// result below, so behavior on exotic-but-Horde-known charsets
+		// never regresses.
+		if ($this->rawSubject !== null && str_contains($this->rawSubject, '=?')) {
+			$decoded = self::decodeEncodedWords($this->rawSubject);
+			if ($decoded !== null) {
+				return $decoded;
+			}
+		}
+
 		// Try a soft conversion first (some installations, eg: Alpine linux,
 		// have issues with the '//IGNORE' option)
 		$subject = $envelope->subject;
@@ -528,11 +548,71 @@ class ImapMessageFetcher {
 		return $utf8Ignored;
 	}
 
+	/**
+	 * Decode RFC 2047 encoded-words using iconv for the charset
+	 * conversion.
+	 *
+	 * Returns null when anything in the input can't be decoded
+	 * cleanly, so the caller can fall back to Horde's decoding.
+	 */
+	public static function decodeEncodedWords(string $raw): ?string {
+		// Whitespace between two adjacent encoded-words is not part of
+		// the text (RFC 2047, section 6.2).
+		$raw = preg_replace('/(=\?[^?]+\?[BbQq]\?[^?]*\?=)[ \t]+(?==\?)/', '$1', $raw);
+		if ($raw === null) {
+			return null;
+		}
+
+		$failed = false;
+		$result = preg_replace_callback(
+			// charset, optional RFC 2231 language suffix, encoding, payload
+			'/=\?([^?*]+)(?:\*[^?]*)?\?([BbQq])\?([^?]*)\?=/',
+			static function (array $matches) use (&$failed): string {
+				[$full, $charset, $encoding, $payload] = $matches;
+				if (strtoupper($encoding) === 'B') {
+					$bytes = base64_decode($payload, true);
+				} else {
+					$bytes = quoted_printable_decode(str_replace('_', ' ', $payload));
+				}
+				if ($bytes === false) {
+					$failed = true;
+					return $full;
+				}
+				$utf8 = @iconv($charset, 'UTF-8', $bytes);
+				if ($utf8 === false) {
+					$failed = true;
+					return $full;
+				}
+				return $utf8;
+			},
+			$raw,
+		);
+		if ($failed || $result === null) {
+			return null;
+		}
+
+		// The decoded result must be valid UTF-8 as a whole.
+		if (iconv('UTF-8', 'UTF-8', $result) === false) {
+			return null;
+		}
+
+		return $result;
+	}
+
 	private function parseHeaders(Horde_Imap_Client_Data_Fetch $fetch): void {
 		/** @var resource $headersStream */
 		$headersStream = $fetch->getHeaderText('0', Horde_Imap_Client_Data_Fetch::HEADER_STREAM);
-		$parsedHeaders = Horde_Mime_Headers::parseHeaders($headersStream);
+		$headerText = stream_get_contents($headersStream);
 		fclose($headersStream);
+		$parsedHeaders = Horde_Mime_Headers::parseHeaders($headerText);
+
+		// Keep the RAW (undecoded, but unfolded) subject around: Horde's
+		// own header decoding silently mangles encoded-words whose
+		// charset its conversion backend doesn't know -- see
+		// decodeSubject() for the details and the fallback chain.
+		if (preg_match('/^Subject:[ \t]*((?:[^\r\n]|\r?\n[ \t])*)/mi', $headerText, $matches)) {
+			$this->rawSubject = preg_replace('/\r?\n[ \t]+/', ' ', trim($matches[1]));
+		}
 
 		$references = $parsedHeaders->getHeader('references');
 		if ($references !== null) {
