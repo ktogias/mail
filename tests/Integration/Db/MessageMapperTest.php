@@ -332,6 +332,57 @@ class MessageMapperTest extends TestCase {
 	}
 
 	/**
+	 * The sync-diff path restricts its result to candidate UIDs
+	 * ($uidsRestrict = true): a search bucket's background sync asks
+	 * "which of these NEW uids match the bucket's filter". Without the
+	 * flag, a query with a subject term OR-ed the candidates in, so
+	 * every new message "matched" and ordinary mail flooded the active
+	 * search's results on the next background tick (confirmed live).
+	 */
+	public function testFindIdsByQueryRestrictUidsAlwaysLimitsToCandidates(): void {
+		$mailbox = new Mailbox();
+		$mailbox->setId(3);
+		$searchQuery = new SearchQuery();
+		$searchQuery->setThreaded(false);
+		$searchQuery->setMatch('anyof');
+		$searchQuery->addSubject('euseful');
+		$sortOrder = 'DESC';
+
+		$messages = [
+			// Matches the filter AND is a candidate: the only valid result.
+			['id' => 40, 'uid' => 340, 'message_id' => '<u1@sync.com>', 'subject' => 'EUseful weekly', 'sent_at' => 1000],
+			// Candidate uid but does NOT match the filter -- the exact
+			// message class that used to leak into search results.
+			['id' => 41, 'uid' => 341, 'message_id' => '<u2@sync.com>', 'subject' => 'Ordinary new mail', 'sent_at' => 2000],
+			// Matches the filter but is NOT a candidate (already known).
+			['id' => 42, 'uid' => 342, 'message_id' => '<u3@sync.com>', 'subject' => 'EUseful older', 'sent_at' => 3000],
+		];
+		foreach ($messages as $value) {
+			$qb = $this->db->getQueryBuilder();
+			$qb->insert($this->mapper->getTableName())->values([
+				'id' => $qb->createNamedParameter($value['id'], IQueryBuilder::PARAM_INT),
+				'uid' => $qb->createNamedParameter($value['uid'], IQueryBuilder::PARAM_INT),
+				'message_id' => $qb->createNamedParameter($value['message_id']),
+				'mailbox_id' => $qb->createNamedParameter(3, IQueryBuilder::PARAM_INT),
+				'subject' => $qb->createNamedParameter($value['subject']),
+				'sent_at' => $qb->createNamedParameter($value['sent_at'], IQueryBuilder::PARAM_INT),
+			])->executeStatement();
+		}
+
+		$candidates = [340, 341];
+
+		// Sync-diff semantics: only candidates that match the filter.
+		$restricted = $this->mapper->findIdsByQuery($mailbox, $searchQuery, $sortOrder, null, $candidates, true);
+		self::assertEquals([40], $restricted);
+
+		// Search semantics (default): body-search hits combine with
+		// subject hits, so both candidates AND the non-candidate
+		// subject match are returned.
+		$combined = $this->mapper->findIdsByQuery($mailbox, $searchQuery, $sortOrder, null, $candidates, false);
+		self::assertEquals([42, 41, 40], $combined);
+	}
+
+	/**
 	 * The 'anyof' match combines recipient and subject terms with OR
 	 * instead of AND -- the free-text search path.
 	 */

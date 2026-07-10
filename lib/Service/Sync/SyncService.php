@@ -340,16 +340,20 @@ class SyncService {
 		}
 		$order = $sortOrder === 'oldest' ? IMailSearch::ORDER_OLDEST_FIRST : IMailSearch::ORDER_NEWEST_FIRST;
 		if ($query !== null) {
-			// Filter new messages to those that also match the current filter
+			// Filter new messages to those that also match the current filter.
+			// $uidsRestrict: these UIDs are candidates the result must be
+			// limited to, NOT body-search matches -- without the flag, a
+			// query with a subject term OR-ed them in and every new
+			// message "matched" the filter (see findIdsByQuery()).
 			$newUids = $this->messageMapper->findUidsForIds($mailbox, $newIds);
-			$newIds = $this->messageMapper->findIdsByQuery($mailbox, $query, $order, null, $newUids);
+			$newIds = $this->messageMapper->findIdsByQuery($mailbox, $query, $order, null, $newUids, true);
 		}
 		$new = $this->messageMapper->findByMailboxAndIds($mailbox, $account->getUserId(), $newIds);
 
 		// TODO: $changed = $this->messageMapper->findChanged($account, $mailbox, $uids);
 		if ($query !== null) {
 			$changedUids = $this->messageMapper->findUidsForIds($mailbox, $knownIds);
-			$changedIds = $this->messageMapper->findIdsByQuery($mailbox, $query, $order, null, $changedUids);
+			$changedIds = $this->messageMapper->findIdsByQuery($mailbox, $query, $order, null, $changedUids, true);
 		} else {
 			$changedIds = $knownIds;
 		}
