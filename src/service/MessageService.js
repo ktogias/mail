@@ -33,7 +33,7 @@ export function fetchEnvelope(accountId, id) {
 		})
 }
 
-export function fetchEnvelopes(accountId, mailboxId, query, cursor, limit, sort, view, cacheBuster) {
+export function fetchEnvelopes(accountId, mailboxId, query, cursor, limit, sort, view, cacheBuster, signal) {
 	const url = generateUrl('/apps/mail/api/messages')
 	const params = {
 		mailboxId,
@@ -61,10 +61,17 @@ export function fetchEnvelopes(accountId, mailboxId, query, cursor, limit, sort,
 	return axios
 		.get(url, {
 			params,
+			signal,
 		})
 		.then((resp) => resp.data)
 		.then((envelopes) => envelopes.map(amendEnvelopeWithIds(accountId)))
 		.catch((error) => {
+			if (axios.isCancel(error)) {
+				// A superseded search's abort is not a server error
+				// response -- rethrow as-is so callers can tell the two
+				// apart (same contract as fetchMessage()).
+				throw error
+			}
 			throw convertAxiosError(error)
 		})
 }

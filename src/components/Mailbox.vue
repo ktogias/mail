@@ -142,6 +142,11 @@ export default {
 			endReached: false,
 			syncedMailboxes: new Set(),
 			skipListTransition: false,
+			// Aborts the previous loadEnvelopes() when a newer one starts
+			// (e.g. the user refined a search term): the superseded
+			// requests would otherwise keep occupying server workers and
+			// their late responses would repaint over the newer results.
+			loadEnvelopesAbortController: undefined,
 		}
 	},
 
@@ -245,6 +250,7 @@ export default {
 		this.bus.off('archive', this.onArchive)
 		this.bus.off('shortcut', this.handleShortcut)
 		this.stopInterval()
+		this.loadEnvelopesAbortController?.abort()
 	},
 
 	methods: {
@@ -299,11 +305,16 @@ export default {
 			this.loadingCacheInitialization = false
 			this.error = false
 
+			this.loadEnvelopesAbortController?.abort()
+			const abortController = new AbortController()
+			this.loadEnvelopesAbortController = abortController
+
 			try {
 				const envelopes = await this.mainStore.fetchEnvelopes({
 					mailboxId: this.mailbox.databaseId,
 					query: this.searchQuery,
 					limit: this.initialPageSize,
+					signal: abortController.signal,
 				})
 
 				logger.debug(envelopes.length + ' envelopes fetched', { envelopes })
@@ -311,6 +322,12 @@ export default {
 				this.syncedMailboxes.add(this.mailbox.databaseId + (this.searchQuery ?? ''))
 				this.loadingEnvelopes = false
 			} catch (error) {
+				if (abortController.signal.aborted) {
+					// Superseded by a newer loadEnvelopes() (or the
+					// component was destroyed) -- the newer call owns the
+					// loading/error state now, don't touch it.
+					return
+				}
 				await matchError(error, {
 					[MailboxLockedError.getName()]: async (error) => {
 						logger.info(`Mailbox ${this.mailbox.databaseId} (${this.searchQuery}) is locked`, { error })

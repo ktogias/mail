@@ -354,6 +354,70 @@ describe('Vuex store actions', () => {
 		])
 	})
 
+	it('caps the unified fan-out so constituent fetches never all run at once', async () => {
+		// A slow search across many accounts used to fire every
+		// constituent request simultaneously (worst live case: a
+		// priority search saturated the whole FPM pool and every
+		// request 504ed). Mirrors ENVELOPE_FETCH_CONCURRENCY in
+		// actions.js.
+		for (let i = 0; i < 5; i++) {
+			const account = {
+				id: 100 + i,
+				personalNamespace: '',
+				mailboxes: [],
+			}
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: {
+					id: 'INBOX',
+					name: 'INBOX',
+					databaseId: 200 + i,
+					accountId: account.id,
+					specialRole: 'inbox',
+				},
+			})
+		}
+		store.addEnvelopesMutation = vi.fn()
+
+		let concurrent = 0
+		let maxConcurrent = 0
+		const pendingResolvers = []
+		MessageService.fetchEnvelopes.mockImplementation(() => new Promise((resolve) => {
+			concurrent++
+			maxConcurrent = Math.max(maxConcurrent, concurrent)
+			pendingResolvers.push(() => {
+				concurrent--
+				resolve([])
+			})
+		}))
+
+		const fetchPromise = store.fetchEnvelopes({
+			mailboxId: UNIFIED_INBOX_ID,
+			query: 'to:euseful from:euseful subject:euseful match:anyof',
+		})
+
+		await vi.waitFor(() => {
+			if (pendingResolvers.length < 3) {
+				throw new Error(`only ${pendingResolvers.length} constituent fetches have started so far`)
+			}
+		})
+
+		expect(pendingResolvers.length).toBe(3)
+		expect(maxConcurrent).toBe(3)
+
+		// Draining the first wave lets the remaining 2 start without
+		// ever exceeding the cap.
+		while (pendingResolvers.length > 0) {
+			pendingResolvers.splice(0).forEach((resolve) => resolve())
+			await new Promise((resolve) => setTimeout(resolve, 0))
+		}
+		await fetchPromise
+
+		expect(maxConcurrent).toBe(3)
+		expect(MessageService.fetchEnvelopes).toHaveBeenCalledTimes(5)
+	})
+
 	it('fetches the next individual page', async () => {
 		const msgs1 = reverse(range(30, 40))
 		const page1 = reverse(range(10, 30))
@@ -2130,6 +2194,7 @@ describe('Vuex store actions', () => {
 			undefined, // sort ordre
 			undefined, // layout
 			'abcdef123', // cache buster
+			undefined, // abort signal
 		)
 	})
 

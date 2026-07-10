@@ -476,6 +476,18 @@ export default {
 				return
 			}
 
+			// A 1-2 character free-text term is a %e%-style substring
+			// match against subject AND sender AND recipient of every
+			// message of every fanned-out mailbox -- measured live: a
+			// mid-typing "eu" search matched practically everything,
+			// and together with the final term's own fan-out saturated
+			// the whole FPM pool (every request 504ed at the 20s tier,
+			// the search rendered empty). Standard search-as-you-type
+			// practice: don't fire below a minimum length.
+			if (this.query.length < 3) {
+				return
+			}
+
 			this.match = 'anyof'
 			this.searchInMessageBody = this.searchBody ? this.query : null
 			this.searchInSubject = this.query

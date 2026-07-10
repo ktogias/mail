@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+import axios from '@nextcloud/axios'
 import { showError, showWarning, TOAST_DEFAULT_TIMEOUT } from '@nextcloud/dialogs'
 import { translate as t } from '@nextcloud/l10n'
 import DOMPurify from 'dompurify'
@@ -344,6 +345,12 @@ const INTERACTION_PRIORITY_WINDOW_MS = 4000
 // A small pool keeps the poller making steady progress without
 // contending that heavily with foreground work.
 const WATCHED_SYNC_CONCURRENCY = 3
+
+// Per-list cap on the unified/priority-inbox constituent fetches in
+// fetchEnvelopes(). The priority inbox fetches up to 3 sections
+// concurrently, so the total in-flight requests of one search is
+// 3 x this -- keep the product comfortably below the FPM pool size.
+const ENVELOPE_FETCH_CONCURRENCY = 3
 
 /**
  * Run `fn` over `items` with at most `limit` calls in flight at once.
@@ -969,6 +976,7 @@ export default function mainStoreActions() {
 			query,
 			addToUnifiedMailboxes = true,
 			includeCacheBuster = false,
+			signal,
 		}) {
 			return handleHttpAuthErrors(async () => {
 				const mailbox = this.getMailbox(mailboxId)
@@ -980,20 +988,34 @@ export default function mainStoreActions() {
 					// slow/unreachable account used to make the whole unified
 					// mailbox render nothing at all instead of everything except
 					// that one account. See #9072.
-					const fetchIndividualLists = pipe(
-						map((mb) => this.fetchEnvelopes({
+					//
+					// Bounded concurrency, same reasoning as
+					// syncWatchedMailboxes(): unbounded fan-out across all
+					// constituent mailboxes can occupy every FPM worker at
+					// once. Worst measured case was a priority-inbox search
+					// (5 mailboxes x 3 sections, twice while typing = 30
+					// concurrent slow queries) where every request 504ed.
+					const fetchIndividualLists = (mbs) => mapWithConcurrencyLimit(
+						mbs,
+						ENVELOPE_FETCH_CONCURRENCY,
+						(mb) => this.fetchEnvelopes({
 							mailboxId: mb.databaseId,
 							query,
 							addToUnifiedMailboxes: false,
 							sort: this.getPreference('sort-order'),
 							view: this.getPreference('layout-message-view'),
+							signal,
 						}).catch((error) => {
+							if (axios.isCancel(error)) {
+								// The whole unified fetch was superseded --
+								// don't degrade the abort into an "empty
+								// account" result.
+								throw error
+							}
 							logger.error(`Failed to fetch envelopes for unified constituent mailbox ${mb.databaseId}: ${error}`, { error })
 							return []
-						})),
-						Promise.all.bind(Promise),
-						andThen(map(sliceToPage)),
-					)
+						}),
+					).then(map(sliceToPage))
 					const fetchUnifiedEnvelopes = pipe(
 						findIndividualMailboxes(this.getMailboxes, mailbox.specialRole),
 						fetchIndividualLists,
@@ -1017,18 +1039,28 @@ export default function mainStoreActions() {
 					// too-narrow version of it).
 					const queriesToFanOut = query === undefined ? getPrioritySearchQueries() : [query]
 					return Promise.all(queriesToFanOut.map((query) => {
-						const fetchIndividualLists = pipe(
-							map((mb) => this.fetchEnvelopes({
+						// Bounded like the isUnified branch above; the
+						// concurrent sections multiply the per-section limit,
+						// so this is what keeps a priority search's total
+						// in-flight requests below the FPM pool size.
+						const fetchIndividualLists = (mbs) => mapWithConcurrencyLimit(
+							mbs,
+							ENVELOPE_FETCH_CONCURRENCY,
+							(mb) => this.fetchEnvelopes({
 								mailboxId: mb.databaseId,
 								query,
 								addToUnifiedMailboxes: false,
+								signal,
 							}).catch((error) => {
+								if (axios.isCancel(error)) {
+									// Superseded search -- propagate, see
+									// the isUnified branch above.
+									throw error
+								}
 								logger.error(`Failed to fetch envelopes for priority-inbox constituent mailbox ${mb.databaseId}: ${error}`, { error })
 								return []
-							})),
-							Promise.all.bind(Promise),
-							andThen(map(sliceToPage)),
-						)
+							}),
+						).then(map(sliceToPage))
 						const fetchPriorityEnvelopes = pipe(
 							findIndividualMailboxes(this.getMailboxes, mailbox.specialRole),
 							fetchIndividualLists,
@@ -1052,7 +1084,7 @@ export default function mainStoreActions() {
 						replace: true,
 						replaceMailboxId: mailboxId,
 					}))),
-				)(mailbox.accountId, mailboxId, query, undefined, PAGE_SIZE, this.getPreference('sort-order'), this.getPreference('layout-message-view'), includeCacheBuster ? mailbox.cacheBuster : undefined)
+				)(mailbox.accountId, mailboxId, query, undefined, PAGE_SIZE, this.getPreference('sort-order'), this.getPreference('layout-message-view'), includeCacheBuster ? mailbox.cacheBuster : undefined, signal)
 			})
 		},
 		async fetchNextEnvelopePage({
