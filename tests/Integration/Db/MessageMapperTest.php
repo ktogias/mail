@@ -274,6 +274,83 @@ class MessageMapperTest extends TestCase {
 	}
 
 	/**
+	 * The priority inbox's "Other" section (is:pi-other = Flag::not(IMPORTANT))
+	 * is fetched in threaded view (view=threaded), then its known ids are
+	 * re-checked on every background sync via findIdsByQuery(...,
+	 * $uidsRestrict=true) to see which are "still known" (see
+	 * SyncService::getDatabaseSyncChanges) -- anything NOT returned is
+	 * reported vanished and removed from the client store entirely
+	 * (MailboxThread reported the whole section disappearing after a
+	 * background tick, working again only after a hard refresh). This
+	 * proves the SAME threaded representative id that was originally
+	 * returned is ALSO returned by the restricted re-check, with no
+	 * thread changes in between -- i.e. the vanish-check must not be
+	 * spuriously stricter than the original match for the ordinary,
+	 * nothing-changed case.
+	 */
+	public function testFindIdsByQueryThreadedNegatedFlagSurvivesUidsRestrictRecheck(): void {
+		$mailbox = new Mailbox();
+		$mailbox->setId(2);
+		$searchQuery = new SearchQuery();
+		$searchQuery->addFlag(Flag::not(Flag::IMPORTANT));
+		$sortOrder = 'DESC';
+		$qb = $this->db->getQueryBuilder();
+
+		$values = [
+			// Thread A: older message not important, newest reply IS
+			// important -- the thread still matches is:pi-other because
+			// some message in it isn't important, same as the unread case.
+			[
+				'id' => 20,
+				'uid' => $qb->createNamedParameter(320, IQueryBuilder::PARAM_INT),
+				'message_id' => $qb->createNamedParameter('<a1@other.com>'),
+				'mailbox_id' => $qb->createNamedParameter(2, IQueryBuilder::PARAM_INT),
+				'subject' => $qb->createNamedParameter('Thread A'),
+				'sent_at' => $qb->createNamedParameter(1000, IQueryBuilder::PARAM_INT),
+				'thread_root_id' => $qb->createNamedParameter('thread-other-a'),
+				'flag_important' => $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL),
+			],
+			[
+				'id' => 21,
+				'uid' => $qb->createNamedParameter(321, IQueryBuilder::PARAM_INT),
+				'message_id' => $qb->createNamedParameter('<a2@other.com>'),
+				'mailbox_id' => $qb->createNamedParameter(2, IQueryBuilder::PARAM_INT),
+				'subject' => $qb->createNamedParameter('Re: Thread A'),
+				'sent_at' => $qb->createNamedParameter(2000, IQueryBuilder::PARAM_INT),
+				'thread_root_id' => $qb->createNamedParameter('thread-other-a'),
+				'flag_important' => $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL),
+			],
+			// Standalone, not-important message.
+			[
+				'id' => 22,
+				'uid' => $qb->createNamedParameter(322, IQueryBuilder::PARAM_INT),
+				'message_id' => $qb->createNamedParameter('<b1@other.com>'),
+				'mailbox_id' => $qb->createNamedParameter(2, IQueryBuilder::PARAM_INT),
+				'subject' => $qb->createNamedParameter('Standalone'),
+				'sent_at' => $qb->createNamedParameter(3000, IQueryBuilder::PARAM_INT),
+				'flag_important' => $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL),
+			],
+		];
+
+		foreach ($values as $value) {
+			$insert = $qb->insert($this->mapper->getTableName())->values($value);
+			$insert->executeStatement();
+		}
+
+		// The original (unrestricted) fetch: representative of thread A
+		// (21) plus the standalone message (22).
+		$original = $this->mapper->findIdsByQuery($mailbox, $searchQuery, $sortOrder, null, null);
+		self::assertEquals([22, 21], $original);
+
+		// The sync-diff re-check: restrict to exactly the uids the client
+		// already knows about (321 for id 21, 322 for id 22), nothing has
+		// changed server-side. Every one of them must still come back --
+		// if not, that's precisely the "known ids silently vanish" bug.
+		$recheck = $this->mapper->findIdsByQuery($mailbox, $searchQuery, $sortOrder, null, [321, 322], true);
+		self::assertEquals([22, 21], $recheck);
+	}
+
+	/**
 	 * Recipient matches run as EXISTS probes against mail_recipients
 	 * instead of INNER JOINs (see recipientTermsMatchExists()): the JOINs
 	 * multiplied the row set by the recipients per message and needed a

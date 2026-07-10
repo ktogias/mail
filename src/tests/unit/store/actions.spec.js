@@ -468,6 +468,44 @@ describe('Vuex store actions', () => {
 
 			expect(store.isFetchingEnvelopes(11, 'subject:x')).toBe(false)
 		})
+
+		it('clears the marker in the very same tick as the envelope-list write, not a tick later', async () => {
+			// Clearing the marker via the outer .finally() (a microtask
+			// hop after the tap() that writes the list) let a section
+			// briefly see "list is empty AND not fetching" one tick before
+			// a sibling section's own render caught up, or vice versa --
+			// either way, a section flashed its own empty state for one
+			// frame before the v-show gating it (which OR's the two
+			// signals) hid it again (confirmed live on a favorites
+			// section during a no-match search). Stepping one microtask
+			// at a time: the list write and the marker clear must land on
+			// the exact same tick.
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+
+			let resolveFetch
+			MessageService.fetchEnvelopes.mockReturnValue(new Promise((resolve) => {
+				resolveFetch = resolve
+			}))
+
+			const promise = store.fetchEnvelopes({ mailboxId: 11, query: 'subject:x' })
+			resolveFetch([])
+
+			let listWrittenTick = -1
+			let markerClearedTick = -1
+			for (let tick = 0; tick < 10 && (listWrittenTick === -1 || markerClearedTick === -1); tick++) {
+				await Promise.resolve()
+				if (listWrittenTick === -1 && store.mailboxes[11].envelopeLists['subject:x'] !== undefined) {
+					listWrittenTick = tick
+				}
+				if (markerClearedTick === -1 && !store.isFetchingEnvelopes(11, 'subject:x')) {
+					markerClearedTick = tick
+				}
+			}
+
+			expect(markerClearedTick).toBe(listWrittenTick)
+
+			await promise
+		})
 	})
 
 	it('paging past an empty fanned-out list resolves to [] instead of throwing', async () => {

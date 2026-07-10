@@ -188,7 +188,8 @@ class SyncService {
 					$knownIds ?? [],
 					$lastMessageTimestamp,
 					$sortOrder,
-					$query
+					$query,
+					$filter
 				);
 			}
 		}
@@ -217,7 +218,8 @@ class SyncService {
 				$knownIds ?? [],
 				$lastMessageTimestamp,
 				$sortOrder,
-				$query
+				$query,
+				$filter
 			);
 		}
 
@@ -283,7 +285,8 @@ class SyncService {
 			$knownIds ?? [],
 			$lastMessageTimestamp,
 			$sortOrder,
-			$query
+			$query,
+			$filter
 		);
 	}
 
@@ -332,7 +335,8 @@ class SyncService {
 		array $knownIds,
 		?int $lastMessageTimestamp,
 		string $sortOrder,
-		?SearchQuery $query): Response {
+		?SearchQuery $query,
+		?string $filterForLogging = null): Response {
 		if ($knownIds === []) {
 			$newIds = $this->messageMapper->findAllIds($mailbox, $sortOrder, self::COLD_START_SYNC_LIMIT);
 		} else {
@@ -361,6 +365,30 @@ class SyncService {
 
 		$stillKnownIds = array_map(static fn (Message $msg) => $msg->getId(), $changed);
 		$vanished = array_values(array_diff($knownIds, $stillKnownIds));
+
+		// A filtered bucket (is:pi-other, is:pi-important, ...) reporting
+		// MOST or ALL of its previously-known ids vanished in one sync is
+		// not ordinary churn -- messages don't all get deleted or all
+		// flip the filter's flag at once. The client treats "vanished"
+		// as "remove from every list, including the unified/priority
+		// view" (see removeEnvelopeMutation), so a false-positive here
+		// empties a whole priority-inbox section client-side with no
+		// visible error. Observed live (2026-07-11): the "Other" section
+		// disappeared entirely between page loads, root cause
+		// unconfirmed -- this log line is the trap for the next
+		// occurrence, since the live incident produced no error to
+		// investigate from.
+		if ($query !== null && count($knownIds) >= 5 && count($vanished) / count($knownIds) >= 0.8) {
+			$this->logger->warning(
+				'Mailbox {mailboxId} query {query}: {vanishedCount}/{knownCount} previously-known ids vanished in one sync -- investigate before assuming this is correct',
+				[
+					'mailboxId' => $mailbox->getId(),
+					'query' => $filterForLogging ?? '(query object, no raw filter string)',
+					'vanishedCount' => count($vanished),
+					'knownCount' => count($knownIds),
+				]
+			);
+		}
 
 		return new Response(
 			// liveEnhance=false: a sync response must not block on live IMAP

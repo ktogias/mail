@@ -16,7 +16,7 @@
 			v-else-if="loadingCacheInitialization"
 			:hint="t('mail', 'Loading messages …')"
 			:slow-hint="t('mail', 'Indexing your messages. This can take a bit longer for larger folders.')" />
-		<EmptyMailboxSection v-else-if="isPriorityInbox && !hasMessages" key="empty" />
+		<EmptyMailboxSection v-else-if="(isPriorityInbox || searchQuery) && !hasMessages" key="empty" />
 		<EmptyMailbox v-else-if="!hasMessages" key="empty" />
 		<template v-else-if="hasGroupedEnvelopes && !isPriorityInbox">
 			<div v-for="[label, group] in groupEnvelopes" :key="label">

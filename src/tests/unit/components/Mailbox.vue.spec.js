@@ -40,17 +40,41 @@ describe('Mailbox', () => {
 		mailbox = store.mailboxes[38]
 	})
 
-	function mountMailbox() {
+	function mountMailbox(propsOverride = {}) {
 		return shallowMount(Mailbox, {
 			propsData: {
 				account,
 				mailbox,
 				bus: { on: vi.fn(), off: vi.fn() },
+				...propsOverride,
 			},
 			store,
 			localVue,
 		})
 	}
+
+	describe('empty state wording', () => {
+		// isPriorityInbox already forced the "No messages" copy
+		// (EmptyMailboxSection) unconditionally. A plain mailbox with an
+		// active search term used to fall through to EmptyMailbox's "No
+		// messages in this folder" instead -- misleading, since the
+		// folder itself can easily have plenty of messages that simply
+		// don't match the search (reported live: searching a mailbox for
+		// a term with no matches showed folder-is-empty wording).
+		it('shows "No messages" (not "folder is empty") when a search query is active and nothing matches', () => {
+			const view = mountMailbox({ searchQuery: 'subject:nothing-matches' })
+
+			expect(view.findComponent({ name: 'EmptyMailboxSection' }).exists()).toBe(true)
+			expect(view.findComponent({ name: 'EmptyMailbox' }).exists()).toBe(false)
+		})
+
+		it('keeps "folder is empty" wording for the plain, unfiltered view', () => {
+			const view = mountMailbox()
+
+			expect(view.findComponent({ name: 'EmptyMailbox' }).exists()).toBe(true)
+			expect(view.findComponent({ name: 'EmptyMailboxSection' }).exists()).toBe(false)
+		})
+	})
 
 	it('resets loadingCacheInitialization when the forced init sync fails, instead of hanging forever', async () => {
 		// Regression: a missing `return`/`.catch()` meant that if the forced

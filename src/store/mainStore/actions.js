@@ -1051,10 +1051,17 @@ export default function mainStoreActions() {
 						fetchIndividualLists,
 						andThen(combineEnvelopeLists(this.getPreference('sort-order'))),
 						andThen(sliceToPage),
-						andThen(tap((envelopes) => this.addEnvelopesMutation({
-							envelopes,
-							query,
-						}))),
+						andThen(tap((envelopes) => {
+							this.addEnvelopesMutation({
+								envelopes,
+								query,
+							})
+							// Same tick as the list write above, not the
+							// outer .finally() below (an extra microtask
+							// hop later) -- see the note by that .finally()
+							// for why the gap matters.
+							this.envelopeFetchFinishedMutation({ mailboxId, query })
+						})),
 					)
 
 					return fetchUnifiedEnvelopes(this.getAccounts)
@@ -1107,15 +1114,37 @@ export default function mainStoreActions() {
 
 				return pipe(
 					fetchEnvelopes,
-					andThen(tap((envelopes) => this.addEnvelopesMutation({
-						query,
-						envelopes,
-						addToUnifiedMailboxes,
-						replace: true,
-						replaceMailboxId: mailboxId,
-					}))),
+					andThen(tap((envelopes) => {
+						this.addEnvelopesMutation({
+							query,
+							envelopes,
+							addToUnifiedMailboxes,
+							replace: true,
+							replaceMailboxId: mailboxId,
+						})
+						// Same tick as the list write above -- see the note
+						// on the outer .finally() below for why.
+						this.envelopeFetchFinishedMutation({ mailboxId, query })
+					})),
 				)(mailbox.accountId, mailboxId, query, undefined, PAGE_SIZE, this.getPreference('sort-order'), this.getPreference('layout-message-view'), includeCacheBuster ? mailbox.cacheBuster : undefined, signal)
 			}).finally(() => {
+				// Safety net for paths that reject before reaching their
+				// own tap() above (including the isUnified/isPriorityInbox
+				// branches, which don't call it eagerly at all): idempotent
+				// against an already-cleared marker, since
+				// envelopeFetchFinishedMutation() treats a missing key as
+				// count 0 and no-ops. NOT relied on for the success path
+				// below -- that extra microtask hop (this .finally()'s
+				// callback runs one tick after the tap() above already
+				// ran) used to let hasFavoriteEnvelopes/hasOtherEnvelopes
+				// see "list is empty, 0 results" for one render while
+				// isFetchingEnvelopes() was still stuck true from the
+				// PREVIOUS request's marker, or vice versa the marker
+				// clear could land before a sibling section's own list
+				// write -- either way, a section could flash its own
+				// "No messages" empty state for one frame before the
+				// v-show gating it caught up and hid it (confirmed live:
+				// a favorites section during a no-match search).
 				this.envelopeFetchFinishedMutation({ mailboxId, query })
 			})
 		},
