@@ -470,6 +470,135 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	it('paging past an empty fanned-out list resolves to [] instead of throwing', async () => {
+		// The infinite-scroll observer fires even over an empty list (a
+		// priority-inbox search with no matches); the cursor lookup used
+		// to throw 'Unified list has no tail', turning every such scroll
+		// into a console error instead of a clean end-reached.
+		normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+		const account = {
+			id: 13,
+			personalNamespace: '',
+			mailboxes: [],
+		}
+		store.addAccountMutation(account)
+		store.addMailboxMutation({
+			account,
+			mailbox: {
+				id: 'INBOX',
+				name: 'INBOX',
+				databaseId: 11,
+				accountId: 13,
+				specialRole: 'inbox',
+			},
+		})
+
+		const envelopes = await store.fetchNextEnvelopePage({
+			mailboxId: UNIFIED_INBOX_ID,
+			query: 'subject:nothing-matches-this',
+		})
+
+		expect(envelopes).toEqual([])
+		expect(MessageService.fetchEnvelopes).not.toHaveBeenCalled()
+	})
+
+	describe('addEnvelopesMutation classifies new inbox mail into loaded priority-inbox sections locally', () => {
+		// The priority sections (is:pi-important / is:pi-other) are
+		// server-materialized lists the same-listId unified cross-post
+		// never reaches -- new mail hit a mailbox's badge long before
+		// the open priority inbox. The envelope carries flags.important,
+		// which is exactly what the server-side filter checks, so the
+		// mutation classifies locally; the poller's server refresh
+		// remains as reconciliation.
+		beforeEach(() => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			const account = {
+				id: 13,
+				personalNamespace: '',
+				mailboxes: [],
+			}
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: {
+					id: 'INBOX',
+					name: 'INBOX',
+					databaseId: 11,
+					accountId: 13,
+					specialRole: 'inbox',
+				},
+			})
+		})
+
+		const newEnvelope = (databaseId, important, mailboxId = 11) => ({
+			databaseId,
+			mailboxId,
+			uid: databaseId,
+			dateInt: databaseId * 1000,
+			flags: { seen: false, important },
+			tags: {},
+		})
+
+		it('an important message lands in the loaded is:pi-important list at once', () => {
+			store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-important'] = []
+			store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-other'] = []
+
+			store.addEnvelopesMutation({ envelopes: [newEnvelope(55, true)] })
+
+			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-important']).toEqual([55])
+			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-other']).toEqual([])
+		})
+
+		it('an unimportant message lands in the loaded is:pi-other list at once', () => {
+			store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-important'] = []
+			store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-other'] = []
+
+			store.addEnvelopesMutation({ envelopes: [newEnvelope(56, false)] })
+
+			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-important']).toEqual([])
+			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-other']).toEqual([56])
+		})
+
+		it('does not create section lists nobody has loaded', () => {
+			store.addEnvelopesMutation({ envelopes: [newEnvelope(57, true)] })
+
+			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-important']).toBeUndefined()
+			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-other']).toBeUndefined()
+		})
+
+		it('ignores mail from non-inbox mailboxes -- only inboxes feed the priority inbox', () => {
+			store.addMailboxMutation({
+				account: { id: 13, personalNamespace: '', mailboxes: [] },
+				mailbox: {
+					id: 'Sent',
+					name: 'Sent',
+					databaseId: 12,
+					accountId: 13,
+					specialRole: 'sent',
+				},
+			})
+			store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-important'] = []
+			store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-other'] = []
+
+			store.addEnvelopesMutation({ envelopes: [newEnvelope(58, true, 12)] })
+
+			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-important']).toEqual([])
+			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-other']).toEqual([])
+		})
+
+		it('keeps the section list sorted and deduplicated', () => {
+			store.preferences['sort-order'] = 'newest'
+			store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-important'] = []
+
+			store.addEnvelopesMutation({ envelopes: [newEnvelope(60, true)] })
+			store.addEnvelopesMutation({ envelopes: [newEnvelope(62, true)] })
+			// The same message reported again by another bucket's sync.
+			store.addEnvelopesMutation({ envelopes: [newEnvelope(60, true)] })
+
+			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-important']).toEqual([62, 60])
+		})
+	})
+
 	it('fetches the next individual page', async () => {
 		const msgs1 = reverse(range(30, 40))
 		const page1 = reverse(range(10, 30))
@@ -1238,6 +1367,198 @@ describe('Vuex store actions', () => {
 			expect(NotificationService.showNewMessagesNotification).toHaveBeenCalledWith([newMessage])
 			// No priority-inbox refresh: no sync against the unified inbox.
 			expect(store.syncEnvelopes).not.toHaveBeenCalledWith(expect.objectContaining({ mailboxId: 'unified' }))
+		})
+
+		it('starts the priority refresh as soon as the first mailbox reports new mail, not after the slowest', async () => {
+			// The old code ran the refresh only after EVERY watched
+			// mailbox's sync settled -- one slow mailbox (7-81s Gmail
+			// syncs measured live) held the priority inbox stale long
+			// after the receiving mailbox's badge had updated.
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+
+			for (const [accountId, mailboxId] of [[913, 911], [914, 921]]) {
+				const account = { id: accountId }
+				store.addAccountMutation(account)
+				store.addMailboxMutation({
+					account,
+					mailbox: {
+						name: 'INBOX',
+						databaseId: mailboxId,
+						specialRole: 'inbox',
+					},
+				})
+				store.mailboxes[mailboxId].envelopeLists[''] = []
+			}
+
+			let resolveSlow
+			store.fetchEnvelopes = vi.fn(async () => {})
+			store.syncEnvelopes = vi.fn(({ mailboxId }) => {
+				if (mailboxId === 921) {
+					// The slow mailbox: unresolved until the test says so.
+					return new Promise((resolve) => {
+						resolveSlow = () => resolve([])
+					})
+				}
+				if (mailboxId === 911) {
+					return Promise.resolve([{ databaseId: 777, flags: { seen: false } }])
+				}
+				return Promise.resolve([])
+			})
+
+			const tick = store.syncWatchedMailboxes()
+
+			// The refresh fires while mailbox 21's sync is still pending.
+			await vi.waitFor(() => {
+				expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-important' })
+				expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-other' })
+			})
+			expect(resolveSlow).toBeDefined()
+
+			resolveSlow()
+			await tick
+		})
+
+		it('keeps refreshing an OPEN priority inbox when interaction priority activates mid-tick', async () => {
+			// Interaction priority pauses background work, but the open
+			// priority inbox is what the user is looking at -- and the
+			// only view that cannot update itself. The old skip starved
+			// exactly the person watching it.
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			store.setCurrentViewMailboxIdMutation('priority')
+
+			const account = { id: 13 }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: {
+					name: 'INBOX',
+					databaseId: 11,
+					specialRole: 'inbox',
+				},
+			})
+			store.mailboxes[11].envelopeLists[''] = []
+
+			store.fetchEnvelopes = vi.fn(async () => {})
+			store.syncEnvelopes = vi.fn(async ({ mailboxId }) => {
+				if (mailboxId === 11) {
+					// A user interaction lands mid-tick, after the guard at
+					// the top of syncWatchedMailboxes() already passed.
+					store.setInteractionPriorityMutation()
+					return [{ databaseId: 778, flags: { seen: false } }]
+				}
+				return []
+			})
+
+			await store.syncWatchedMailboxes()
+
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-important' })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-other' })
+		})
+
+		it('still defers the refresh on mid-tick interaction when the priority inbox is NOT open', async () => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+
+			const account = { id: 13 }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: {
+					name: 'INBOX',
+					databaseId: 11,
+					specialRole: 'inbox',
+				},
+			})
+			store.mailboxes[11].envelopeLists[''] = []
+
+			store.fetchEnvelopes = vi.fn(async () => {})
+			store.syncEnvelopes = vi.fn(async ({ mailboxId }) => {
+				if (mailboxId === 11) {
+					store.setInteractionPriorityMutation()
+					return [{ databaseId: 779, flags: { seen: false } }]
+				}
+				return []
+			})
+
+			await store.syncWatchedMailboxes()
+
+			expect(store.syncEnvelopes).not.toHaveBeenCalledWith(expect.objectContaining({ mailboxId: 'unified' }))
+		})
+
+		it('syncs the open mailbox first, ahead of earlier accounts in the default order', async () => {
+			// Active-query-first refetch: with 3 pool workers and a slow
+			// mailbox early in account order, the mailbox the user is
+			// looking at could otherwise wait most of the tick.
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			store.setCurrentViewMailboxIdMutation('941')
+
+			for (const [accountId, mailboxId] of [[913, 911], [914, 921], [915, 931], [916, 941]]) {
+				const account = { id: accountId }
+				store.addAccountMutation(account)
+				store.addMailboxMutation({
+					account,
+					mailbox: {
+						name: 'INBOX',
+						databaseId: mailboxId,
+						specialRole: 'inbox',
+					},
+				})
+				store.mailboxes[mailboxId].envelopeLists[''] = []
+			}
+
+			const callOrder = []
+			store.fetchEnvelopes = vi.fn(async () => {})
+			store.syncEnvelopes = vi.fn(async ({ mailboxId }) => {
+				callOrder.push(mailboxId)
+				return []
+			})
+
+			await store.syncWatchedMailboxes()
+
+			expect(callOrder[0]).toBe(941)
+			// The rest keep the original account order.
+			expect(callOrder).toEqual([941, 911, 921, 931])
+		})
+
+		it('with the priority inbox open, every account inbox goes ahead of other watched mailboxes', async () => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			store.setCurrentViewMailboxIdMutation('priority')
+
+			// Account 13: a background-synced non-inbox folder first in
+			// the default order; account 14: an inbox.
+			const account913 = { id: 913 }
+			store.addAccountMutation(account913)
+			store.addMailboxMutation({
+				account: account913,
+				mailbox: {
+					name: 'Archive',
+					databaseId: 915,
+					syncInBackground: true,
+				},
+			})
+			const account914 = { id: 914 }
+			store.addAccountMutation(account914)
+			store.addMailboxMutation({
+				account: account914,
+				mailbox: {
+					name: 'INBOX',
+					databaseId: 921,
+					specialRole: 'inbox',
+				},
+			})
+			store.mailboxes[915].envelopeLists[''] = []
+			store.mailboxes[921].envelopeLists[''] = []
+
+			const callOrder = []
+			store.fetchEnvelopes = vi.fn(async () => {})
+			store.syncEnvelopes = vi.fn(async ({ mailboxId }) => {
+				callOrder.push(mailboxId)
+				return []
+			})
+
+			await store.syncWatchedMailboxes()
+
+			expect(callOrder[0]).toBe(921)
+			expect(callOrder).toContain(915)
 		})
 
 		it('syncs a mailbox\'s query buckets sequentially, not concurrently', async () => {

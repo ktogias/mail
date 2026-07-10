@@ -187,6 +187,14 @@
 							:search-query="appendToSearch(priorityOtherQuery)"
 							:is-priority-inbox="true"
 							:bus="bus" />
+						<!-- Every section hides itself when its list is
+							empty and nothing is fetching (see the
+							has*Envelopes computeds), so without a page-level
+							empty state a search with no matches rendered a
+							blank white list. -->
+						<EmptyMailboxSection
+							v-if="!hasFavoriteEnvelopes && !hasFollowUpEnvelopes && !hasImportantEnvelopes && !hasOtherEnvelopes"
+							key="empty" />
 					</template>
 				</AppContentList>
 			</div>
@@ -203,6 +211,7 @@ import addressParser from 'address-rfc2822'
 import mitt from 'mitt'
 import { mapStores } from 'pinia'
 import IconInfo from 'vue-material-design-icons/InformationOutline.vue'
+import EmptyMailboxSection from './EmptyMailboxSection.vue'
 import Mailbox from './Mailbox.vue'
 import NoMessageSelected from './NoMessageSelected.vue'
 import SearchMessages from './SearchMessages.vue'
@@ -236,6 +245,7 @@ export default {
 		AppContent,
 		AppContentList,
 		ButtonVue,
+		EmptyMailboxSection,
 		IconInfo,
 		Mailbox,
 		NoMessageSelected,
@@ -453,6 +463,11 @@ export default {
 
 	watch: {
 		async $route(to) {
+			// The store can't read the router directly (importing it
+			// installs vue-router globally, which breaks $route mocking
+			// in every component test) -- mirror the open mailbox into
+			// the store for its view-aware decisions instead.
+			this.mainStore.setCurrentViewMailboxIdMutation(to.params?.mailboxId)
 			this.handleMailto()
 			if (to.name === 'mailbox' && to.params.mailboxId === PRIORITY_INBOX_ID) {
 				await this.onPriorityMailboxOpened()
@@ -485,6 +500,7 @@ export default {
 	},
 
 	created() {
+		this.mainStore.setCurrentViewMailboxIdMutation(this.$route?.params?.mailboxId)
 		this.handleMailto()
 	},
 

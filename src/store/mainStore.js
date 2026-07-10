@@ -29,6 +29,14 @@ export default defineStore('main', {
 			// returned yet (e.g. the priority-inbox sections during a
 			// search, which are otherwise hidden entirely).
 			envelopeFetchCounts: {},
+			// The mailbox id of the currently open view ('priority',
+			// 'unified' or a real database id as a route-param string),
+			// mirrored from the router by MailboxThread -- the store
+			// cannot import the router itself (that installs vue-router
+			// globally and breaks $route mocking in component tests).
+			// Used for view-aware decisions: sync the open mailbox
+			// first, keep refreshing an open priority inbox.
+			currentViewMailboxId: undefined,
 			preferences: {},
 			accountsUnmapped: {
 				[UNIFIED_ACCOUNT_ID]: {

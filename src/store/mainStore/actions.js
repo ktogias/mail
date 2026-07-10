@@ -129,6 +129,7 @@ import {
 	FOLLOW_UP_MAILBOX_ID,
 	FOLLOW_UP_TAG_LABEL,
 	PAGE_SIZE,
+	PRIORITY_INBOX_ID,
 	UNIFIED_ACCOUNT_ID,
 	UNIFIED_INBOX_ID,
 } from '../constants.js'
@@ -299,6 +300,8 @@ function withRecentFlagOverrides(envelopeId, incomingFlags) {
  * chain on top of an already-running one -- see the tick-piling comment
  * there for why that matters once ticks fire every ~10s instead of once
  * every 30-60s.
+ *
+ * @param mailboxId
  */
 export function isMailboxSyncRetryPending(mailboxId) {
 	return pendingLockWaits.has(mailboxId)
@@ -359,6 +362,10 @@ const ENVELOPE_FETCH_CONCURRENCY = 3
  * one item throwing does not reject the others. Callers are expected to
  * handle their own errors inside `fn`, matching how the previous
  * unbounded Promise.all fan-out already behaved here.
+ *
+ * @param items
+ * @param limit
+ * @param fn
  */
 async function mapWithConcurrencyLimit(items, limit, fn) {
 	const results = new Array(items.length)
@@ -437,6 +444,9 @@ const LOCK_RETRY_FIRST_PROBE_MS = 10 * 1000
  * (different browser tabs, devices, or users) -- unlike a fixed retry
  * interval, which just means every such client keeps hammering the lock at
  * the same fixed cadence for as long as it stays held.
+ *
+ * @param attempt
+ * @param retryAfterMs
  */
 export function computeLockRetryDelayMs(attempt, retryAfterMs) {
 	if (retryAfterMs !== undefined) {
@@ -971,6 +981,9 @@ export default function mainStoreActions() {
 				return this.getEnvelope(id)
 			})
 		},
+		setCurrentViewMailboxIdMutation(mailboxId) {
+			this.currentViewMailboxId = mailboxId
+		},
 		envelopeFetchStartedMutation({ mailboxId, query }) {
 			const key = mailboxId + '::' + normalizedEnvelopeListId(query)
 			Vue.set(this.envelopeFetchCounts, key, (this.envelopeFetchCounts[key] ?? 0) + 1)
@@ -1147,7 +1160,15 @@ export default function mainStoreActions() {
 						const cursor = individualCursor(query, mailbox)
 
 						if (cursor === undefined) {
-							throw new Error('Unified list has no tail')
+							// An empty list has no tail to page past --
+							// nothing more to load, by definition. The
+							// infinite-scroll observer fires even over an
+							// empty list (e.g. a priority-inbox search with
+							// no matches), and throwing here turned every
+							// such scroll into a console error instead of a
+							// clean "end reached".
+							logger.debug('no tail to page past, list is empty', { mailboxId, query })
+							return []
 						}
 						const newestFirst = this.getPreference('sort-order') === 'newest'
 						const nextLocalEnvelopes = pipe(
@@ -1500,6 +1521,84 @@ export default function mainStoreActions() {
 					.filter((a) => !a.isUnified && !isDisabled(a))
 					.flatMap((account) => [...this.getRecursiveMailboxIterator(account.id)])
 
+				// View-aware ordering (the active-query-first refetch
+				// practice, cf. React Query refetching active queries
+				// before inactive ones): the concurrency pool below pulls
+				// mailboxes off this list in order, so with 3 workers and
+				// a slow mailbox early in account order, the mailbox the
+				// user is actually looking at could wait most of the tick
+				// for a worker. Put the open mailbox first; when the
+				// priority/unified inbox is open, its feeders (every
+				// account's inbox) come first instead. Stable sort keeps
+				// the original account order within each rank.
+				const openMailboxId = this.currentViewMailboxId
+				const openVirtualInbox = openMailboxId === PRIORITY_INBOX_ID || openMailboxId === UNIFIED_INBOX_ID
+				const viewRank = (mailbox) => {
+					if (String(mailbox.databaseId) === String(openMailboxId)) {
+						return 0
+					}
+					if (openVirtualInbox && mailbox.specialRole === 'inbox') {
+						return 1
+					}
+					return 2
+				}
+				mailboxTargets.sort((a, b) => viewRank(a) - viewRank(b))
+
+				let priorityRefreshPromise
+				const maybeStartPriorityInboxRefresh = () => {
+					if (priorityRefreshPromise !== undefined) {
+						return
+					}
+
+					// Interaction priority pauses background work -- but an
+					// OPEN priority inbox is foreground: it's exactly what
+					// the user is looking at, and it's the one view that
+					// cannot update itself (its sections are
+					// server-materialized lists). Skipping its refresh here
+					// starved precisely the person watching it. Only
+					// mid-tick activations reach this check; a tick that
+					// starts during interaction priority never gets past
+					// the guard at the top of syncWatchedMailboxes().
+					const priorityInboxIsOpen = this.currentViewMailboxId === PRIORITY_INBOX_ID
+					if (this.isInteractionPriorityActive() && !priorityInboxIsOpen) {
+						logger.debug('interaction priority active, deferring the priority-inbox refresh')
+						return
+					}
+
+					// Started the moment the FIRST watched mailbox reports
+					// new messages instead of after every mailbox's sync
+					// settles: the old all-mailboxes barrier let one slow
+					// mailbox (7-81s Gmail syncs measured live) hold the
+					// priority inbox stale long after the receiving
+					// mailbox's badge had updated -- the same head-of-line
+					// problem already fixed for the desktop notification
+					// above. Errors are logged rather than rethrown: the
+					// refresh is reconciliation on top of the local
+					// classification insert in addEnvelopesMutation(), not
+					// the primary delivery path anymore.
+					priorityRefreshPromise = (async () => {
+						logger.info('updating priority inbox')
+						for (const query of [priorityImportantQuery, priorityOtherQuery]) {
+							logger.info("sync'ing priority inbox section", { query })
+							const mailbox = this.getMailbox(UNIFIED_INBOX_ID)
+							const list = mailbox.envelopeLists[normalizedEnvelopeListId(query)]
+							if (list === undefined) {
+								await this.fetchEnvelopes({
+									mailboxId: UNIFIED_INBOX_ID,
+									query,
+								})
+							}
+
+							await this.syncEnvelopes({
+								mailboxId: UNIFIED_INBOX_ID,
+								query,
+							})
+						}
+					})().catch((error) => {
+						logger.error('priority inbox refresh failed', { error })
+					})
+				}
+
 				const syncOneWatchedMailbox = async (mailbox) => {
 					if (mailbox.specialRole !== 'inbox' && !mailbox.syncInBackground) {
 						return
@@ -1629,6 +1728,10 @@ export default function mainStoreActions() {
 							this.notificationBurstFiredMutation()
 						}
 
+						if (!lightweight && flatMapDeep(identity, newMessagesPerQuery).some((m) => m !== undefined)) {
+							maybeStartPriorityInboxRefresh()
+						}
+
 						return newMessagesPerQuery
 					} finally {
 						watchedMailboxSyncsInFlight.delete(mailbox.databaseId)
@@ -1638,7 +1741,7 @@ export default function mainStoreActions() {
 				const results = await mapWithConcurrencyLimit(mailboxTargets, WATCHED_SYNC_CONCURRENCY, syncOneWatchedMailbox)
 				const newMessages = flatMapDeep(identity, results).filter((m) => m !== undefined)
 				if (newMessages.length === 0) {
-					return
+					return priorityRefreshPromise
 				}
 
 				if (lightweight) {
@@ -1649,29 +1752,10 @@ export default function mainStoreActions() {
 					return
 				}
 
-				if (this.isInteractionPriorityActive()) {
-					logger.debug('interaction priority active, skipping the priority-inbox refresh this tick')
-					return
-				}
-
-				// Make sure the priority inbox is updated as well
-				logger.info('updating priority inbox')
-				for (const query of [priorityImportantQuery, priorityOtherQuery]) {
-					logger.info("sync'ing priority inbox section", { query })
-					const mailbox = this.getMailbox(UNIFIED_INBOX_ID)
-					const list = mailbox.envelopeLists[normalizedEnvelopeListId(query)]
-					if (list === undefined) {
-						await this.fetchEnvelopes({
-							mailboxId: UNIFIED_INBOX_ID,
-							query,
-						})
-					}
-
-					await this.syncEnvelopes({
-						mailboxId: UNIFIED_INBOX_ID,
-						query,
-					})
-				}
+				// Re-attempt in case every early attempt was vetoed by a
+				// mid-tick interaction that has since expired.
+				maybeStartPriorityInboxRefresh()
+				return priorityRefreshPromise
 			})
 		},
 		toggleEnvelopeFlagged(envelope) {
@@ -2842,6 +2926,34 @@ export default function mainStoreActions() {
 							uniq(orderByDateInt(existing.concat([envelope.databaseId]))),
 						)
 					})
+
+				// The priority-inbox sections are server-materialized
+				// lists (is:pi-important / is:pi-other), so the same-listId
+				// cross-post above never reaches them and they stayed
+				// stale until their own server round-trip -- new mail hit
+				// a mailbox's badge long before the OPEN priority inbox
+				// (worst on mobile, where that round-trip only runs on a
+				// full tick). The envelope already carries exactly what
+				// the server-side filter checks (flags.important), so
+				// classify locally and insert into the matching section
+				// list right away -- the unified-view pattern every major
+				// client (K-9, Thunderbird, FairEmail) uses: derive views
+				// from the local store, let the periodic server refresh
+				// reconcile classifier flips. Only inboxes feed the
+				// priority inbox, and only already-loaded section lists
+				// are touched.
+				if (mailbox.specialRole === 'inbox') {
+					const unifiedInbox = this.mailboxes[UNIFIED_INBOX_ID]
+					const sectionListId = normalizedEnvelopeListId(envelope.flags?.important === true ? priorityImportantQuery : priorityOtherQuery)
+					const sectionList = unifiedInbox.envelopeLists[sectionListId]
+					if (sectionList !== undefined) {
+						Vue.set(
+							unifiedInbox.envelopeLists,
+							sectionListId,
+							uniq(orderByDateInt(dropStaleIds(sectionList, unifiedInbox.databaseId).concat([envelope.databaseId]))),
+						)
+					}
+				}
 			})
 		},
 		updateEnvelopeMutation({ envelope }) {
