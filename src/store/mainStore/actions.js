@@ -235,6 +235,11 @@ const pendingLockWaits = new Map()
 // first's in-flight request instead of firing a duplicate one.
 const pendingMessageFetches = new Map()
 
+// Upper bound for a single message/thread fetch -- see fetchMessage()
+// for the reasoning. Well above the slowest legitimate fetch observed
+// (~25-60s cache-miss body via a slow provider), well below forever.
+const FETCH_MESSAGE_TIMEOUT_MS = 90 * 1000
+
 // toggleEnvelopeSeen()/toggleEnvelopeJunk()/markEnvelopeFavoriteOrUnfavorite()
 // all optimistically set a flag via flagEnvelopeMutation() and await their
 // own PUT to confirm it -- but a completely independent sync request
@@ -1830,7 +1835,9 @@ export default function mainStoreActions() {
 		},
 		async fetchThread(id) {
 			return handleHttpAuthErrors(async () => {
-				const thread = await fetchThread(id)
+				// Same reasoning as fetchMessage() below: this promise
+				// gates Thread.vue's loading state and must always settle.
+				const thread = await fetchThread(id, { signal: AbortSignal.timeout(FETCH_MESSAGE_TIMEOUT_MS) })
 				this.addEnvelopeThreadMutation({
 					id,
 					thread,
@@ -1847,8 +1854,24 @@ export default function mainStoreActions() {
 				return pendingMessageFetches.get(id)
 			}
 
+			// A promise held by UI (ThreadEnvelope's loading skeleton
+			// clears only when this settles) and SHARED via the dedup map
+			// must never be able to stay pending forever: a single hung
+			// request -- e.g. a hover prefetch that stalled at the network
+			// level, where no HTTP error ever arrives -- would otherwise
+			// freeze every later open of the same message on the skeleton
+			// for the tab's lifetime (observed live, thread 119827).
+			// AbortSignal.timeout() is the standard cancellation primitive:
+			// it actually cancels the underlying request, and the finally
+			// below evicts the map entry so the next attempt starts fresh.
+			// Generous bound: a legitimate cache-miss body fetch through a
+			// slow provider measured up to ~25-60s; nginx's own upstream
+			// timeout (120s on the body tier) makes anything beyond this a
+			// dead connection, not a slow response.
+			const signal = AbortSignal.timeout(FETCH_MESSAGE_TIMEOUT_MS)
+
 			const promise = handleHttpAuthErrors(async () => {
-				const message = await fetchMessage(id)
+				const message = await fetchMessage(id, { signal })
 				// Only commit if not undefined (not found)
 				if (message) {
 					this.addMessageMutation({

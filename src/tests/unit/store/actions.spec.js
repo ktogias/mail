@@ -1652,6 +1652,32 @@ describe('Vuex store actions', () => {
 
 			expect(MessageService.fetchMessage).toHaveBeenCalledTimes(1)
 		})
+
+		it('passes an abort signal so a network-level hang cannot outlive the timeout', async () => {
+			// The promise gates ThreadEnvelope's loading skeleton AND is
+			// shared through the dedup map -- a request hung at the
+			// network level (no HTTP error ever arrives) froze every
+			// later open of the same message on the skeleton for the
+			// tab's lifetime (observed live, thread 119827). The signal
+			// makes axios abort it after the bound.
+			MessageService.fetchMessage.mockResolvedValue({ databaseId: 42 })
+
+			await store.fetchMessage(42)
+
+			expect(MessageService.fetchMessage).toHaveBeenCalledWith(42, { signal: expect.any(AbortSignal) })
+		})
+
+		it('a rejected request clears the dedup slot so a retry fires a fresh request', async () => {
+			MessageService.fetchMessage.mockRejectedValueOnce(new Error('canceled'))
+
+			await expect(store.fetchMessage(42)).rejects.toThrow('canceled')
+
+			MessageService.fetchMessage.mockResolvedValue({ databaseId: 42, subject: 'Hello' })
+			const message = await store.fetchMessage(42)
+
+			expect(message).toEqual({ databaseId: 42, subject: 'Hello' })
+			expect(MessageService.fetchMessage).toHaveBeenCalledTimes(2)
+		})
 	})
 
 	describe('syncEnvelopes: malformed response retry', () => {

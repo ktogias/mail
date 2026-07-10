@@ -68,11 +68,11 @@ export function fetchEnvelopes(accountId, mailboxId, query, cursor, limit, sort,
 			throw convertAxiosError(error)
 		})
 }
-export async function fetchThread(id) {
+export async function fetchThread(id, { signal } = {}) {
 	const url = generateUrl('apps/mail/api/messages/{id}/thread', {
 		id,
 	})
-	const resp = await axios.get(url)
+	const resp = await axios.get(url, { signal })
 	return resp.data
 }
 
@@ -204,17 +204,22 @@ export async function removeEnvelopeTag(id, imapLabel) {
 	return data
 }
 
-export async function fetchMessage(id) {
+export async function fetchMessage(id, { signal } = {}) {
 	const url = generateUrl('/apps/mail/api/messages/{id}/body', {
 		id,
 	})
 
 	try {
-		const resp = await axios.get(url)
+		const resp = await axios.get(url, { signal })
 		return resp.data
 	} catch (error) {
 		if (error.response && error.response.status === 404) {
 			return undefined
+		}
+		if (axios.isCancel(error)) {
+			// A timeout/abort is not a server error response -- rethrow
+			// as-is so callers can tell the two apart.
+			throw error
 		}
 
 		throw parseErrorResponse(error.response)
