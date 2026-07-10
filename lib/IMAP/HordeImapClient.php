@@ -48,7 +48,26 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 
 	#[\Override]
 	public function login() {
+		// Horde calls login() at the start of EVERY operation; it is
+		// idempotent and returns immediately when the session is already
+		// authenticated. Sending ID unconditionally after it therefore
+		// added one extra ID round trip to the server before every
+		// single command batch -- measured against Gmail via the
+		// account-level IMAP debug log: 56 ID NIL commands in a
+		// 3-minute window with only ONE real AUTHENTICATE, ~10.7s of
+		// 29.9s total IMAP time, i.e. a third of all IMAP wall time
+		// spent re-introducing ourselves to a server that already knew
+		// us. Only a genuinely fresh login needs the ID (the whole
+		// point is mail services that require a client id at session
+		// setup) -- mirroring the same guard Horde's own login() uses
+		// for its `id` parameter.
+		$wasAuthenticated = $this->_isAuthenticated;
+
 		parent::login();
+
+		if ($wasAuthenticated) {
+			return;
+		}
 
 		if ($this->capability->query('ID')) {
 			try {
