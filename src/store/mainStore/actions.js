@@ -1714,6 +1714,31 @@ export default function mainStoreActions() {
 					// resolve immediately since nothing else needed re-sent.
 					const queries = Object.keys(mailbox.envelopeLists)
 					let queriesToSync = queries.length > 0 ? queries : [undefined]
+
+					// Wave 1b bucket coalescing: is:starred/not:starred and
+					// is:pi-important/is:pi-other are pure predicates over a
+					// flag every envelope already carries (flags.flagged /
+					// flags.important) -- when the unfiltered '' bucket is
+					// ALSO loaded for this mailbox, its own sync response
+					// already reports every changed flag for every known
+					// message (an unfiltered query has no flag restriction,
+					// so nothing is excluded from "changed"), and
+					// reclassifyFlagBucketsMutation (see addEnvelopesMutation/
+					// updateEnvelopeMutation) keeps every OTHER loaded
+					// flag-predicate bucket correct from that same response.
+					// Syncing them separately -- up to 5 buckets, each its
+					// own request -- was pure duplication of that same
+					// question against the same server-side state. Only
+					// collapses when '' is present: without it, there is no
+					// single sync whose response is guaranteed to cover
+					// every known id's current flags, so the old one-sync-
+					// per-bucket behaviour is left untouched (no regression,
+					// just no coalescing) for that less common case.
+					const coalescedQueries = new Set(['is:starred', 'not:starred', priorityImportantQuery, priorityOtherQuery])
+					if (queriesToSync.includes('')) {
+						queriesToSync = queriesToSync.filter((query) => !coalescedQueries.has(query))
+					}
+
 					if (lightweight) {
 						// One representative bucket is enough to pull new
 						// messages into the store and fire the notification:
@@ -2966,50 +2991,104 @@ export default function mainStoreActions() {
 				Vue.set(this.envelopes, envelope.databaseId, { ...this.envelopes[envelope.databaseId] || {}, ...envelope, flags: withRecentFlagOverrides(envelope.databaseId, envelope.flags) })
 				Vue.set(envelope, 'accountId', mailbox.accountId)
 				Vue.set(mailbox.envelopeLists, listId, uniq(orderByDateInt(this.appendOrReplaceEnvelopeId(existing, envelope))))
-				if (!addToUnifiedMailboxes) {
-					return
+				if (addToUnifiedMailboxes) {
+					const unifiedAccount = this.accountsUnmapped[UNIFIED_ACCOUNT_ID]
+					unifiedAccount.mailboxes
+						.map((mbId) => this.mailboxes[mbId])
+						.filter((mb) => mb.specialRole && mb.specialRole === mailbox.specialRole)
+						.forEach((mailbox) => {
+							const existing = dropStaleIds(mailbox.envelopeLists[listId] || [], mailbox.databaseId)
+							Vue.set(
+								mailbox.envelopeLists,
+								listId,
+								uniq(orderByDateInt(existing.concat([envelope.databaseId]))),
+							)
+						})
 				}
+
+				// Runs regardless of addToUnifiedMailboxes: even a
+				// per-account fan-out call (which passes false to avoid
+				// double-posting into the unified view before the fan-out's
+				// own combine step runs) must still keep the SOURCE
+				// mailbox's own flag-predicate buckets correct.
+				//
+				// excludeListId: this call's OWN listId was just set,
+				// above, directly from the server's response for exactly
+				// that query -- that's the authoritative answer for THIS
+				// bucket specifically and must not be second-guessed from
+				// envelope.flags (which, for a query as narrow as
+				// is:pi-important, the server already filtered on; the
+				// reclassification here is only for the OTHER, sibling
+				// buckets a coalesced '' sync didn't separately ask about).
+				this.reclassifyFlagBucketsMutation({ envelope, sourceMailbox: mailbox, includeUnified: addToUnifiedMailboxes, excludeListId: listId })
+			})
+		},
+		// Several search buckets are really just a boolean predicate over a
+		// flag the client already has on every envelope it knows about
+		// (is:starred/not:starred <-> flags.flagged, is:pi-important/
+		// is:pi-other <-> flags.important) -- server-materialized lists
+		// that the same-listId cross-post above never reaches, so they
+		// stayed stale until their OWN server round-trip. That round-trip
+		// is what wave 1b's bucket coalescing removes for the common case
+		// (see syncOneWatchedMailbox): once the mailbox's unfiltered ''
+		// bucket is synced, every OTHER loaded flag-predicate bucket for
+		// that same mailbox can be kept correct locally, from the exact
+		// flag the '' sync already reported, instead of its own separate
+		// sync. Same principle the priority-inbox freshness fix already
+		// established for new mail (see addEnvelopesMutation's caller);
+		// this additionally handles a flag FLIPPING on an existing,
+		// already-classified message (a star toggled, the AI important
+		// classifier changing its mind) -- addEnvelopesMutation's merge
+		// path only ever inserted, never moved an envelope OUT of a
+		// bucket it no longer matches.
+		//
+		// Only touches lists that are ALREADY loaded (nothing is loaded
+		// speculatively), and only the envelope's own mailbox plus
+		// whichever unified-account mailboxes share its specialRole --
+		// the same scope the existing cross-post above already uses.
+		reclassifyFlagBucketsMutation({ envelope, sourceMailbox, includeUnified = true, excludeListId = null }) {
+			const pairs = [
+				{ flag: 'flagged', matchQuery: 'is:starred', otherQuery: 'not:starred', inboxOnly: false },
+				{ flag: 'important', matchQuery: priorityImportantQuery, otherQuery: priorityOtherQuery, inboxOnly: true },
+			]
+			const orderByDateInt = orderBy((id) => this.envelopes[id]?.dateInt ?? 0, this.preferences['sort-order'] === 'newest' ? 'desc' : 'asc')
+
+			const targetMailboxes = [sourceMailbox]
+			if (includeUnified) {
 				const unifiedAccount = this.accountsUnmapped[UNIFIED_ACCOUNT_ID]
 				unifiedAccount.mailboxes
 					.map((mbId) => this.mailboxes[mbId])
-					.filter((mb) => mb.specialRole && mb.specialRole === mailbox.specialRole)
-					.forEach((mailbox) => {
-						const existing = dropStaleIds(mailbox.envelopeLists[listId] || [], mailbox.databaseId)
+					.filter((mb) => mb.specialRole && mb.specialRole === sourceMailbox.specialRole)
+					.forEach((mb) => targetMailboxes.push(mb))
+			}
+
+			for (const mailbox of targetMailboxes) {
+				for (const pair of pairs) {
+					if (pair.inboxOnly && sourceMailbox.specialRole !== 'inbox') {
+						continue
+					}
+					const matches = envelope.flags?.[pair.flag] === true
+					const matchListId = normalizedEnvelopeListId(pair.matchQuery)
+					const otherListId = normalizedEnvelopeListId(pair.otherQuery)
+					const move = (listId, shouldContain) => {
+						if (listId === excludeListId) {
+							return
+						}
+						const list = mailbox.envelopeLists[listId]
+						if (list === undefined) {
+							return
+						}
+						const withoutSelf = list.filter((id) => id !== envelope.databaseId && this.envelopes[id] !== undefined)
 						Vue.set(
 							mailbox.envelopeLists,
 							listId,
-							uniq(orderByDateInt(existing.concat([envelope.databaseId]))),
-						)
-					})
-
-				// The priority-inbox sections are server-materialized
-				// lists (is:pi-important / is:pi-other), so the same-listId
-				// cross-post above never reaches them and they stayed
-				// stale until their own server round-trip -- new mail hit
-				// a mailbox's badge long before the OPEN priority inbox
-				// (worst on mobile, where that round-trip only runs on a
-				// full tick). The envelope already carries exactly what
-				// the server-side filter checks (flags.important), so
-				// classify locally and insert into the matching section
-				// list right away -- the unified-view pattern every major
-				// client (K-9, Thunderbird, FairEmail) uses: derive views
-				// from the local store, let the periodic server refresh
-				// reconcile classifier flips. Only inboxes feed the
-				// priority inbox, and only already-loaded section lists
-				// are touched.
-				if (mailbox.specialRole === 'inbox') {
-					const unifiedInbox = this.mailboxes[UNIFIED_INBOX_ID]
-					const sectionListId = normalizedEnvelopeListId(envelope.flags?.important === true ? priorityImportantQuery : priorityOtherQuery)
-					const sectionList = unifiedInbox.envelopeLists[sectionListId]
-					if (sectionList !== undefined) {
-						Vue.set(
-							unifiedInbox.envelopeLists,
-							sectionListId,
-							uniq(orderByDateInt(dropStaleIds(sectionList, unifiedInbox.databaseId).concat([envelope.databaseId]))),
+							shouldContain ? uniq(orderByDateInt(withoutSelf.concat([envelope.databaseId]))) : withoutSelf,
 						)
 					}
+					move(matchListId, matches)
+					move(otherListId, !matches)
 				}
-			})
+			}
 		},
 		updateEnvelopeMutation({ envelope }) {
 			const existing = this.envelopes[envelope.databaseId]
@@ -3031,6 +3110,15 @@ export default function mainStoreActions() {
 			// of MB per minute until earlyoom killed it.
 			if (!isEqual(existing.flags, flags)) {
 				Vue.set(existing, 'flags', flags)
+				// Only when flags actually differ: a flag flip (star
+				// toggled, important reclassified) is exactly when bucket
+				// membership can change. See reclassifyFlagBucketsMutation
+				// for why this needs to run for CHANGED messages too, not
+				// just new ones.
+				const mailbox = this.mailboxes[envelope.mailboxId]
+				if (mailbox) {
+					this.reclassifyFlagBucketsMutation({ envelope: { ...envelope, flags }, sourceMailbox: mailbox })
+				}
 			}
 			if (!isEqual(existing.tags, envelope.tags)) {
 				Vue.set(existing, 'tags', envelope.tags)

@@ -637,6 +637,98 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	describe('reclassifyFlagBucketsMutation (wave 1b: bucket coalescing)', () => {
+		// is:starred/not:starred and is:pi-important/is:pi-other are pure
+		// predicates over flags.flagged/flags.important -- coalescing their
+		// separate syncs into the mailbox's unfiltered '' sync (see
+		// syncOneWatchedMailbox below) only works if a flag CHANGE on an
+		// already-known message actually moves it between the two loaded
+		// buckets. addEnvelopesMutation's cross-post only ever inserts;
+		// this is what makes updateEnvelopeMutation (the CHANGED-message
+		// path) do the same job for existing messages.
+		beforeEach(() => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			const account = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: { id: 'INBOX', name: 'INBOX', databaseId: 11, accountId: 13, specialRole: 'inbox' },
+			})
+			store.preferences['sort-order'] = 'newest'
+		})
+
+		function seedKnownEnvelope(id, flagged) {
+			store.envelopes[id] = { databaseId: id, mailboxId: 11, dateInt: id, flags: { flagged } }
+		}
+
+		it('a star being added moves the message from not:starred to is:starred', () => {
+			seedKnownEnvelope(70, false)
+			store.mailboxes[11].envelopeLists['is:starred'] = []
+			store.mailboxes[11].envelopeLists['not:starred'] = [70]
+
+			store.updateEnvelopeMutation({ envelope: { databaseId: 70, mailboxId: 11, flags: { flagged: true } } })
+
+			expect(store.mailboxes[11].envelopeLists['is:starred']).toEqual([70])
+			expect(store.mailboxes[11].envelopeLists['not:starred']).toEqual([])
+		})
+
+		it('a star being removed moves the message from is:starred to not:starred', () => {
+			seedKnownEnvelope(71, true)
+			store.mailboxes[11].envelopeLists['is:starred'] = [71]
+			store.mailboxes[11].envelopeLists['not:starred'] = []
+
+			store.updateEnvelopeMutation({ envelope: { databaseId: 71, mailboxId: 11, flags: { flagged: false } } })
+
+			expect(store.mailboxes[11].envelopeLists['is:starred']).toEqual([])
+			expect(store.mailboxes[11].envelopeLists['not:starred']).toEqual([71])
+		})
+
+		it('does not touch a flag-predicate bucket that is not loaded', () => {
+			seedKnownEnvelope(72, false)
+			// Neither is:starred nor not:starred loaded for this mailbox.
+
+			store.updateEnvelopeMutation({ envelope: { databaseId: 72, mailboxId: 11, flags: { flagged: true } } })
+
+			expect(store.mailboxes[11].envelopeLists['is:starred']).toBeUndefined()
+			expect(store.mailboxes[11].envelopeLists['not:starred']).toBeUndefined()
+		})
+
+		it('a no-op flag update (nothing actually changed) does not touch bucket membership', () => {
+			seedKnownEnvelope(73, true)
+			store.mailboxes[11].envelopeLists['is:starred'] = [73]
+			store.mailboxes[11].envelopeLists['not:starred'] = []
+
+			// Same flags as already stored -- isEqual short-circuits before
+			// updateEnvelopeMutation ever calls the reclassification at all.
+			store.updateEnvelopeMutation({ envelope: { databaseId: 73, mailboxId: 11, flags: { flagged: true } } })
+
+			expect(store.mailboxes[11].envelopeLists['is:starred']).toEqual([73])
+			expect(store.mailboxes[11].envelopeLists['not:starred']).toEqual([])
+		})
+
+		it('does not contradict the bucket that was just authoritatively set by the same call (excludeListId)', () => {
+			// A direct is:pi-important fetch/sync response is itself the
+			// authoritative answer for THAT bucket -- reclassifying it
+			// from envelope.flags.important would be redundant at best
+			// and, for a caller whose envelope data doesn't perfectly
+			// mirror the server's own filter decision, actively wrong.
+			// Regression: this exact interaction previously flipped a
+			// message OUT of the section list the surrounding code had
+			// just put it into, moments earlier, in the same call.
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-important'] = []
+			store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-other'] = []
+
+			store.addEnvelopesMutation({
+				query: 'is:pi-important',
+				envelopes: [{ databaseId: 74, mailboxId: 11, dateInt: 74, flags: { seen: false, important: true } }],
+			})
+
+			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-important']).toEqual([74])
+			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-other']).toEqual([])
+		})
+	})
+
 	it('fetches the next individual page', async () => {
 		const msgs1 = reverse(range(30, 40))
 		const page1 = reverse(range(10, 30))
@@ -1327,6 +1419,13 @@ describe('Vuex store actions', () => {
 			// the store under the wrong key and never appeared in the open view,
 			// even though the mailbox's unread counter updated correctly (a separate
 			// mechanism). This asserts every existing bucket gets its own sync call.
+			//
+			// 'not:starred' specifically is deliberately NOT used here anymore:
+			// wave 1b coalesces it away when '' is also loaded (see the
+			// dedicated coalescing describe block below), so it no longer
+			// gets its own call -- that's the intended new behavior, not a
+			// regression of this one. 'subject:foo' isn't coalescable and
+			// still exercises the original per-bucket guarantee.
 			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
 
 			const account13 = {
@@ -1344,9 +1443,9 @@ describe('Vuex store actions', () => {
 			})
 
 			// Simulate a mailbox that's been viewed both with the default query and
-			// with favorites split out -- both buckets already exist in the store.
+			// with a second, non-coalescable bucket.
 			store.mailboxes[11].envelopeLists[''] = []
-			store.mailboxes[11].envelopeLists['not:starred'] = []
+			store.mailboxes[11].envelopeLists['subject:foo'] = []
 
 			store.fetchEnvelopes = vi.fn(async () => {})
 			store.syncEnvelopes = vi.fn(async () => [])
@@ -1361,8 +1460,60 @@ describe('Vuex store actions', () => {
 			})
 			expect(store.syncEnvelopes).toHaveBeenCalledWith({
 				mailboxId: 11,
-				query: 'not:starred',
+				query: 'subject:foo',
 			})
+		})
+
+		it('wave 1b: coalesces is:starred/not:starred/is:pi-important/is:pi-other into the unfiltered sync when it is also loaded', async () => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+
+			const account13 = { id: 913 }
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: { name: 'INBOX', databaseId: 911, specialRole: 'inbox' },
+			})
+
+			store.mailboxes[911].envelopeLists[''] = []
+			store.mailboxes[911].envelopeLists['is:starred'] = []
+			store.mailboxes[911].envelopeLists['not:starred'] = []
+			store.mailboxes[911].envelopeLists['is:pi-important'] = []
+			store.mailboxes[911].envelopeLists['is:pi-other'] = []
+
+			store.fetchEnvelopes = vi.fn(async () => {})
+			store.syncEnvelopes = vi.fn(async () => [])
+
+			await store.syncWatchedMailboxes()
+
+			expect(store.syncEnvelopes).toHaveBeenCalledTimes(1)
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 911, query: '' })
+		})
+
+		it('wave 1b: does NOT coalesce when the unfiltered bucket is not loaded (no regression for that case)', async () => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+
+			const account14 = { id: 914 }
+			store.addAccountMutation(account14)
+			store.addMailboxMutation({
+				account: account14,
+				mailbox: { name: 'INBOX', databaseId: 921, specialRole: 'inbox' },
+			})
+
+			// '' itself was never loaded -- e.g. "sort favorites separately"
+			// hides the plain view entirely. Nothing here is guaranteed to
+			// cover every known id's current flags, so each bucket keeps
+			// syncing on its own, same as before wave 1b.
+			store.mailboxes[921].envelopeLists['is:starred'] = []
+			store.mailboxes[921].envelopeLists['not:starred'] = []
+
+			store.fetchEnvelopes = vi.fn(async () => {})
+			store.syncEnvelopes = vi.fn(async () => [])
+
+			await store.syncWatchedMailboxes()
+
+			expect(store.syncEnvelopes).toHaveBeenCalledTimes(2)
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 921, query: 'is:starred' })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 921, query: 'not:starred' })
 		})
 
 		it('lightweight tick: syncs only the unfiltered bucket and skips the priority refresh', async () => {
@@ -1625,8 +1776,14 @@ describe('Vuex store actions', () => {
 				},
 			})
 
+			// Deliberately NOT 'not:starred'/is:pi-*: those are coalesced
+			// away when '' is also loaded (see wave 1b, "bucket
+			// coalescing" below) precisely so they DON'T fire their own
+			// separate sync -- this test wants two buckets that genuinely
+			// still sync independently, to exercise the sequential-not-
+			// concurrent behavior itself.
 			store.mailboxes[11].envelopeLists[''] = []
-			store.mailboxes[11].envelopeLists['not:starred'] = []
+			store.mailboxes[11].envelopeLists['subject:foo'] = []
 
 			store.fetchEnvelopes = vi.fn(async () => {})
 
