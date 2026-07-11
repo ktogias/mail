@@ -124,6 +124,24 @@ class ImapToDbSynchronizer {
 				$logger->debug("Mailbox {$mailbox->getId()} is locked by another process, skipping it for this sync pass", [
 					'exception' => $e,
 				]);
+			} catch (IncompleteSyncException $e) {
+				// A mailbox large enough to need several batches to finish
+				// its initial sync (each call to sync() only fetches one
+				// chunk -- see runInitialSync()) throws this every single
+				// tick until it's fully cached. The exact same starvation
+				// shape as MailboxLockedException above: left uncaught here,
+				// this mailbox aborted the WHOLE account's sync pass on
+				// every SyncJob run, so every mailbox after it in iteration
+				// order never got its own background sync at all -- forever,
+				// for as long as the big one stayed incomplete. Confirmed
+				// live: a 773k-message mailbox with sync_in_background
+				// enabled would have blocked its account's other mailboxes
+				// on every single cron tick. This still makes progress on
+				// the incomplete mailbox itself (one more batch per tick)
+				// without blocking its siblings.
+				$logger->debug("Mailbox {$mailbox->getId()} initial sync is incomplete, continuing with the rest of the account for this pass", [
+					'exception' => $e,
+				]);
 			}
 		}
 

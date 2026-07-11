@@ -22,6 +22,7 @@ use OCA\Mail\Db\MailboxMapper;
 use OCA\Mail\Db\MessageMapper as DatabaseMessageMapper;
 use OCA\Mail\Db\TagMapper;
 use OCA\Mail\Events\SynchronizationEvent;
+use OCA\Mail\Exception\IncompleteSyncException;
 use OCA\Mail\Exception\MailboxLockedException;
 use OCA\Mail\IMAP\IMAPClientFactory;
 use OCA\Mail\IMAP\MessageMapper as ImapMessageMapper;
@@ -179,6 +180,81 @@ class ImapToDbSynchronizerTest extends TestCase {
 			->willReturnCallback(function ($_account, $_client, Mailbox $mailbox) use ($lockedMailbox) {
 				if ($mailbox->getId() === $lockedMailbox->getId()) {
 					throw MailboxLockedException::from($mailbox);
+				}
+				return true;
+			});
+
+		// The other mailbox's own sync still ran (proven by $rebuildThreads
+		// making it true, from that call's own return value) and
+		// syncAccount() itself didn't throw or abort early.
+		$this->dispatcher->expects($this->once())
+			->method('dispatchTyped')
+			->with($this->callback(fn (SynchronizationEvent $event) => $event->isRebuildThreads()));
+
+		$synchronizer->syncAccount($account, $this->createStub(LoggerInterface::class));
+	}
+
+	/**
+	 * Same starvation shape as the locked-mailbox case above, for a
+	 * different exception: a mailbox large enough to need several batches
+	 * to finish its initial sync throws IncompleteSyncException on every
+	 * single tick until it's fully cached (one batch per sync() call --
+	 * see runInitialSync()). Left uncaught here, that mailbox would abort
+	 * the WHOLE account's sync pass on every single SyncJob run, so every
+	 * mailbox after it in iteration order never got its own background
+	 * sync at all, for as long as the big one stayed incomplete.
+	 */
+	public function testSyncAccountSkipsAnIncompleteMailboxAndContinuesWithTheRest(): void {
+		$mailAccount = new MailAccount();
+		$mailAccount->setId(1);
+		$mailAccount->setUserId('user');
+		$account = new Account($mailAccount);
+
+		$hugeMailbox = new Mailbox();
+		$hugeMailbox->setId(190);
+		$hugeMailbox->setName('Huge');
+		$hugeMailbox->setAccountId(1);
+		$hugeMailbox->setSyncInBackground(true);
+
+		$okMailbox = new Mailbox();
+		$okMailbox->setId(200);
+		$okMailbox->setName('OK');
+		$okMailbox->setAccountId(1);
+		$okMailbox->setSyncInBackground(true);
+
+		$this->mailboxMapper->method('findAll')
+			->with($account)
+			->willReturn([$hugeMailbox, $okMailbox]);
+		$this->clientFactory->method('getClient')
+			->with($account)
+			->willReturn($this->createStub(Horde_Imap_Client_Socket::class));
+
+		/** @var ImapToDbSynchronizer&MockObject $synchronizer */
+		$synchronizer = $this->getMockBuilder(ImapToDbSynchronizer::class)
+			->setConstructorArgs([
+				$this->dbMapper,
+				$this->clientFactory,
+				$this->imapMapper,
+				$this->mailboxMapper,
+				$this->createStub(DatabaseMessageMapper::class),
+				$this->createStub(Synchronizer::class),
+				$this->dispatcher,
+				$this->performanceLogger,
+				$this->createStub(LoggerInterface::class),
+				$this->createStub(IMailManager::class),
+				$this->createStub(TagMapper::class),
+				$this->createStub(NewMessagesClassifier::class),
+				new HordeSyncTokenParser(),
+				$this->fastPathStats,
+			])
+			->onlyMethods(['sync'])
+			->getMock();
+
+		$synchronizer->expects($this->exactly(2))
+			->method('sync')
+			->willReturnCallback(function ($_account, $_client, Mailbox $mailbox) use ($hugeMailbox) {
+				if ($mailbox->getId() === $hugeMailbox->getId()) {
+					throw new IncompleteSyncException('Initial sync is not complete for 1:Huge (5000 of 773157 messages cached).');
 				}
 				return true;
 			});
