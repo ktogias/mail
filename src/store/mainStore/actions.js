@@ -237,6 +237,21 @@ const pendingLockWaits = new Map()
 // first's in-flight request instead of firing a duplicate one.
 const pendingMessageFetches = new Map()
 
+// Same reasoning, same fix, for fetchThread(): Envelope.vue's hover
+// prefetch and Thread.vue's own open-thread call independently fetch
+// the SAME thread id whenever a hover lands just before a click (very
+// common -- hovering is usually how the click happens). Without dedup
+// here, Thread.vue documented the resulting race directly in its own
+// fetchThread() catch block: one of the two redundant requests could
+// reject (timeout, transient error) AFTER the other had already
+// resolved and populated the store, flipping an already-correctly-
+// loaded thread to "Δεν βρέθηκε" for no real reason. That catch-block
+// workaround is a symptom guard, not a fix -- it papers over the
+// duplicate request instead of preventing it. This map does the same
+// job pendingMessageFetches does above: the second caller awaits the
+// first's in-flight request instead of firing its own.
+const pendingThreadFetches = new Map()
+
 // Upper bound for a single message/thread fetch -- see fetchMessage()
 // for the reasoning. Well above the slowest legitimate fetch observed
 // (~25-60s cache-miss body via a slow provider), well below forever.
@@ -1998,16 +2013,27 @@ export default function mainStoreActions() {
 			})
 		},
 		async fetchThread(id) {
-			return handleHttpAuthErrors(async () => {
-				// Same reasoning as fetchMessage() below: this promise
-				// gates Thread.vue's loading state and must always settle.
+			if (pendingThreadFetches.has(id)) {
+				return pendingThreadFetches.get(id)
+			}
+
+			// Same reasoning as fetchMessage() below: this promise gates
+			// Thread.vue's loading state and must always settle, and is
+			// shared via the dedup map so a concurrent caller (hover
+			// prefetch racing an actual open) reuses it instead of firing
+			// a duplicate request.
+			const promise = handleHttpAuthErrors(async () => {
 				const thread = await fetchThread(id, { signal: AbortSignal.timeout(FETCH_MESSAGE_TIMEOUT_MS) })
 				this.addEnvelopeThreadMutation({
 					id,
 					thread,
 				})
 				return thread
+			}).finally(() => {
+				pendingThreadFetches.delete(id)
 			})
+			pendingThreadFetches.set(id, promise)
+			return promise
 		},
 		async fetchMessage(id) {
 			if (this.messages[id]) {

@@ -2155,6 +2155,78 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	describe('fetchThread: concurrent calls for the same id are deduped', () => {
+		// Envelope.vue's hover prefetch and Thread.vue's own open-thread
+		// call independently fetch the same thread id whenever a hover
+		// lands just before a click (the common case). Without dedup,
+		// whichever of the two redundant requests settled LAST decided
+		// the outcome -- Thread.vue's own catch block documents the
+		// resulting live symptom: an already-loaded thread flipping to
+		// "Δεν βρέθηκε" because the OTHER, now-redundant request happened
+		// to reject after the first had already succeeded.
+		let threadEnvelope
+
+		beforeEach(() => {
+			const account = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: { id: 'INBOX', name: 'INBOX', databaseId: 11, accountId: 13, specialRole: 'inbox' },
+			})
+			threadEnvelope = { databaseId: 119855, mailboxId: 11 }
+		})
+
+		it('only fires one network request when called twice before the first resolves', async () => {
+			let resolveFetch
+			MessageService.fetchThread.mockReturnValue(new Promise((resolve) => {
+				resolveFetch = resolve
+			}))
+
+			const firstCall = store.fetchThread(119855)
+			const secondCall = store.fetchThread(119855)
+
+			expect(MessageService.fetchThread).toHaveBeenCalledTimes(1)
+
+			resolveFetch([threadEnvelope])
+			const [first, second] = await Promise.all([firstCall, secondCall])
+
+			expect(first).toEqual(second)
+			expect(MessageService.fetchThread).toHaveBeenCalledTimes(1)
+		})
+
+		it('fires a fresh request for a later call once the first has resolved', async () => {
+			MessageService.fetchThread.mockResolvedValue([threadEnvelope])
+
+			await store.fetchThread(119855)
+			await store.fetchThread(119855)
+
+			// Unlike fetchMessage(), a thread has no "already fetched,
+			// never refetch" cache -- new replies can arrive, so a
+			// SEPARATE (non-concurrent) call must still hit the network.
+			expect(MessageService.fetchThread).toHaveBeenCalledTimes(2)
+		})
+
+		it('passes an abort signal so a network-level hang cannot outlive the timeout', async () => {
+			MessageService.fetchThread.mockResolvedValue([threadEnvelope])
+
+			await store.fetchThread(119855)
+
+			expect(MessageService.fetchThread).toHaveBeenCalledWith(119855, { signal: expect.any(AbortSignal) })
+		})
+
+		it('a rejected request clears the dedup slot so a retry fires a fresh request', async () => {
+			MessageService.fetchThread.mockRejectedValueOnce(new Error('boom'))
+
+			await expect(store.fetchThread(119855)).rejects.toThrow('boom')
+
+			MessageService.fetchThread.mockResolvedValue([threadEnvelope])
+			const thread = await store.fetchThread(119855)
+
+			expect(thread).toEqual([threadEnvelope])
+			expect(MessageService.fetchThread).toHaveBeenCalledTimes(2)
+		})
+	})
+
 	describe('syncEnvelopes: malformed response retry', () => {
 		// Regression: confirmed live -- a sync response missing
 		// newMessages/changedMessages crashed with a raw TypeError and
