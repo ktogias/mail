@@ -1453,8 +1453,8 @@ export default function mainStoreActions() {
 						syncData.vanishedMessages.forEach((id) => {
 							this.removeEnvelopeMutation({
 								id,
+								query,
 							})
-							// Already removed from unified inbox
 						})
 
 						this.setMailboxUnreadCountMutation({
@@ -3181,23 +3181,68 @@ export default function mainStoreActions() {
 		}) {
 			Vue.set(envelope, 'tags', envelope.tags.filter((id) => id !== tagId))
 		},
-		removeEnvelopeMutation({ id }) {
+		removeEnvelopeMutation({ id, query }) {
 			const envelope = this.envelopes[id]
 			if (!envelope) {
 				logger.warn('envelope ' + id + ' is unknown, can\'t remove it')
 				return
 			}
 			const mailbox = this.mailboxes[envelope.mailboxId]
-			for (const listId in mailbox.envelopeLists) {
-				if (!Object.hasOwn(mailbox.envelopeLists, listId)) {
+
+			// "Vanished" from a sync means two very different things
+			// depending on which bucket reported it. The unfiltered ''
+			// query has no flag/text restriction, so a message missing
+			// from ITS "still known" set is genuinely gone from the
+			// mailbox (deleted/expunged) -- global removal is correct.
+			// A FILTERED bucket's own "vanished" (is:starred, not:starred,
+			// a saved search, ...) means only "no longer matches THIS
+			// bucket's predicate" -- e.g. a message merely losing its
+			// star. The message is still very much present in the
+			// mailbox and in every OTHER bucket it belongs to. Treating
+			// that the same as a real deletion -- which every explicit
+			// caller below (deleteMessage/moveMessage/snoozeMessage/...,
+			// none of which pass a query) still correctly does, since
+			// those really are "this message left the mailbox for real"
+			// -- erased the message from the ENTIRE local store,
+			// including the plain inbox view, over a mere flag change.
+			// Confirmed on inspection while building wave 1b's bucket
+			// coalescing (not observed live, not yet hit in practice).
+			const listId = normalizedEnvelopeListId(query)
+			if (listId !== '') {
+				const list = mailbox.envelopeLists[listId]
+				if (list !== undefined) {
+					const idx = list.indexOf(id)
+					if (idx >= 0) {
+						logger.debug('envelope ' + id + ' no longer matches bucket ' + listId + ', removed from just that list', { id, listId })
+						list.splice(idx, 1)
+					}
+				}
+				this.accountsUnmapped[UNIFIED_ACCOUNT_ID].mailboxes
+					.map((mailboxId) => this.mailboxes[mailboxId])
+					.filter((mb) => mb.specialRole && mb.specialRole === mailbox.specialRole)
+					.forEach((unifiedMailbox) => {
+						const unifiedList = unifiedMailbox.envelopeLists[listId]
+						if (unifiedList === undefined) {
+							return
+						}
+						const idx = unifiedList.indexOf(id)
+						if (idx >= 0) {
+							unifiedList.splice(idx, 1)
+						}
+					})
+				return
+			}
+
+			for (const iterListId in mailbox.envelopeLists) {
+				if (!Object.hasOwn(mailbox.envelopeLists, iterListId)) {
 					continue
 				}
-				const list = mailbox.envelopeLists[listId]
+				const list = mailbox.envelopeLists[iterListId]
 				const idx = list.indexOf(id)
 				if (idx < 0) {
 					continue
 				}
-				logger.debug('envelope ' + id + ' removed from mailbox list ' + listId)
+				logger.debug('envelope ' + id + ' removed from mailbox list ' + iterListId)
 				list.splice(idx, 1)
 			}
 
@@ -3209,11 +3254,11 @@ export default function mainStoreActions() {
 				.map((mailboxId) => this.mailboxes[mailboxId])
 				.filter((mb) => mb.specialRole && mb.specialRole === mailbox.specialRole)
 				.forEach((mailbox) => {
-					for (const listId in mailbox.envelopeLists) {
-						if (!Object.hasOwn(mailbox.envelopeLists, listId)) {
+					for (const iterListId in mailbox.envelopeLists) {
+						if (!Object.hasOwn(mailbox.envelopeLists, iterListId)) {
 							continue
 						}
-						const list = mailbox.envelopeLists[listId]
+						const list = mailbox.envelopeLists[iterListId]
 						const idx = list.indexOf(id)
 						if (idx < 0) {
 							// Not a warning: this envelope simply doesn't

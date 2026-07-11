@@ -729,6 +729,102 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	describe('removeEnvelopeMutation distinguishes a real deletion from a filtered bucket no longer matching', () => {
+		// "Vanished" from a filtered bucket's sync (is:starred, a saved
+		// search, ...) means "no longer matches THIS bucket's predicate"
+		// -- e.g. a message merely losing its star -- not "this message
+		// is gone". Only the UNFILTERED '' query's own vanish means a
+		// genuine deletion/expunge (its knownIds have no flag/text
+		// restriction to fall out of). Found while building wave 1b;
+		// not observed live, not yet hit in practice.
+		beforeEach(() => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			const account = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: { id: 'INBOX', name: 'INBOX', databaseId: 11, accountId: 13, specialRole: 'inbox' },
+			})
+		})
+
+		function seedKnownEnvelope(id, extra = {}) {
+			store.envelopes[id] = { databaseId: id, mailboxId: 11, dateInt: id, seen: true, flags: { flagged: true }, ...extra }
+		}
+
+		it('a vanish from a FILTERED bucket (e.g. is:starred, star removed) only leaves that one list', () => {
+			seedKnownEnvelope(80)
+			store.mailboxes[11].envelopeLists['is:starred'] = [80]
+			store.mailboxes[11].envelopeLists[''] = [80]
+
+			store.removeEnvelopeMutation({ id: 80, query: 'is:starred' })
+
+			expect(store.mailboxes[11].envelopeLists['is:starred']).toEqual([])
+			// Still present everywhere else -- the message never left the
+			// mailbox, it just stopped matching is:starred specifically.
+			expect(store.mailboxes[11].envelopeLists['']).toEqual([80])
+			expect(store.envelopes[80]).toBeDefined()
+		})
+
+		it('a vanish from the UNFILTERED \'\' bucket is a real removal: every list, and the envelope itself, are gone', () => {
+			seedKnownEnvelope(81)
+			store.mailboxes[11].envelopeLists['is:starred'] = [81]
+			store.mailboxes[11].envelopeLists[''] = [81]
+
+			store.removeEnvelopeMutation({ id: 81, query: undefined })
+
+			expect(store.mailboxes[11].envelopeLists['is:starred']).toEqual([])
+			expect(store.mailboxes[11].envelopeLists['']).toEqual([])
+			expect(store.envelopes[81]).toBeUndefined()
+		})
+
+		it('a filtered-bucket vanish does not touch the mailbox unread counter', () => {
+			seedKnownEnvelope(82, { seen: false })
+			store.mailboxes[11].unread = 5
+			store.mailboxes[11].envelopeLists['is:starred'] = [82]
+
+			store.removeEnvelopeMutation({ id: 82, query: 'is:starred' })
+
+			expect(store.mailboxes[11].unread).toBe(5)
+		})
+
+		it('an unfiltered-bucket vanish still decrements the unread counter for an unseen message', () => {
+			seedKnownEnvelope(83, { seen: false })
+			store.mailboxes[11].unread = 5
+			store.mailboxes[11].envelopeLists[''] = [83]
+
+			store.removeEnvelopeMutation({ id: 83, query: undefined })
+
+			expect(store.mailboxes[11].unread).toBe(4)
+		})
+
+		it('explicit user actions (delete/move/snooze, no query passed) remain full removals', () => {
+			// deleteMessage/moveMessage/snoozeMessage/etc. never pass a
+			// query -- the message genuinely leaves the mailbox for real
+			// reasons, so the full-removal behavior must stay the default.
+			seedKnownEnvelope(84)
+			store.mailboxes[11].envelopeLists['is:starred'] = [84]
+			store.mailboxes[11].envelopeLists[''] = [84]
+
+			store.removeEnvelopeMutation({ id: 84 })
+
+			expect(store.mailboxes[11].envelopeLists['is:starred']).toEqual([])
+			expect(store.mailboxes[11].envelopeLists['']).toEqual([])
+			expect(store.envelopes[84]).toBeUndefined()
+		})
+
+		it('a filtered-bucket vanish also removes it from the matching unified-account list', () => {
+			seedKnownEnvelope(85)
+			store.mailboxes[11].envelopeLists['is:starred'] = [85]
+			store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:starred'] = [85]
+			store.mailboxes[UNIFIED_INBOX_ID].envelopeLists[''] = [85]
+
+			store.removeEnvelopeMutation({ id: 85, query: 'is:starred' })
+
+			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:starred']).toEqual([])
+			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['']).toEqual([85])
+		})
+	})
+
 	it('fetches the next individual page', async () => {
 		const msgs1 = reverse(range(30, 40))
 		const page1 = reverse(range(10, 30))
