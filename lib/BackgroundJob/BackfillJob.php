@@ -11,6 +11,7 @@ namespace OCA\Mail\BackgroundJob;
 use OCA\Mail\Db\Mailbox;
 use OCA\Mail\Db\MailboxMapper;
 use OCA\Mail\Exception\IncompleteSyncException;
+use OCA\Mail\Exception\MailboxLockedException;
 use OCA\Mail\IMAP\IMAPClientFactory;
 use OCA\Mail\Service\AccountService;
 use OCA\Mail\Service\Sync\ImapToDbSynchronizer;
@@ -129,6 +130,7 @@ class BackfillJob extends TimedJob {
 		$next ??= $incomplete[0];
 
 		$client = $this->clientFactory->getClient($account);
+		$advanceCursor = true;
 		try {
 			$this->synchronizer->sync($account, $client, $next, $this->logger);
 			$this->logger->debug("Backfill: mailbox {$next->getId()} finished its initial sync");
@@ -137,6 +139,17 @@ class BackfillJob extends TimedJob {
 			$this->logger->debug("Backfill: mailbox {$next->getId()} advanced one batch, still incomplete", [
 				'exception' => $e,
 			]);
+		} catch (MailboxLockedException $e) {
+			// Another process (a user's own browser, or this same job for
+			// a different account) is already syncing this mailbox right
+			// now -- same reasoning as syncAccount()'s own handling of
+			// this exact exception. No progress was made, so don't move
+			// the cursor past it: worth retrying THIS mailbox again next
+			// tick rather than skipping it for a whole rotation.
+			$this->logger->debug("Backfill: mailbox {$next->getId()} is locked by another process, will retry next tick", [
+				'exception' => $e,
+			]);
+			$advanceCursor = false;
 		} catch (Throwable $e) {
 			$this->logger->error("Backfill: could not advance mailbox {$next->getId()}: {$e->getMessage()}", [
 				'exception' => $e,
@@ -145,6 +158,8 @@ class BackfillJob extends TimedJob {
 			$client->logout();
 		}
 
-		$this->config->setUserValue($account->getUserId(), 'mail', $cursorKey, (string)$next->getId());
+		if ($advanceCursor) {
+			$this->config->setUserValue($account->getUserId(), 'mail', $cursorKey, (string)$next->getId());
+		}
 	}
 }

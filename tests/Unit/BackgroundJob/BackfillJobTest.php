@@ -18,6 +18,7 @@ use OCA\Mail\BackgroundJob\BackfillJob;
 use OCA\Mail\Db\MailAccount;
 use OCA\Mail\Db\Mailbox;
 use OCA\Mail\Exception\IncompleteSyncException;
+use OCA\Mail\Exception\MailboxLockedException;
 use OCP\AppFramework\Db\DoesNotExistException;
 use OCP\IUser;
 
@@ -280,6 +281,46 @@ class BackfillJobTest extends TestCase {
 			->method('sync')
 			->with(self::anything(), $client, $mailboxA, self::anything())
 			->willThrowException(new IncompleteSyncException('still going'));
+
+		$this->job->start($this->createMock(JobList::class));
+	}
+
+	/**
+	 * Confirmed live: a mailbox this job picked was concurrently being
+	 * synced by a leftover manual process, hitting MailboxLockedException.
+	 * No progress was made on that mailbox, so the cursor must NOT
+	 * advance past it -- otherwise it would be skipped for an entire
+	 * rotation instead of retried on the very next (soon) tick.
+	 */
+	public function testRetriesALockedMailboxWithoutAdvancingTheCursor(): void {
+		$this->serviceMock->getParameter('accountService')
+			->method('findById')
+			->willReturn($this->account());
+		$this->serviceMock->getParameter('userManager')
+			->method('get')
+			->willReturn($this->createConfiguredMock(IUser::class, ['isEnabled' => true]));
+		$this->serviceMock->getParameter('syncService')
+			->method('isServerBusy')
+			->willReturn(false);
+		$mailboxA = $this->mailbox(50, false);
+		$this->serviceMock->getParameter('mailboxMapper')
+			->method('findAll')
+			->willReturn([$mailboxA]);
+		$this->serviceMock->getParameter('config')
+			->method('getUserValue')
+			->willReturn('0');
+		$client = $this->createMock(Horde_Imap_Client_Socket::class);
+		$this->serviceMock->getParameter('clientFactory')
+			->method('getClient')
+			->willReturn($client);
+		$this->serviceMock->getParameter('synchronizer')
+			->expects(self::once())
+			->method('sync')
+			->willThrowException(MailboxLockedException::from($mailboxA));
+		$client->expects(self::once())->method('logout');
+		$this->serviceMock->getParameter('config')
+			->expects(self::never())
+			->method('setUserValue');
 
 		$this->job->start($this->createMock(JobList::class));
 	}
