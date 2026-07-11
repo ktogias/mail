@@ -12,6 +12,7 @@ namespace OCA\Mail\Tests\Unit\Http\Middleware;
 use ChristophWurst\Nextcloud\Testing\TestCase;
 use Exception;
 use Horde_Imap_Client_Exception;
+use OCA\Mail\Exception\ClientException;
 use OCA\Mail\Exception\NotImplemented;
 use OCA\Mail\Exception\ServiceException;
 use OCA\Mail\Http\Middleware\ErrorMiddleware;
@@ -103,6 +104,41 @@ class ErrorMiddlewareTest extends TestCase {
 
 		$this->assertInstanceOf(JSONResponse::class, $response);
 		$this->assertEquals($expectedStatus, $response->getStatus());
+	}
+
+	/**
+	 * Confirmed live: a recurring 400 ("could not open folder") left no
+	 * server-side trace at all, since ClientException (and its
+	 * subclasses -- MailboxLockedException, MailboxNotCachedException,
+	 * etc.) went straight to a JSON response without ever being logged.
+	 * By the time anyone looked, the underlying condition had cleared and
+	 * there was nothing to diagnose. Warning level, not error: most
+	 * ClientExceptions are routine client input problems, not server
+	 * bugs, but they still need to survive this app's default production
+	 * log level (warning) so a recurrence is actually visible.
+	 */
+	public function testLogsClientExceptionsAsWarnings(): void {
+		$exception = new ClientException('mailbox 168 is not cached');
+		$request = $this->createStub(IRequest::class);
+		$controller = new class($request) extends Controller {
+			public function __construct(IRequest $request) {
+				parent::__construct('myapp', $request);
+			}
+			#[TrapError]
+			public function foo() {
+			}
+		};
+		$this->logger->expects($this->once())
+			->method('warning')
+			->with($exception->getMessage(), [
+				'exception' => $exception,
+			]);
+		$this->logger->expects($this->never())->method('error');
+
+		$response = $this->middleware->afterException($controller, 'foo', $exception);
+
+		$this->assertInstanceOf(JSONResponse::class, $response);
+		$this->assertSame(Http::STATUS_BAD_REQUEST, $response->getStatus());
 	}
 
 	public function testSerializesRecursively() {

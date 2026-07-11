@@ -58,6 +58,19 @@ class ErrorMiddleware extends Middleware {
 		}
 
 		if ($exception instanceof ClientException) {
+			// Confirmed live: a recurring "could not open folder" report
+			// traced to a 400 from this exact branch, but ClientException
+			// was never logged anywhere -- by the time anyone looked, the
+			// underlying condition (whatever threw) had already cleared
+			// and there was no server-side trace of what it actually was.
+			// Warning, not error: most ClientExceptions are routine client
+			// input problems, not server bugs, but they still need to be
+			// visible under this app's default production log level so a
+			// recurrence can actually be diagnosed instead of vanishing
+			// again.
+			$this->logger->warning($exception->getMessage(), [
+				'exception' => $exception,
+			]);
 			return JsonResponse::failWith($exception);
 		}
 
