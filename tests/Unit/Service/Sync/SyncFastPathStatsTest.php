@@ -26,7 +26,7 @@ class SyncFastPathStatsTest extends TestCase {
 
 		$this->memcache = $this->createMock(IMemcache::class);
 		$cacheFactory = $this->createMock(ICacheFactory::class);
-		$cacheFactory->method('createLocal')->willReturn($this->memcache);
+		$cacheFactory->method('createDistributed')->willReturn($this->memcache);
 
 		$this->stats = new SyncFastPathStats($cacheFactory);
 	}
@@ -104,15 +104,15 @@ class SyncFastPathStatsTest extends TestCase {
 	}
 
 	/**
-	 * If APCu somehow isn't actually available and createLocal() falls
-	 * back to a plain ICache without inc(), counting must degrade to a
-	 * best-effort get/set increment instead of throwing -- this is a
-	 * diagnostic counter, not something that should ever break a sync.
+	 * If the distributed cache backend somehow isn't an IMemcache,
+	 * counting must degrade to a best-effort get/set increment instead of
+	 * throwing -- this is a diagnostic counter, not something that should
+	 * ever break a sync.
 	 */
-	public function testFallsBackToGetSetWhenTheLocalCacheIsNotAMemcache(): void {
+	public function testFallsBackToGetSetWhenTheDistributedCacheIsNotAMemcache(): void {
 		$plainCache = $this->createMock(ICache::class);
 		$cacheFactory = $this->createMock(ICacheFactory::class);
-		$cacheFactory->method('createLocal')->willReturn($plainCache);
+		$cacheFactory->method('createDistributed')->willReturn($plainCache);
 		$stats = new SyncFastPathStats($cacheFactory);
 
 		$plainCache->method('get')->with('status_unusable')->willReturn(4);

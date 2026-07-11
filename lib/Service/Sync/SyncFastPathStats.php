@@ -32,7 +32,18 @@ class SyncFastPathStats {
 	private ICache $cache;
 
 	public function __construct(ICacheFactory $cacheFactory) {
-		$this->cache = $cacheFactory->createLocal(self::CACHE_PREFIX);
+		// createDistributed (Redis), not createLocal (APCu): the whole
+		// point of these counters is to be read back later via `occ
+		// mail:sync:fastpath-stats`, which runs under the CLI SAPI --
+		// confirmed live that APCu does NOT persist across separate CLI
+		// process invocations here (apcu_store() in one `php -r` call,
+		// apcu_fetch() in the next, came back false) even with
+		// apc.enable_cli=1, so a local cache would make the occ command
+		// permanently read an empty, disconnected instance regardless of
+		// how much real sync activity the PHP-FPM workers recorded.
+		// Matches Provider.php's own body-search cache, which needed the
+		// same cross-process reach for an unrelated reason.
+		$this->cache = $cacheFactory->createDistributed(self::CACHE_PREFIX);
 	}
 
 	/**
