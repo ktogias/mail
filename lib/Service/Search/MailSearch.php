@@ -16,7 +16,6 @@ use OCA\Mail\Db\Mailbox;
 use OCA\Mail\Db\Message;
 use OCA\Mail\Db\MessageMapper;
 use OCA\Mail\Exception\ClientException;
-use OCA\Mail\Exception\MailboxNotCachedException;
 use OCA\Mail\Exception\ServiceException;
 use OCA\Mail\IMAP\PreviewEnhancer;
 use OCA\Mail\IMAP\Search\Provider as ImapSearchProvider;
@@ -86,10 +85,20 @@ class MailSearch implements IMailSearch {
 		// hasLocks() itself (see Mailbox.php) only stops a *stale* lock
 		// from blocking forever -- it doesn't stop a legitimately fresh
 		// one from unnecessarily blocking a read that never needed it.
-		if (!$mailbox->isCached()) {
-			throw MailboxNotCachedException::from($mailbox);
-		}
-
+		//
+		// The same reasoning applies to isCached() itself, which used to
+		// throw MailboxNotCachedException here and block EVERY read until
+		// the entire mailbox finished its initial sync. Confirmed live: a
+		// 773k-message mailbox needing ~155 batches to finish showed
+		// "Could not open folder" for hours, even though a real (partial)
+		// chunk of it -- everything a batch had already persisted -- sat
+		// right there in the DB, perfectly readable. isCached() still
+		// gates whether SyncService allows a partial-only *sync* (there's
+		// no valid diff token yet, so that guard is legitimate), but a
+		// *read* was never unsafe against a partial cache: findByIds()/
+		// findIdsByQuery() just return however many matching rows
+		// currently exist, same as they would for any other filtered
+		// query that happens to match fewer messages than expected.
 		$query = $this->filterStringParser->parse($filter);
 		if ($cursor !== null) {
 			$query->setCursor($cursor);

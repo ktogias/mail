@@ -14,7 +14,6 @@ use OCA\Mail\Account;
 use OCA\Mail\Db\Mailbox;
 use OCA\Mail\Db\Message;
 use OCA\Mail\Db\MessageMapper;
-use OCA\Mail\Exception\MailboxNotCachedException;
 use OCA\Mail\IMAP\PreviewEnhancer;
 use OCA\Mail\IMAP\Search\Provider;
 use OCA\Mail\Service\Search\FilterStringParser;
@@ -61,14 +60,28 @@ class MailSearchTest extends TestCase {
 		);
 	}
 
-	public function testFindMessagesNotCached() {
-		$account = $this->createStub(Account::class);
+	/**
+	 * Confirmed live: a 773k-message mailbox needing ~155 batches to
+	 * finish its initial sync showed "Could not open folder" for hours,
+	 * even though whatever a batch had already persisted sat right there
+	 * in the DB, perfectly readable. findMessages() only ever reads from
+	 * the local DB (aside from an unrelated body-text-search path), so a
+	 * mailbox that isn't FULLY cached yet must still serve whatever is
+	 * already cached instead of refusing outright.
+	 */
+	public function testFindMessagesServesAPartiallyCachedMailboxInsteadOfThrowing() {
+		$account = $this->createMock(Account::class);
+		$account->expects($this->once())
+			->method('getUserId')
+			->willReturn('admin');
 		$mailbox = new Mailbox();
 		$mailbox->setSyncNewToken('abc');
 		$mailbox->setSyncChangedToken('def');
-		$this->expectException(MailboxNotCachedException::class);
+		// syncVanishedToken deliberately left unset -- isCached() is false,
+		// same shape as a mailbox still mid-initial-sync.
+		$this->assertFalse($mailbox->isCached());
 
-		$this->search->findMessages(
+		$messages = $this->search->findMessages(
 			$account,
 			$mailbox,
 			'DESC',
@@ -78,6 +91,8 @@ class MailSearchTest extends TestCase {
 			null,
 			null
 		);
+
+		$this->assertEmpty($messages);
 	}
 
 	public function testFindMessagesIgnoresLock() {
