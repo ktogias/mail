@@ -1939,6 +1939,21 @@ export default function mainStoreActions() {
 			return handleHttpAuthErrors(async () => {
 				// Change immediately and switch back on error
 				const oldState = envelope.flags.$junk
+				// Confirmed live: marking a message as spam only ever set
+				// this custom $junk/$notjunk IMAP flag -- it never actually
+				// moved the message to the account's junk mailbox (nothing
+				// in this whole call chain ever called moveMessage/the
+				// move-message endpoint, despite comments at every calling
+				// component claiming "our backend implements move as
+				// copy+delete" and describing a delete-event chain that,
+				// traced end to end, only does list-navigation bookkeeping
+				// -- Mailbox.onDelete() fetches one replacement envelope
+				// and navigates the route, nothing else). The optimistic
+				// UI removal made it LOOK like it worked; a refresh
+				// re-fetched the message from its real, unchanged mailbox
+				// and it reappeared. destMailboxId is the actual fix.
+				const destMailboxId = this.junkMoveDestinationMailboxId(envelope)
+
 				this.flagEnvelopeMutation({
 					envelope,
 					flag: '$junk',
@@ -1959,11 +1974,16 @@ export default function mainStoreActions() {
 						$junk: !oldState,
 						$notjunk: oldState,
 					})
+
+					if (destMailboxId !== null) {
+						await moveMessage(envelope.databaseId, destMailboxId)
+						this.removeMessageMutation({ id: envelope.databaseId })
+					}
 				} catch (error) {
 					logger.error('could not toggle message junk state', { error })
 
 					if (removeEnvelope) {
-						this.addEnvelopesMutation([envelope])
+						this.addEnvelopesMutation({ envelopes: [envelope] })
 					}
 
 					// Revert change
@@ -2560,25 +2580,37 @@ export default function mainStoreActions() {
 		 * @param {object} envelope envelope object@
 		 * @return {boolean}
 		 */
-		async moveEnvelopeToJunk(envelope) {
-			this.setInteractionPriorityMutation()
+		// Shared by moveEnvelopeToJunk() (below, a "should the UI treat
+		// this as leaving the current view" boolean used by several
+		// components to decide whether to fire their own 'delete' event
+		// for navigation bookkeeping) and toggleEnvelopeJunk() (which
+		// actually performs the move) so both agree on the same
+		// destination without computing it twice.
+		//
+		// Returns the real destination mailbox id, or null if there's
+		// nowhere to move the message (no junk mailbox configured, no
+		// inbox found, or it's already exactly where it should be).
+		junkMoveDestinationMailboxId(envelope) {
 			const account = this.getAccount(envelope.accountId)
-			if (account.junkMailboxId === null) {
-				return false
+			if (!account || account.junkMailboxId === null) {
+				return null
 			}
 
 			if (!envelope.flags.$junk) {
-				// move message to junk
-				return envelope.mailboxId !== account.junkMailboxId
+				// marking as spam: move to the junk mailbox
+				return envelope.mailboxId !== account.junkMailboxId ? account.junkMailboxId : null
 			}
 
+			// un-marking: move back to the inbox
 			const inbox = this.getInbox(account.id)
 			if (inbox === undefined) {
-				return false
+				return null
 			}
-
-			// move message to inbox
-			return envelope.mailboxId !== inbox.databaseId
+			return envelope.mailboxId !== inbox.databaseId ? inbox.databaseId : null
+		},
+		async moveEnvelopeToJunk(envelope) {
+			this.setInteractionPriorityMutation()
+			return this.junkMoveDestinationMailboxId(envelope) !== null
 		},
 		async createAndSetSnoozeMailbox(account) {
 			const name = 'Snoozed'

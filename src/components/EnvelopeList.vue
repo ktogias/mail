@@ -431,26 +431,43 @@ export default {
 		},
 
 		async markSelectionJunk() {
-			for (const envelope of this.selectedEnvelopes) {
-				if (!envelope.flags.$junk) {
+			// Parallel, not a sequential for-of loop: a sequential loop
+			// updates the store (and the selection count the action
+			// button's own label reads) after EACH item resolves, so a
+			// bulk action on N messages visibly processed one at a time
+			// -- the button label counted down mid-operation, looking
+			// like the action had stalled and needed a second click to
+			// pick up the rest. Same pattern deleteAllSelected() already
+			// uses below: one Promise.all, one error surfaced if any
+			// item failed, one atomic-looking UI transition.
+			await Promise.all(this.selectedEnvelopes
+				.filter((envelope) => !envelope.flags.$junk)
+				.map(async (envelope) => {
 					await this.mainStore.toggleEnvelopeJunk({
 						envelope,
 						removeEnvelope: await this.mainStore.moveEnvelopeToJunk(envelope),
 					})
-				}
-			}
+				}))
+				.catch((error) => {
+					logger.error('could not mark selection as spam', { error })
+					showError(t('mail', 'Could not mark messages as spam'))
+				})
 			this.unselectAll()
 		},
 
 		async markSelectionNotJunk() {
-			for (const envelope of this.selectedEnvelopes) {
-				if (envelope.flags.$junk) {
+			await Promise.all(this.selectedEnvelopes
+				.filter((envelope) => envelope.flags.$junk)
+				.map(async (envelope) => {
 					await this.mainStore.toggleEnvelopeJunk({
 						envelope,
 						removeEnvelope: await this.mainStore.moveEnvelopeToJunk(envelope),
 					})
-				}
-			}
+				}))
+				.catch((error) => {
+					logger.error('could not mark selection as not spam', { error })
+					showError(t('mail', 'Could not mark messages as not spam'))
+				})
 			this.unselectAll()
 		},
 

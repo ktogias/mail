@@ -1220,16 +1220,25 @@ export default {
 				}
 
 				/**
-				 * moveEnvelopeToJunk returns true if the envelope should be moved to a different mailbox.
+				 * moveEnvelopeToJunk() returns true if the envelope should
+				 * be moved to a different mailbox -- it does NOT perform
+				 * the move itself (a previous version of this comment
+				 * claimed the 'delete' event bubbling to Mailbox.onDelete
+				 * was "the actual implementation"; traced end to end,
+				 * Mailbox.onDelete only fetches one replacement envelope
+				 * and navigates the route -- it never called any move/
+				 * delete endpoint. Confirmed live: marking messages as
+				 * spam never actually moved them, they reappeared after
+				 * every refresh). toggleEnvelopeJunk() below now performs
+				 * the real move via moveMessage().
 				 *
-				 * Our backend (MessageMapper.move) implemented move as copy and delete.
-				 * The message is copied to another mailbox and gets a new UID; the message in the current folder is deleted.
-				 *
-				 * Trigger the delete event here to open the next envelope and remove the current envelope from the list.
-				 * The delete event bubbles up to Mailbox.onDelete to the actual implementation.
-				 *
-				 * In Mailbox.onDelete, fetchNextEnvelopes requires the current envelope to find the next envelope.
-				 * Therefore, it must run before removing the envelope.
+				 * This event is fired only for the list-navigation
+				 * bookkeeping in Mailbox.onDelete (fetch a replacement
+				 * envelope, jump to the next/previous message if this one
+				 * was open) -- it must run before toggleEnvelopeJunk()
+				 * removes the envelope from the store below, since
+				 * Mailbox.onDelete's fetchNextEnvelopes() needs to find
+				 * this envelope still present to locate its neighbour.
 				 */
 
 				if (removeEnvelope) {

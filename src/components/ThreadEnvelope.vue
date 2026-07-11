@@ -1008,8 +1008,20 @@ export default {
 			this.mainStore.toggleEnvelopeFlagged(this.envelope)
 		},
 
-		onToggleJunk() {
-			this.mainStore.toggleEnvelopeJunk(this.envelope)
+		async onToggleJunk() {
+			// Was passing this.envelope directly as toggleEnvelopeJunk()'s
+			// single {envelope, removeEnvelope} argument -- destructuring
+			// `envelope` off an envelope object (not a wrapper) gave
+			// undefined, so `envelope.flags.$junk` threw immediately on
+			// every click. This action is only ever shown for an
+			// already-junk message (v-if="envelope.flags.$junk" on the
+			// icon), so removeEnvelope must be computed the same way
+			// every other junk-toggle entry point does.
+			const removeEnvelope = await this.mainStore.moveEnvelopeToJunk(this.envelope)
+			await this.mainStore.toggleEnvelopeJunk({
+				envelope: this.envelope,
+				removeEnvelope,
+			})
 		},
 
 		onToggleSeen() {

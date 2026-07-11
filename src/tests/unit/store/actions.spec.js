@@ -2892,6 +2892,121 @@ describe('Vuex store actions', () => {
 		expect(removeEnvelope).toBeFalsy()
 	})
 
+	describe('toggleEnvelopeJunk actually moves the message, not just flips a flag', () => {
+		// Confirmed live: marking a message as spam only ever called
+		// setEnvelopeFlags($junk/$notjunk) -- nothing in the whole call
+		// chain (across Envelope.vue, MenuEnvelope.vue, EnvelopeList.vue,
+		// ThreadEnvelope.vue) ever called the move-message endpoint,
+		// despite comments at every calling component claiming a
+		// 'delete' event bubbling to Mailbox.onDelete was "the actual
+		// implementation" -- traced end to end, that chain only does
+		// list-navigation bookkeeping (fetch one replacement envelope,
+		// jump to the next message). The optimistic UI removal made it
+		// LOOK like it worked; the message was still sitting, unmoved,
+		// in its original mailbox, and reappeared on the next refresh.
+		// Verified directly against the live database (mailbox_id
+		// unchanged after "marking as spam") before this fix.
+		let account
+		let junkMailbox
+		let inbox
+
+		beforeEach(() => {
+			account = { id: 42, junkMailboxId: 10 }
+			store.addAccountMutation(account)
+			inbox = { databaseId: 1, specialRole: 'inbox', name: 'INBOX' }
+			junkMailbox = { databaseId: 10, name: 'Junk' }
+			store.addMailboxMutation({ account, mailbox: inbox })
+			store.addMailboxMutation({ account, mailbox: junkMailbox })
+		})
+
+		function envelopeInInbox(overrides = {}) {
+			return {
+				databaseId: 900,
+				accountId: 42,
+				mailboxId: 1,
+				dateInt: 900,
+				flags: { $junk: false, $notjunk: false, seen: true },
+				...overrides,
+			}
+		}
+
+		it('marking as spam actually calls moveMessage to the account\'s junk mailbox', async () => {
+			MessageService.setEnvelopeFlags.mockResolvedValue({})
+			MessageService.moveMessage.mockResolvedValue({})
+			const envelope = envelopeInInbox()
+
+			await store.toggleEnvelopeJunk({ envelope, removeEnvelope: true })
+
+			expect(MessageService.moveMessage).toHaveBeenCalledWith(900, 10)
+		})
+
+		it('un-marking as spam moves the message back to the inbox', async () => {
+			MessageService.setEnvelopeFlags.mockResolvedValue({})
+			MessageService.moveMessage.mockResolvedValue({})
+			const envelope = envelopeInInbox({ mailboxId: 10, flags: { $junk: true, $notjunk: false, seen: true } })
+
+			await store.toggleEnvelopeJunk({ envelope, removeEnvelope: true })
+
+			expect(MessageService.moveMessage).toHaveBeenCalledWith(900, 1)
+		})
+
+		it('does not call moveMessage when there is no junk mailbox configured', async () => {
+			store.addAccountMutation({ id: 43, junkMailboxId: null })
+			MessageService.setEnvelopeFlags.mockResolvedValue({})
+			const envelope = envelopeInInbox({ accountId: 43 })
+
+			await store.toggleEnvelopeJunk({ envelope, removeEnvelope: false })
+
+			expect(MessageService.moveMessage).not.toHaveBeenCalled()
+		})
+
+		it('does not call moveMessage when the message is already in the destination mailbox', async () => {
+			MessageService.setEnvelopeFlags.mockResolvedValue({})
+			// Not (yet) flagged $junk, but already sitting in the
+			// account's junk mailbox for some other reason -- nothing to
+			// move to, since it's already there.
+			const envelope = envelopeInInbox({ mailboxId: 10, flags: { $junk: false, $notjunk: false, seen: true } })
+
+			await store.toggleEnvelopeJunk({ envelope, removeEnvelope: false })
+
+			expect(MessageService.moveMessage).not.toHaveBeenCalled()
+		})
+
+		it('reverts flags AND re-adds the envelope when the flag request itself fails', async () => {
+			MessageService.setEnvelopeFlags.mockRejectedValue(new Error('network error'))
+			const envelope = envelopeInInbox()
+
+			await expect(store.toggleEnvelopeJunk({ envelope, removeEnvelope: true })).rejects.toThrow('network error')
+
+			expect(envelope.flags.$junk).toBe(false)
+			expect(MessageService.moveMessage).not.toHaveBeenCalled()
+		})
+
+		it('reverts flags and re-adds the envelope when the move itself fails, after flags succeeded', async () => {
+			// Regression: the old revert called addEnvelopesMutation([envelope])
+			// -- an ARRAY where the mutation destructures {envelopes, ...}
+			// from a single object -- which threw and skipped the flag
+			// revert entirely, since the throw happened before reaching it.
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			MessageService.setEnvelopeFlags.mockResolvedValue({})
+			MessageService.moveMessage.mockRejectedValue(new Error('move failed'))
+			const envelope = envelopeInInbox()
+			store.envelopes[envelope.databaseId] = envelope
+
+			await expect(store.toggleEnvelopeJunk({ envelope, removeEnvelope: true })).rejects.toThrow('move failed')
+
+			// The flag revert must actually run (not be skipped by an
+			// earlier crash in the re-add step) -- back to the original
+			// $junk=false/$notjunk=true, not left at the optimistic
+			// $junk=true/$notjunk=false the failed move never earned.
+			expect(envelope.flags.$junk).toBe(false)
+			expect(envelope.flags.$notjunk).toBe(true)
+			// The re-add itself must not have thrown and swallowed the
+			// real error.
+			expect(store.envelopes[envelope.databaseId]).toBeDefined()
+		})
+	})
+
 	it('includes a cache buster if requested', async () => {
 		const account = {
 			id: 13,
