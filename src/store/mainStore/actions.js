@@ -3078,11 +3078,29 @@ export default function mainStoreActions() {
 		// speculatively), and only the envelope's own mailbox plus
 		// whichever unified-account mailboxes share its specialRole --
 		// the same scope the existing cross-post above already uses.
+		//
+		// Every loaded list key is checked, not just the four bare forms
+		// (is:starred/not:starred/is:pi-important/is:pi-other) -- "sort
+		// favorites separately" makes MailboxThread.vue load COMPOUND keys
+		// instead, e.g. "not:starred is:pi-other" (see its
+		// appendToSearch()/created()): confirmed live, new mail landed in
+		// the bare is:pi-other list correctly, but the priority inbox
+		// (which was actually displaying the compound-keyed list) never
+		// saw it until a full page reload re-fetched under that exact
+		// compound key. A list is only reclassified if EVERY one of its
+		// space-separated tokens is something this store can verify
+		// locally from the envelope's own flags; a list mixing in a token
+		// it can't evaluate locally (subject:/body:/from:/etc.) is left
+		// alone, since silently guessing at an arbitrary search predicate
+		// would be worse than leaving it stale until its own real query.
 		reclassifyFlagBucketsMutation({ envelope, sourceMailbox, includeUnified = true, excludeListId = null }) {
-			const pairs = [
-				{ flag: 'flagged', matchQuery: 'is:starred', otherQuery: 'not:starred', inboxOnly: false },
-				{ flag: 'important', matchQuery: priorityImportantQuery, otherQuery: priorityOtherQuery, inboxOnly: true },
-			]
+			const knownTokenPredicates = {
+				'is:starred': (flags) => flags?.flagged === true,
+				'not:starred': (flags) => flags?.flagged !== true,
+				[priorityImportantQuery]: (flags) => flags?.important === true,
+				[priorityOtherQuery]: (flags) => flags?.important !== true,
+			}
+			const inboxOnlyTokens = new Set([priorityImportantQuery, priorityOtherQuery])
 			const orderByDateInt = orderBy((id) => this.envelopes[id]?.dateInt ?? 0, this.preferences['sort-order'] === 'newest' ? 'desc' : 'asc')
 
 			const targetMailboxes = [sourceMailbox]
@@ -3095,30 +3113,25 @@ export default function mainStoreActions() {
 			}
 
 			for (const mailbox of targetMailboxes) {
-				for (const pair of pairs) {
-					if (pair.inboxOnly && sourceMailbox.specialRole !== 'inbox') {
+				for (const listId of Object.keys(mailbox.envelopeLists)) {
+					if (listId === '' || listId === excludeListId) {
 						continue
 					}
-					const matches = envelope.flags?.[pair.flag] === true
-					const matchListId = normalizedEnvelopeListId(pair.matchQuery)
-					const otherListId = normalizedEnvelopeListId(pair.otherQuery)
-					const move = (listId, shouldContain) => {
-						if (listId === excludeListId) {
-							return
-						}
-						const list = mailbox.envelopeLists[listId]
-						if (list === undefined) {
-							return
-						}
-						const withoutSelf = list.filter((id) => id !== envelope.databaseId && this.envelopes[id] !== undefined)
-						Vue.set(
-							mailbox.envelopeLists,
-							listId,
-							shouldContain ? uniq(orderByDateInt(withoutSelf.concat([envelope.databaseId]))) : withoutSelf,
-						)
+					const tokens = listId.split(' ').filter(Boolean)
+					if (!tokens.every((token) => token in knownTokenPredicates)) {
+						continue
 					}
-					move(matchListId, matches)
-					move(otherListId, !matches)
+					if (tokens.some((token) => inboxOnlyTokens.has(token)) && sourceMailbox.specialRole !== 'inbox') {
+						continue
+					}
+					const list = mailbox.envelopeLists[listId]
+					const shouldContain = tokens.every((token) => knownTokenPredicates[token](envelope.flags))
+					const withoutSelf = list.filter((id) => id !== envelope.databaseId && this.envelopes[id] !== undefined)
+					Vue.set(
+						mailbox.envelopeLists,
+						listId,
+						shouldContain ? uniq(orderByDateInt(withoutSelf.concat([envelope.databaseId]))) : withoutSelf,
+					)
 				}
 			}
 		},

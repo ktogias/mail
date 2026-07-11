@@ -727,6 +727,71 @@ describe('Vuex store actions', () => {
 			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-important']).toEqual([74])
 			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-other']).toEqual([])
 		})
+
+		// Reported live: priority inbox showed 3 unread instead of 3+5 --
+		// the missing 5 belonged to an account with "sort favorites
+		// separately" enabled, which makes MailboxThread.vue load COMPOUND
+		// list keys ("not:starred is:pi-other") instead of the bare form
+		// (see its appendToSearch()/created()). New mail landed correctly
+		// in the bare "is:pi-other" list, but nothing was watching that
+		// list -- the priority inbox was displaying the compound-keyed
+		// one, which only got refreshed by a full page reload re-fetching
+		// under that exact compound key.
+		it('a new not-important message is added to a loaded COMPOUND "not:starred is:pi-other" bucket', () => {
+			store.mailboxes[11].envelopeLists['not:starred is:pi-other'] = []
+
+			store.addEnvelopesMutation({
+				query: '',
+				envelopes: [{ databaseId: 90, mailboxId: 11, dateInt: 90, flags: { seen: false, flagged: false, important: false } }],
+			})
+
+			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-other']).toEqual([90])
+		})
+
+		it('a new important, unstarred message is added to a loaded COMPOUND "not:starred is:pi-important" bucket', () => {
+			store.mailboxes[11].envelopeLists['not:starred is:pi-important'] = []
+
+			store.addEnvelopesMutation({
+				query: '',
+				envelopes: [{ databaseId: 91, mailboxId: 11, dateInt: 91, flags: { seen: false, flagged: false, important: true } }],
+			})
+
+			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-important']).toEqual([91])
+		})
+
+		it('a new STARRED, not-important message is NOT added to "not:starred is:pi-other" (conjunction, not just the last token)', () => {
+			store.mailboxes[11].envelopeLists['not:starred is:pi-other'] = []
+
+			store.addEnvelopesMutation({
+				query: '',
+				envelopes: [{ databaseId: 92, mailboxId: 11, dateInt: 92, flags: { seen: false, flagged: true, important: false } }],
+			})
+
+			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-other']).toEqual([])
+		})
+
+		it('a compound bucket that mixes in a token this store cannot evaluate locally (subject:) is left untouched', () => {
+			store.mailboxes[11].envelopeLists['subject:foo is:pi-other'] = [999]
+
+			store.addEnvelopesMutation({
+				query: '',
+				envelopes: [{ databaseId: 93, mailboxId: 11, dateInt: 93, flags: { seen: false, flagged: false, important: false } }],
+			})
+
+			expect(store.mailboxes[11].envelopeLists['subject:foo is:pi-other']).toEqual([999])
+		})
+
+		it('a flag flip moves a message between compound buckets, same as the bare-key case', () => {
+			seedKnownEnvelope(94, false)
+			store.mailboxes[11].envelopeLists['not:starred is:pi-other'] = [94]
+			store.mailboxes[11].envelopeLists['not:starred is:pi-important'] = []
+			store.envelopes[94].flags.important = false
+
+			store.updateEnvelopeMutation({ envelope: { databaseId: 94, mailboxId: 11, flags: { flagged: false, important: true } } })
+
+			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-other']).toEqual([])
+			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-important']).toEqual([94])
+		})
 	})
 
 	describe('removeEnvelopeMutation distinguishes a real deletion from a filtered bucket no longer matching', () => {
