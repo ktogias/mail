@@ -68,11 +68,20 @@ class BackfillJob extends TimedJob {
 		parent::__construct($time);
 
 		$this->setInterval(self::INTERVAL);
-		// This work has no one waiting on it -- unlike SyncJob (a user
-		// just opened the app and expects to see new mail), delaying a
-		// backfill tick under load costs nothing but a little more time
-		// to finish, which is the entire point.
-		$this->setTimeSensitivity(self::TIME_INSENSITIVE);
+		// Deliberately TIME_SENSITIVE, not TIME_INSENSITIVE, even though
+		// this work has no one waiting on it. Confirmed against
+		// \OC\Core\Service\CronService::runCli(): TIME_INSENSITIVE isn't
+		// just "lower priority" -- outside a configured
+		// maintenance_window_start (3-7am UTC on this install),
+		// getNext(onlyTimeSensitive: true) skips TIME_INSENSITIVE jobs
+		// ENTIRELY, no matter how long their own interval has elapsed.
+		// That would have limited this job to a ~4-hour nightly window
+		// (turning a several-week backfill into several months) for a box
+		// that's often in active use around the clock. INTERVAL (45 min)
+		// and isServerBusy() already bound the actual load this job adds
+		// per tick; TIME_SENSITIVE just means those ticks aren't also
+		// confined to nighttime.
+		$this->setTimeSensitivity(self::TIME_SENSITIVE);
 	}
 
 	#[\Override]
