@@ -184,7 +184,10 @@ class AccountServiceTest extends TestCase {
 
 		$this->jobList->method('has')
 			->willReturn(false);
-		$this->jobList->expects($this->exactly(6))
+		// 7 jobs total: SyncJob, TrainImportanceClassifierJob,
+		// PreviewEnhancementProcessingJob, QuotaJob, ScheduleJob,
+		// BackfillJob, RepairSyncJob.
+		$this->jobList->expects($this->exactly(7))
 			->method('scheduleAfter');
 
 		$actual = $this->accountService->save($mailAccount);
@@ -339,7 +342,11 @@ class AccountServiceTest extends TestCase {
 			->willReturn(1755850409);
 		$this->jobList->method('has')
 			->willReturnCallback(fn ($job) => $job === SyncJob::class || $job === QuotaJob::class);
-		$this->jobList->expects($this->exactly(4))
+		// 7 jobs total (SyncJob, TrainImportanceClassifierJob,
+		// PreviewEnhancementProcessingJob, QuotaJob, ScheduleJob,
+		// BackfillJob, RepairSyncJob), minus the 2 the mock reports as
+		// already scheduled (SyncJob, QuotaJob) = 5.
+		$this->jobList->expects($this->exactly(5))
 			->method('scheduleAfter');
 
 		$this->accountService->scheduleBackgroundJobs($mailAccountId);
