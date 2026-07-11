@@ -342,12 +342,14 @@ class ImapToDbSynchronizer {
 		$noCacheClient = $this->clientFactory->getClient($account, false);
 		try {
 			$highestKnownUid = $this->dbMapper->findHighestUid($mailbox);
+			$lowestKnownUid = $this->dbMapper->findLowestUid($mailbox);
 			try {
 				$imapMessages = $this->imapMapper->findAll(
 					$noCacheClient,
 					$mailbox->getName(),
 					self::MAX_NEW_MESSAGES,
 					$highestKnownUid ?? 0,
+					$lowestKnownUid ?? 0,
 					$logger,
 					$perf,
 					$account->getUserId(),

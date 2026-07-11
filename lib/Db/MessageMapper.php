@@ -106,6 +106,23 @@ class MessageMapper extends QBMapper {
 		return $max;
 	}
 
+	public function findLowestUid(Mailbox $mailbox): ?int {
+		$query = $this->db->getQueryBuilder();
+
+		$query->select($query->func()->min('uid'))
+			->from($this->getTableName())
+			->where($query->expr()->eq('mailbox_id', $query->createNamedParameter($mailbox->getId(), IQueryBuilder::PARAM_INT), IQueryBuilder::PARAM_INT));
+
+		$result = $query->executeQuery();
+		$min = (int)$result->fetchColumn();
+		$result->closeCursor();
+
+		if ($min === 0) {
+			return null;
+		}
+		return $min;
+	}
+
 	public function findByUserId(string $userId, int $id): Message {
 		$query = $this->db->getQueryBuilder();
 

@@ -96,6 +96,7 @@ class MessageMapper {
 		string $mailbox,
 		int $maxResults,
 		int $highestKnownUid,
+		int $lowestKnownUid,
 		LoggerInterface $logger,
 		PerformanceLoggerTask $perf,
 		string $userId): array {
@@ -107,6 +108,18 @@ class MessageMapper {
 		 * equally and build a page to fetch.
 		 *
 		 * This logic might return fewer or more results than $maxResults
+		 *
+		 * Two independent cursors, not one: $highestKnownUid grows upward to
+		 * absorb genuinely new mail, $lowestKnownUid shrinks downward to
+		 * backfill older history. A newest-first initial sync means the very
+		 * first call establishes an anchor at the top of the mailbox (both
+		 * cursors start at 0, "nothing known yet") -- from there, catching up
+		 * on anything newer than that anchor always takes priority over
+		 * continuing the backfill, so mail arriving while a huge mailbox is
+		 * still mid-backfill is never stuck behind however much history is
+		 * left (a pure oldest-to-newest-then-flip design would leave it
+		 * invisible until the entire backfill finished, which can take
+		 * hours on a mailbox with hundreds of thousands of messages).
 		 */
 
 		$metaResults = $client->search(
@@ -152,17 +165,38 @@ class MessageMapper {
 		// +1 is added to fetch all messages with the rare case of strictly
 		// continuous UIDs and fractions
 		$estimatedPageSize = (int)((float)($totalRange / $total) * $maxResults) + 1;
-		// Determine min UID to fetch, but don't exceed the known maximum
-		$lower = max(
-			$min,
-			$highestKnownUid + 1
-		);
-		// Determine max UID to fetch, but don't exceed the known maximum
-		$upper = min(
-			$max,
-			$lower + $estimatedPageSize,
-			$lower + 1_000_000, // Somewhat sensible number of UIDs that fit into memory (Horde_Imap_ClientId bloat)
-		);
+
+		// $highestKnownUid === 0 means "no anchor established yet" (the
+		// very first call ever) -- there's nothing to catch up ON above an
+		// anchor that doesn't exist, so that always falls through to the
+		// backfill branch below, which treats a zero $lowestKnownUid the
+		// same way and starts at the top instead of the bottom.
+		$catchingUp = $highestKnownUid !== 0 && $highestKnownUid < $max;
+		if ($catchingUp) {
+			$lower = max($min, $highestKnownUid + 1);
+			$upper = min(
+				$max,
+				$lower + $estimatedPageSize,
+				$lower + 1_000_000, // Somewhat sensible number of UIDs that fit into memory (Horde_Imap_ClientId bloat)
+			);
+		} elseif ($lowestKnownUid === 0 || $lowestKnownUid > $min) {
+			$upper = $lowestKnownUid === 0 ? $max : min($max, $lowestKnownUid - 1);
+			$lower = max(
+				$min,
+				$upper - $estimatedPageSize,
+				$upper - 1_000_000, // Somewhat sensible number of UIDs that fit into memory (Horde_Imap_ClientId bloat)
+			);
+		} else {
+			// An anchor is established, nothing new sits above it, and the
+			// backfill already reached the bottom: truly nothing left in
+			// either direction.
+			$perf->step('Nothing left to fetch in either direction');
+			return [
+				'messages' => [],
+				'all' => true,
+				'total' => 0,
+			];
+		}
 		if ($lower > $upper) {
 			$logger->debug("Range for findAll did not find any (not already known) messages and all messages of mailbox $mailbox have been fetched.");
 			return [
@@ -174,17 +208,25 @@ class MessageMapper {
 
 		$idsToFetch = new Horde_Imap_Client_Ids("$lower:$upper");
 		$actualPageSize = $this->getPageSize($client, $mailbox, $idsToFetch);
-		$logger->debug("Built range for findAll: min=$min max=$max total=$total totalRange=$totalRange estimatedPageSize=$estimatedPageSize actualPageSize=$actualPageSize lower=$lower upper=$upper highestKnownUid=$highestKnownUid");
+		$logger->debug("Built range for findAll: min=$min max=$max total=$total totalRange=$totalRange estimatedPageSize=$estimatedPageSize actualPageSize=$actualPageSize lower=$lower upper=$upper highestKnownUid=$highestKnownUid lowestKnownUid=$lowestKnownUid catchingUp=" . ($catchingUp ? 'true' : 'false'));
 		while ($actualPageSize > $maxResults) {
 			$logger->debug("Range for findAll matches too many messages: min=$min max=$max total=$total estimatedPageSize=$estimatedPageSize actualPageSize=$actualPageSize");
 
 			$estimatedPageSize = (int)($estimatedPageSize / 2.0);
 
-			$upper = min(
-				$max,
-				$lower + $estimatedPageSize,
-				$lower + 1_000_000, // Somewhat sensible number of UIDs that fit into memory (Horde_Imap_ClientId bloat)
-			);
+			if ($catchingUp) {
+				$upper = min(
+					$max,
+					$lower + $estimatedPageSize,
+					$lower + 1_000_000, // Somewhat sensible number of UIDs that fit into memory (Horde_Imap_ClientId bloat)
+				);
+			} else {
+				$lower = max(
+					$min,
+					$upper - $estimatedPageSize,
+					$upper - 1_000_000, // Somewhat sensible number of UIDs that fit into memory (Horde_Imap_ClientId bloat)
+				);
+			}
 			$idsToFetch = new Horde_Imap_Client_Ids("$lower:$upper");
 			$actualPageSize = $this->getPageSize($client, $mailbox, $idsToFetch);
 		}
@@ -205,14 +247,16 @@ class MessageMapper {
 			 * This means we should try again until there is a
 			 * page that actually returns at least one message
 			 *
-			 * We take $upper as the lowest known UID as we just found out that
-			 * there is nothing to fetch in $highestKnownUid:$upper
+			 * We move the relevant cursor to the edge of the empty range we
+			 * just found out about, so a retry doesn't re-check it.
 			 */
 			$logger->debug('Range for findAll did not find any messages. Trying again with a succeeding range');
 			// Clean up some unused variables before recursion
 			unset($fetchResult, $idsToFetch, $query);
 			$perf->step('free memory before recursion');
-			return $this->findAll($client, $mailbox, $maxResults, $upper, $logger, $perf, $userId);
+			return $catchingUp
+				? $this->findAll($client, $mailbox, $maxResults, $upper, $lowestKnownUid, $logger, $perf, $userId)
+				: $this->findAll($client, $mailbox, $maxResults, $highestKnownUid, $upper, $logger, $perf, $userId);
 		}
 		$uidCandidates = array_filter(
 			array_map(
@@ -220,20 +264,38 @@ class MessageMapper {
 				iterator_to_array($fetchResult)
 			),
 
-			static fn (int $uid)
+			$catchingUp
 				// Don't load the ones we already know
-				=> $uid > $highestKnownUid
+				? static fn (int $uid) => $uid > $highestKnownUid
+				: static fn (int $uid) => $lowestKnownUid === 0 || $uid < $lowestKnownUid
 		);
-		$uidsToFetch = array_slice(
-			$uidCandidates,
-			0,
-			$maxResults
-		);
+		// Catching up keeps the LOWEST candidates first (closest to the
+		// established anchor, growing it upward one hop at a time);
+		// backfilling keeps the HIGHEST candidates first (closest to the
+		// established anchor from below, shrinking it downward one hop at
+		// a time) -- both mean "the end of this batch closest to what's
+		// already known" when a range turns out to be more packed than
+		// estimated.
+		$uidsToFetch = $catchingUp
+			? array_slice($uidCandidates, 0, $maxResults)
+			: array_slice($uidCandidates, -$maxResults);
 		$perf->step('calculate UIDs to fetch');
-		$highestUidToFetch = $uidsToFetch[count($uidsToFetch) - 1];
-		$logger->debug(sprintf("Range for findAll min=$min max=$max found %d messages, %d left after filtering. Highest UID to fetch is %d", count($uidCandidates), count($uidsToFetch), $highestUidToFetch));
+		$reachedUid = $catchingUp
+			? $uidsToFetch[count($uidsToFetch) - 1]
+			: $uidsToFetch[0];
+		$logger->debug(sprintf("Range for findAll min=$min max=$max found %d messages, %d left after filtering. %s UID reached is %d", count($uidCandidates), count($uidsToFetch), $catchingUp ? 'Highest' : 'Lowest', $reachedUid));
 		$fetchRange = min($uidsToFetch) . ':' . max($uidsToFetch);
-		if ($highestUidToFetch === $max) {
+		// Done in THIS call's direction is not the same as done overall --
+		// catching up can finish while a backfill still has history left
+		// below it (or hasn't started at all yet), and reaching the very
+		// bottom while backfilling only means overall-done because
+		// entering that branch at all already required catch-up to have
+		// been satisfied first.
+		$doneInThisDirection = $catchingUp ? ($reachedUid === $max) : ($reachedUid === $min);
+		$doneOverall = $catchingUp
+			? ($doneInThisDirection && $lowestKnownUid !== 0 && $lowestKnownUid <= $min)
+			: $doneInThisDirection;
+		if ($doneOverall) {
 			$logger->debug("All messages of mailbox $mailbox have been fetched");
 		} else {
 			$logger->debug("Mailbox $mailbox has more messages to fetch: $fetchRange");
@@ -247,7 +309,7 @@ class MessageMapper {
 		$perf->step('find IMAP messages by UID');
 		return [
 			'messages' => $messages,
-			'all' => $highestUidToFetch === $max,
+			'all' => $doneOverall,
 			'total' => $total,
 		];
 	}

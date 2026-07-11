@@ -275,6 +275,7 @@ class MessageMapperTest extends TestCase {
 			$mailbox,
 			5000,
 			0,
+			0,
 			$this->createMock(LoggerInterface::class),
 			$this->createMock(PerformanceLoggerTask::class),
 			'user'
@@ -290,6 +291,13 @@ class MessageMapperTest extends TestCase {
 		);
 	}
 
+	/**
+	 * A virgin mailbox small enough to fit in a single batch: the whole
+	 * range gets fetched in one go regardless of direction, so this
+	 * doesn't distinguish newest-first from oldest-first -- see
+	 * testFindAllStartsAtTheTopOnAVirginMailboxTooLargeForOneBatch below
+	 * for that.
+	 */
 	public function testFindAllNoKnownUid(): void {
 		/** @var Horde_Imap_Client_Socket|MockObject $client */
 		$client = $this->createMock(Horde_Imap_Client_Socket::class);
@@ -365,6 +373,7 @@ class MessageMapperTest extends TestCase {
 			$mailbox,
 			5000,
 			0,
+			0,
 			$this->createMock(LoggerInterface::class),
 			$this->createMock(PerformanceLoggerTask::class),
 			'user'
@@ -373,7 +382,14 @@ class MessageMapperTest extends TestCase {
 		self::assertTrue($result['all']);
 	}
 
-	public function testFindAllWithKnownUid(): void {
+	/**
+	 * highestKnownUid=300 is below max=321: an anchor was already
+	 * established by a prior backfill run and there's new mail above it
+	 * to catch up on. lowestKnownUid=123 (=== min) means the backfill
+	 * side already reached the very bottom, so finishing this catch-up
+	 * finishes the mailbox overall, in both directions.
+	 */
+	public function testFindAllCatchesUpOnNewMailAndFinishesOverall(): void {
 		/** @var Horde_Imap_Client_Socket|MockObject $client */
 		$client = $this->createMock(Horde_Imap_Client_Socket::class);
 		$mailbox = 'inbox';
@@ -448,12 +464,65 @@ class MessageMapperTest extends TestCase {
 			$mailbox,
 			5000,
 			300,
+			123,
 			$this->createMock(LoggerInterface::class),
 			$this->createMock(PerformanceLoggerTask::class),
 			'user'
 		);
 
 		self::assertTrue($result['all']);
+	}
+
+	/**
+	 * Same catch-up scenario, but lowestKnownUid=200 (> min=123) means the
+	 * backfill hasn't reached the bottom yet -- finishing the catch-up
+	 * must NOT be reported as fully done overall, since there's still
+	 * older history left to backfill.
+	 */
+	public function testFindAllCatchUpAloneDoesNotFinishIfBackfillIncomplete(): void {
+		/** @var Horde_Imap_Client_Socket|MockObject $client */
+		$client = $this->createMock(Horde_Imap_Client_Socket::class);
+		$mailbox = 'inbox';
+		$rangeSearchQuery = new Horde_Imap_Client_Search_Query();
+		$rangeSearchQuery->ids(new Horde_Imap_Client_Ids('301:321'));
+		$client->method('search')
+			->willReturnOnConsecutiveCalls(
+				[
+					'min' => 123,
+					'max' => 321,
+					'count' => 50,
+				],
+				[
+					'count' => 50,
+				],
+			);
+		$query = new Horde_Imap_Client_Fetch_Query();
+		$query->uid();
+		$uidResults = new Horde_Imap_Client_Fetch_Results();
+		foreach (range(123, 321) as $i) {
+			$uid = new Horde_Imap_Client_Data_Fetch();
+			$uid->setUid($i);
+			$uidResults[$i] = $uid;
+		}
+		$bodyResults = new Horde_Imap_Client_Fetch_Results();
+		$client->method('fetch')
+			->willReturnOnConsecutiveCalls(
+				$uidResults,
+				$bodyResults
+			);
+
+		$result = $this->mapper->findAll(
+			$client,
+			$mailbox,
+			5000,
+			300,
+			200,
+			$this->createMock(LoggerInterface::class),
+			$this->createMock(PerformanceLoggerTask::class),
+			'user'
+		);
+
+		self::assertFalse($result['all']);
 	}
 
 	/**
@@ -538,6 +607,7 @@ class MessageMapperTest extends TestCase {
 			$mailbox,
 			5000,
 			92000,
+			10000,
 			$this->createMock(LoggerInterface::class),
 			$this->createMock(PerformanceLoggerTask::class),
 			'user'
@@ -548,7 +618,7 @@ class MessageMapperTest extends TestCase {
 		self::assertFalse($result['all']);
 	}
 
-	public function testFindAllNoUidCandidates(): void {
+	public function testFindAllFullyDoneInBothDirectionsNeverFetches(): void {
 		/** @var Horde_Imap_Client_Socket|MockObject $client */
 		$client = $this->createMock(Horde_Imap_Client_Socket::class);
 		$mailbox = 'inbox';
@@ -580,6 +650,7 @@ class MessageMapperTest extends TestCase {
 			$mailbox,
 			5000,
 			99999,
+			1,
 			$this->createMock(LoggerInterface::class),
 			$this->createMock(PerformanceLoggerTask::class),
 			'user'
@@ -587,6 +658,291 @@ class MessageMapperTest extends TestCase {
 
 		self::assertTrue($result['all']);
 		self::assertEmpty($result['messages']);
+	}
+
+	/**
+	 * Newest-first backfill: a virgin mailbox (both cursors at 0, nothing
+	 * synced yet) too large for one batch must fetch the TOP of the range
+	 * first, not the bottom -- the most useful, recent messages become
+	 * available before any of the older history.
+	 */
+	public function testFindAllStartsAtTheTopOnAVirginMailboxTooLargeForOneBatch(): void {
+		/** @var Horde_Imap_Client_Socket|MockObject $client */
+		$client = $this->createMock(Horde_Imap_Client_Socket::class);
+		$mailbox = 'inbox';
+		// min=1 max=100000 count=50000 -> estimatedPageSize = (100000/50000)*5000+1 = 10001
+		// upper = max = 100000 (lowestKnownUid is 0: no anchor yet)
+		// lower = max(1, 100000-10001, 100000-1_000_000) = 89999
+		$rangeSearchQuery = new Horde_Imap_Client_Search_Query();
+		$rangeSearchQuery->ids(new Horde_Imap_Client_Ids('89999:100000'));
+		$client->expects(self::exactly(2))
+			->method('search')
+			->withConsecutive(
+				[
+					$mailbox,
+					null,
+					[
+						'results' => [
+							Horde_Imap_Client::SEARCH_RESULTS_MIN,
+							Horde_Imap_Client::SEARCH_RESULTS_MAX,
+							Horde_Imap_Client::SEARCH_RESULTS_COUNT,
+						],
+					],
+				],
+				[
+					$mailbox,
+					$rangeSearchQuery,
+					[
+						'results' => [
+							Horde_Imap_Client::SEARCH_RESULTS_COUNT,
+						],
+					],
+				],
+			)
+			->willReturnOnConsecutiveCalls(
+				[
+					'min' => 1,
+					'max' => 100000,
+					'count' => 50000,
+				],
+				[
+					'count' => 5000,
+				],
+			);
+		$query = new Horde_Imap_Client_Fetch_Query();
+		$query->uid();
+		$uidResults = new Horde_Imap_Client_Fetch_Results();
+		foreach (range(90000, 100000) as $i) {
+			$uid = new Horde_Imap_Client_Data_Fetch();
+			$uid->setUid($i);
+			$uidResults[$i] = $uid;
+		}
+		$bodyResults = new Horde_Imap_Client_Fetch_Results();
+		$client->expects(self::exactly(2))
+			->method('fetch')
+			->withConsecutive(
+				[
+					$mailbox,
+					$query,
+					[
+						'ids' => new Horde_Imap_Client_Ids('89999:100000'),
+					]
+				],
+				[
+					$mailbox,
+					self::anything(),
+					self::anything()
+				]
+			)
+			->willReturnOnConsecutiveCalls(
+				$uidResults,
+				$bodyResults
+			);
+
+		$result = $this->mapper->findAll(
+			$client,
+			$mailbox,
+			5000,
+			0,
+			0,
+			$this->createMock(LoggerInterface::class),
+			$this->createMock(PerformanceLoggerTask::class),
+			'user'
+		);
+
+		// Not done overall: this was the top slice, plenty of older
+		// history (down to UID 1) is still left to backfill.
+		self::assertFalse($result['all']);
+	}
+
+	/**
+	 * Once the top anchor is established and there's no new mail waiting
+	 * above it, the backfill continues downward from the lowest UID
+	 * synced so far -- not from the top again.
+	 */
+	public function testFindAllContinuesBackfillDownwardWhenNoNewMailAboveTheAnchor(): void {
+		/** @var Horde_Imap_Client_Socket|MockObject $client */
+		$client = $this->createMock(Horde_Imap_Client_Socket::class);
+		$mailbox = 'inbox';
+		// highestKnownUid=100000 === max: already fully caught up, nothing
+		// new above. lowestKnownUid=50000: backfill has reached 50000 so
+		// far, min=1 so there's more below left to do.
+		// upper = min(100000, 50000-1) = 49999
+		// lower = max(1, 49999-10001, 49999-1_000_000) = 39998
+		$rangeSearchQuery = new Horde_Imap_Client_Search_Query();
+		$rangeSearchQuery->ids(new Horde_Imap_Client_Ids('39998:49999'));
+		$client->expects(self::exactly(2))
+			->method('search')
+			->withConsecutive(
+				[
+					$mailbox,
+					null,
+					[
+						'results' => [
+							Horde_Imap_Client::SEARCH_RESULTS_MIN,
+							Horde_Imap_Client::SEARCH_RESULTS_MAX,
+							Horde_Imap_Client::SEARCH_RESULTS_COUNT,
+						],
+					],
+				],
+				[
+					$mailbox,
+					$rangeSearchQuery,
+					[
+						'results' => [
+							Horde_Imap_Client::SEARCH_RESULTS_COUNT,
+						],
+					],
+				],
+			)
+			->willReturnOnConsecutiveCalls(
+				[
+					'min' => 1,
+					'max' => 100000,
+					'count' => 50000,
+				],
+				[
+					'count' => 5000,
+				],
+			);
+		$query = new Horde_Imap_Client_Fetch_Query();
+		$query->uid();
+		$uidResults = new Horde_Imap_Client_Fetch_Results();
+		foreach (range(40000, 49999) as $i) {
+			$uid = new Horde_Imap_Client_Data_Fetch();
+			$uid->setUid($i);
+			$uidResults[$i] = $uid;
+		}
+		$bodyResults = new Horde_Imap_Client_Fetch_Results();
+		$client->expects(self::exactly(2))
+			->method('fetch')
+			->withConsecutive(
+				[
+					$mailbox,
+					$query,
+					[
+						'ids' => new Horde_Imap_Client_Ids('39998:49999'),
+					]
+				],
+				[
+					$mailbox,
+					self::anything(),
+					self::anything()
+				]
+			)
+			->willReturnOnConsecutiveCalls(
+				$uidResults,
+				$bodyResults
+			);
+
+		$result = $this->mapper->findAll(
+			$client,
+			$mailbox,
+			5000,
+			100000,
+			50000,
+			$this->createMock(LoggerInterface::class),
+			$this->createMock(PerformanceLoggerTask::class),
+			'user'
+		);
+
+		// Still not down to UID 1 yet.
+		self::assertFalse($result['all']);
+	}
+
+	/**
+	 * Both a backfill gap below AND new mail above the anchor exist at
+	 * the same time -- catching up on the new mail must win, every time,
+	 * so incoming mail is never stuck behind however much history is
+	 * still left to backfill.
+	 */
+	public function testFindAllPrioritizesCatchingUpOverContinuingBackfill(): void {
+		/** @var Horde_Imap_Client_Socket|MockObject $client */
+		$client = $this->createMock(Horde_Imap_Client_Socket::class);
+		$mailbox = 'inbox';
+		// highestKnownUid=99000 < max=100000: new mail waiting above.
+		// lowestKnownUid=50000 > min=1: backfill also incomplete.
+		// Catch-up must be the one that runs: lower=99001, upper=min(100000, 99001+10001)=100000.
+		$rangeSearchQuery = new Horde_Imap_Client_Search_Query();
+		$rangeSearchQuery->ids(new Horde_Imap_Client_Ids('99001:100000'));
+		$client->expects(self::exactly(2))
+			->method('search')
+			->withConsecutive(
+				[
+					$mailbox,
+					null,
+					[
+						'results' => [
+							Horde_Imap_Client::SEARCH_RESULTS_MIN,
+							Horde_Imap_Client::SEARCH_RESULTS_MAX,
+							Horde_Imap_Client::SEARCH_RESULTS_COUNT,
+						],
+					],
+				],
+				[
+					$mailbox,
+					$rangeSearchQuery,
+					[
+						'results' => [
+							Horde_Imap_Client::SEARCH_RESULTS_COUNT,
+						],
+					],
+				],
+			)
+			->willReturnOnConsecutiveCalls(
+				[
+					'min' => 1,
+					'max' => 100000,
+					'count' => 50000,
+				],
+				[
+					'count' => 1000,
+				],
+			);
+		$query = new Horde_Imap_Client_Fetch_Query();
+		$query->uid();
+		$uidResults = new Horde_Imap_Client_Fetch_Results();
+		foreach (range(99001, 100000) as $i) {
+			$uid = new Horde_Imap_Client_Data_Fetch();
+			$uid->setUid($i);
+			$uidResults[$i] = $uid;
+		}
+		$bodyResults = new Horde_Imap_Client_Fetch_Results();
+		$client->expects(self::exactly(2))
+			->method('fetch')
+			->withConsecutive(
+				[
+					$mailbox,
+					$query,
+					[
+						'ids' => new Horde_Imap_Client_Ids('99001:100000'),
+					]
+				],
+				[
+					$mailbox,
+					self::anything(),
+					self::anything()
+				]
+			)
+			->willReturnOnConsecutiveCalls(
+				$uidResults,
+				$bodyResults
+			);
+
+		$result = $this->mapper->findAll(
+			$client,
+			$mailbox,
+			5000,
+			99000,
+			50000,
+			$this->createMock(LoggerInterface::class),
+			$this->createMock(PerformanceLoggerTask::class),
+			'user'
+		);
+
+		// Caught up to max, but the backfill gap below 50000 is still
+		// open -- not done overall.
+		self::assertFalse($result['all']);
 	}
 
 	public function testGetFlagged() {
