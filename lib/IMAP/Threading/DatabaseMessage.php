@@ -35,7 +35,15 @@ final class DatabaseMessage extends Message implements JsonSerializable {
 		?string $references,
 		?string $inReplyTo,
 		?string $threadRootId): self {
-		$referencesForThreading = $references !== null ? json_decode($references, true) : [];
+		// json_decode('', true) returns null (an empty string is not
+		// valid JSON), not []. Confirmed live: a message with `references`
+		// stored as an empty string (not NULL -- e.g. no References
+		// header at all) and no in_reply_to crashed the whole account
+		// sync with an unhandled TypeError the moment thread rebuilding
+		// touched it, since the constructor requires an array. Any other
+		// reason json_decode() might fail (malformed JSON) hits the same
+		// guard.
+		$referencesForThreading = $references !== null ? (json_decode($references, true) ?? []) : [];
 		if (!empty($inReplyTo)) {
 			$referencesForThreading[] = $inReplyTo;
 		}
