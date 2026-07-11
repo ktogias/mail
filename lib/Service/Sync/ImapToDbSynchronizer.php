@@ -69,6 +69,7 @@ class ImapToDbSynchronizer {
 		private TagMapper $tagMapper,
 		private NewMessagesClassifier $newMessagesClassifier,
 		private HordeSyncTokenParser $syncTokenParser,
+		private SyncFastPathStats $fastPathStats,
 	) {
 		$this->dispatcher = $dispatcher;
 	}
@@ -574,6 +575,7 @@ class ImapToDbSynchronizer {
 	 * disagrees is always kept, as is everything on STATUS failure.
 	 */
 	private function pruneSyncCriteria(Horde_Imap_Client_Base $client, Mailbox $mailbox, int $criteria, LoggerInterface $logger): int {
+		$criteriaBeforePruning = $criteria;
 		try {
 			$status = $client->status(
 				$mailbox->getName(),
@@ -584,6 +586,7 @@ class ImapToDbSynchronizer {
 			);
 		} catch (Throwable $e) {
 			$logger->debug("STATUS fast path failed for mailbox {$mailbox->getId()}, falling back to full partial sync: {$e->getMessage()}");
+			$this->fastPathStats->recordStatusUnusable();
 			return $criteria;
 		}
 
@@ -593,6 +596,7 @@ class ImapToDbSynchronizer {
 		$messages = (int)($status['messages'] ?? -1);
 
 		if ($uidValidity === 0 || $uidNext === 0 || $messages < 0) {
+			$this->fastPathStats->recordStatusUnusable();
 			return $criteria;
 		}
 
@@ -642,6 +646,8 @@ class ImapToDbSynchronizer {
 				$criteria &= ~Horde_Imap_Client::SYNC_VANISHEDUIDS;
 			}
 		}
+
+		$this->fastPathStats->recordOutcome($criteriaBeforePruning, $criteria);
 
 		return $criteria;
 	}

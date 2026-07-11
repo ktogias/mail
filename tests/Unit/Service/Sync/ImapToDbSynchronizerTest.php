@@ -10,6 +10,7 @@ declare(strict_types=1);
 namespace OCA\Mail\Tests\Unit\Service\Sync;
 
 use ChristophWurst\Nextcloud\Testing\TestCase;
+use Horde_Imap_Client;
 use Horde_Imap_Client_Data_Capability_Imap;
 use Horde_Imap_Client_Socket;
 use OCA\Mail\Account;
@@ -27,6 +28,7 @@ use OCA\Mail\IMAP\MessageMapper as ImapMessageMapper;
 use OCA\Mail\IMAP\Sync\Synchronizer;
 use OCA\Mail\Service\Classification\NewMessagesClassifier;
 use OCA\Mail\Service\Sync\ImapToDbSynchronizer;
+use OCA\Mail\Service\Sync\SyncFastPathStats;
 use OCA\Mail\Support\PerformanceLogger;
 use OCA\Mail\Support\PerformanceLoggerTask;
 use OCP\EventDispatcher\IEventDispatcher;
@@ -40,6 +42,7 @@ class ImapToDbSynchronizerTest extends TestCase {
 	private MailboxMapper&MockObject $mailboxMapper;
 	private IEventDispatcher&MockObject $dispatcher;
 	private PerformanceLogger&MockObject $performanceLogger;
+	private SyncFastPathStats&MockObject $fastPathStats;
 	private ImapToDbSynchronizer $synchronizer;
 
 	protected function setUp(): void {
@@ -52,6 +55,7 @@ class ImapToDbSynchronizerTest extends TestCase {
 		$this->performanceLogger = $this->createMock(PerformanceLogger::class);
 		$this->performanceLogger->method('startWithLogger')
 			->willReturn($this->createStub(PerformanceLoggerTask::class));
+		$this->fastPathStats = $this->createMock(SyncFastPathStats::class);
 		$this->synchronizer = new ImapToDbSynchronizer(
 			$this->dbMapper,
 			$this->clientFactory,
@@ -66,6 +70,7 @@ class ImapToDbSynchronizerTest extends TestCase {
 			$this->createStub(TagMapper::class),
 			$this->createStub(NewMessagesClassifier::class),
 			new HordeSyncTokenParser(),
+			$this->fastPathStats,
 		);
 	}
 
@@ -164,6 +169,7 @@ class ImapToDbSynchronizerTest extends TestCase {
 				$this->createStub(TagMapper::class),
 				$this->createStub(NewMessagesClassifier::class),
 				new HordeSyncTokenParser(),
+				$this->fastPathStats,
 			])
 			->onlyMethods(['sync'])
 			->getMock();
@@ -202,6 +208,7 @@ class ImapToDbSynchronizerTest extends TestCase {
 			$this->createStub(TagMapper::class),
 			$this->createStub(NewMessagesClassifier::class),
 			new HordeSyncTokenParser(),
+			$this->fastPathStats,
 		);
 	}
 
@@ -251,6 +258,11 @@ class ImapToDbSynchronizerTest extends TestCase {
 		$this->dispatcher->expects($this->once())
 			->method('dispatchTyped')
 			->with($this->callback(fn (SynchronizationEvent $event) => !$event->isRebuildThreads()));
+		$allPhases = Horde_Imap_Client::SYNC_NEWMSGSUIDS | Horde_Imap_Client::SYNC_FLAGSUIDS | Horde_Imap_Client::SYNC_VANISHEDUIDS;
+		$this->fastPathStats->expects($this->once())
+			->method('recordOutcome')
+			->with($allPhases, 0);
+		$this->fastPathStats->expects($this->never())->method('recordStatusUnusable');
 
 		$this->buildSynchronizerWithSyncMock($imapSync)->sync(
 			$account,
@@ -287,6 +299,11 @@ class ImapToDbSynchronizerTest extends TestCase {
 			->method('sync')
 			->willReturn($response);
 		$this->mailboxMapper->expects($this->once())->method('update');
+		$allPhases = Horde_Imap_Client::SYNC_NEWMSGSUIDS | Horde_Imap_Client::SYNC_FLAGSUIDS | Horde_Imap_Client::SYNC_VANISHEDUIDS;
+		$keptNewAndVanished = Horde_Imap_Client::SYNC_NEWMSGSUIDS | Horde_Imap_Client::SYNC_VANISHEDUIDS;
+		$this->fastPathStats->expects($this->once())
+			->method('recordOutcome')
+			->with($allPhases, $keptNewAndVanished);
 
 		$this->buildSynchronizerWithSyncMock($imapSync)->sync(
 			$account,
@@ -325,6 +342,50 @@ class ImapToDbSynchronizerTest extends TestCase {
 		$imapSync->expects($this->exactly(1))
 			->method('sync')
 			->willReturn($response);
+		$allPhases = Horde_Imap_Client::SYNC_NEWMSGSUIDS | Horde_Imap_Client::SYNC_FLAGSUIDS | Horde_Imap_Client::SYNC_VANISHEDUIDS;
+		$this->fastPathStats->expects($this->once())
+			->method('recordOutcome')
+			->with($allPhases, Horde_Imap_Client::SYNC_FLAGSUIDS);
+
+		$this->buildSynchronizerWithSyncMock($imapSync)->sync(
+			$account,
+			$client,
+			$mailbox,
+			$this->createStub(LoggerInterface::class),
+		);
+	}
+
+	/**
+	 * A STATUS round trip that throws (or comes back without enough usable
+	 * data) can't prove anything idle -- every phase is kept, same as
+	 * before this fast path existed. Recorded as "status_unusable" rather
+	 * than folded into the per-phase attempted/pruned counts, since no
+	 * phase was actually evaluated against a server value here.
+	 */
+	public function testPartialSyncRecordsStatusUnusableWhenTheStatusCallFails(): void {
+		$mailAccount = new MailAccount();
+		$mailAccount->setId(1);
+		$mailAccount->setUserId('user');
+		$account = new Account($mailAccount);
+		$mailbox = $this->buildPartialSyncMailbox();
+
+		$capability = $this->createMock(Horde_Imap_Client_Data_Capability_Imap::class);
+		$capability->method('isEnabled')->with('QRESYNC')->willReturn(false);
+		$client = $this->createMock(Horde_Imap_Client_Socket::class);
+		$client->method('__get')->with('capability')->willReturn($capability);
+		$client->method('status')->willThrowException(new \Horde_Imap_Client_Exception('boom'));
+		$client->method('getSyncToken')->willReturn(base64_encode('U101,V200,H301'));
+
+		$this->dbMapper->method('findAllUids')->willReturn([]);
+		$this->dbMapper->method('findHighestUid')->willReturn(null);
+
+		$response = new \OCA\Mail\IMAP\Sync\Response([], [], []);
+		$imapSync = $this->createMock(Synchronizer::class);
+		$imapSync->expects($this->exactly(3))
+			->method('sync')
+			->willReturn($response);
+		$this->fastPathStats->expects($this->once())->method('recordStatusUnusable');
+		$this->fastPathStats->expects($this->never())->method('recordOutcome');
 
 		$this->buildSynchronizerWithSyncMock($imapSync)->sync(
 			$account,
