@@ -64,7 +64,9 @@
 				@keydown.enter="$emit('toggle-expand', $event)"
 				@keydown.space.prevent="$emit('toggle-expand', $event)"
 				@mouseenter="onEnvelopeMouseEnter"
-				@mouseleave="onEnvelopeMouseLeave">
+				@mouseleave="onEnvelopeMouseLeave"
+				@touchstart.passive="onEnvelopeTouchStart"
+				@touchmove.passive="cancelHoverPrefetch">
 				<div class="envelope__header__left__sender-subject-tags">
 					<div class="sender" :class="{ 'sender--expanded': expanded }">
 						{{ envelope.from && envelope.from[0] ? envelope.from[0].label : '' }}
@@ -848,6 +850,19 @@ export default {
 
 		onEnvelopeMouseLeave() {
 			this.cancelHoverPrefetch()
+		},
+
+		onEnvelopeTouchStart() {
+			// Touch's equivalent of onEnvelopeMouseEnter() -- see
+			// TOUCH_PREFETCH_DELAY_MS in HoverPrefetchMixin.js for why this
+			// needs its own much shorter delay instead of reusing the
+			// mouse one.
+			if (this.expanded) {
+				return
+			}
+			this.startTouchPrefetch(() => {
+				this.mainStore.fetchMessage(this.envelope.databaseId).catch(() => {})
+			})
 		},
 
 		async fetchMessage() {

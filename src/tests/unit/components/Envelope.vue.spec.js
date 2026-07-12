@@ -511,5 +511,41 @@ describe('Envelope', () => {
 
 			expect(store.fetchMessage).not.toHaveBeenCalled()
 		})
+
+		it('prefetches on touchstart past the (shorter) touch delay', async () => {
+			// Mouse hover never gets a head start on touch devices -- a
+			// tap's own touchstart-to-navigation window is itself only
+			// ~100-150ms, so touchstart needs its own much shorter delay.
+			const view = mountEnvelope()
+
+			view.vm.onEnvelopeTouchStart()
+			expect(store.fetchMessage).not.toHaveBeenCalled()
+
+			await vi.advanceTimersByTimeAsync(60)
+
+			expect(store.fetchMessage).toHaveBeenCalledWith(999)
+			expect(store.fetchThread).toHaveBeenCalledWith(999)
+		})
+
+		it('does not prefetch when touchmove happens before the delay elapses', async () => {
+			// A touchmove means this touch became a scroll, not a tap --
+			// same reasoning as mouseleave cancelling the hover timer.
+			const view = mountEnvelope()
+
+			view.vm.onEnvelopeTouchStart()
+			view.vm.cancelHoverPrefetch()
+			await vi.advanceTimersByTimeAsync(500)
+
+			expect(store.fetchMessage).not.toHaveBeenCalled()
+		})
+
+		it('does not prefetch drafts on touchstart either', async () => {
+			const view = mountEnvelope({ draft: true })
+
+			view.vm.onEnvelopeTouchStart()
+			await vi.advanceTimersByTimeAsync(500)
+
+			expect(store.fetchMessage).not.toHaveBeenCalled()
+		})
 	})
 })

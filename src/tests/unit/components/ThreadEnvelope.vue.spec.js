@@ -526,5 +526,38 @@ describe('ThreadEnvelope', () => {
 
 			expect(store.fetchMessage).toHaveBeenCalledTimes(callsAfterMount)
 		})
+
+		it('prefetches the collapsed message on touchstart past the (shorter) touch delay', async () => {
+			const view = mountThreadEnvelope(false)
+
+			view.vm.onEnvelopeTouchStart()
+			expect(store.fetchMessage).not.toHaveBeenCalled()
+
+			await vi.advanceTimersByTimeAsync(60)
+
+			expect(store.fetchMessage).toHaveBeenCalledWith(999)
+		})
+
+		it('does not prefetch when touchmove happens before the delay elapses', async () => {
+			const view = mountThreadEnvelope(false)
+
+			view.vm.onEnvelopeTouchStart()
+			view.vm.cancelHoverPrefetch()
+			await vi.advanceTimersByTimeAsync(500)
+
+			expect(store.fetchMessage).not.toHaveBeenCalled()
+		})
+
+		it('does not additionally prefetch an already-expanded message on touchstart', async () => {
+			const view = mountThreadEnvelope(true)
+			await vi.advanceTimersByTimeAsync(0)
+			const callsAfterMount = store.fetchMessage.mock.calls.length
+			expect(callsAfterMount).toBeGreaterThan(0)
+
+			view.vm.onEnvelopeTouchStart()
+			await vi.advanceTimersByTimeAsync(500)
+
+			expect(store.fetchMessage).toHaveBeenCalledTimes(callsAfterMount)
+		})
 	})
 })

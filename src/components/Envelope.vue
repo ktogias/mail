@@ -32,7 +32,9 @@
 		@toggle-seen="onToggleSeen"
 		@update:menuOpen="closeMoreAndSnoozeOptions"
 		@mouseenter.native="onEnvelopeMouseEnter"
-		@mouseleave.native="onEnvelopeMouseLeave">
+		@mouseleave.native="onEnvelopeMouseLeave"
+		@touchstart.native.passive="onEnvelopeTouchStart"
+		@touchmove.native.passive="cancelHoverPrefetch">
 		<template #icon>
 			<div v-if="!compactMode">
 				<Star
@@ -1159,6 +1161,20 @@ export default {
 
 		onEnvelopeMouseLeave() {
 			this.cancelHoverPrefetch()
+		},
+
+		onEnvelopeTouchStart() {
+			// Touch's equivalent of onEnvelopeMouseEnter() -- see
+			// TOUCH_PREFETCH_DELAY_MS in HoverPrefetchMixin.js for why this
+			// needs its own much shorter delay instead of reusing the
+			// mouse one.
+			if (this.draft) {
+				return
+			}
+			this.startTouchPrefetch(() => {
+				this.mainStore.fetchMessage(this.data.databaseId).catch(() => {})
+				this.mainStore.fetchThread(this.data.databaseId).catch(() => {})
+			})
 		},
 
 		onSelectMultiple() {

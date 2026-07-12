@@ -13,6 +13,19 @@
 // been fixed everywhere else.
 export const HOVER_PREFETCH_DELAY_MS = 200
 
+// Touch has no equivalent of "hovering before a deliberate click": a tap's
+// own touchstart-to-navigation window is itself only ~100-150ms, so this
+// app's mouse-hover prefetch (mouseenter-only) never gets a head start on
+// touch devices -- confirmed live on mobile Firefox/Android (slow message
+// opens, no request visible in the network panel until the tap itself).
+// touchstart is the equivalent trigger, but its delay has to be much
+// shorter than the mouse's -- waiting the full 200ms would fire after the
+// tap's own click already landed, defeating the purpose. The real guard
+// against wasted requests here isn't the delay (a scroll's touchmove
+// fires well within this window) but touchmove itself cancelling the
+// timer, mirroring mouseleave -- see cancelHoverPrefetch().
+export const TOUCH_PREFETCH_DELAY_MS = 60
+
 export default {
 	data() {
 		return {
@@ -28,9 +41,13 @@ export default {
 	},
 
 	methods: {
-		startHoverPrefetch(callback) {
+		startHoverPrefetch(callback, delay = HOVER_PREFETCH_DELAY_MS) {
 			this.cancelHoverPrefetch()
-			this.hoverPrefetchTimer = setTimeout(callback, HOVER_PREFETCH_DELAY_MS)
+			this.hoverPrefetchTimer = setTimeout(callback, delay)
+		},
+
+		startTouchPrefetch(callback) {
+			this.startHoverPrefetch(callback, TOUCH_PREFETCH_DELAY_MS)
 		},
 
 		cancelHoverPrefetch() {
