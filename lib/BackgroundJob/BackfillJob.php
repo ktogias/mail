@@ -50,7 +50,7 @@ use function usort;
  * reflects it) -- no separate bookkeeping needed for "done" mailboxes.
  */
 class BackfillJob extends TimedJob {
-	private const INTERVAL = 45 * 60;
+	private const INTERVAL = 15 * 60;
 	private const CURSOR_KEY_PREFIX = 'backfill-last-mailbox-';
 
 	public function __construct(
@@ -77,7 +77,7 @@ class BackfillJob extends TimedJob {
 		// ENTIRELY, no matter how long their own interval has elapsed.
 		// That would have limited this job to a ~4-hour nightly window
 		// (turning a several-week backfill into several months) for a box
-		// that's often in active use around the clock. INTERVAL (45 min)
+		// that's often in active use around the clock. INTERVAL (15 min)
 		// and isServerBusy() already bound the actual load this job adds
 		// per tick; TIME_SENSITIVE just means those ticks aren't also
 		// confined to nighttime.

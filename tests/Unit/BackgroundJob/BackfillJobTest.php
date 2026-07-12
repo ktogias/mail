@@ -35,10 +35,10 @@ class BackfillJobTest extends TestCase {
 		$this->serviceMock = $this->createServiceMock(BackfillJob::class);
 		$this->job = $this->serviceMock->getService();
 
-		// 45-minute interval + 1s, so the job is actually run.
+		// 15-minute interval + 1s, so the job is actually run.
 		$this->serviceMock->getParameter('time')
 			->method('getTime')
-			->willReturn(45 * 60 + 1);
+			->willReturn(15 * 60 + 1);
 
 		$this->job->setArgument([
 			'accountId' => 123,
