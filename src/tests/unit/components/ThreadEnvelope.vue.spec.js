@@ -8,6 +8,9 @@ import { createPinia, setActivePinia } from 'pinia'
 import ThreadEnvelope from '../../../components/ThreadEnvelope.vue'
 import Nextcloud from '../../../mixins/Nextcloud.js'
 import useMainStore from '../../../store/mainStore.js'
+import * as ViewportPrefetchObserver from '../../../util/viewportPrefetchObserver.js'
+
+vi.mock('../../../util/viewportPrefetchObserver.js')
 
 const localVue = createLocalVue()
 
@@ -558,6 +561,110 @@ describe('ThreadEnvelope', () => {
 			await vi.advanceTimersByTimeAsync(500)
 
 			expect(store.fetchMessage).toHaveBeenCalledTimes(callsAfterMount)
+		})
+	})
+
+	describe('viewport prefetch', () => {
+		let store
+
+		beforeEach(() => {
+			vi.useFakeTimers()
+			vi.clearAllMocks()
+			store = useMainStore()
+			store.getAccount = vi.fn().mockReturnValue({ name: 'Test', emailAddress: 'test@test.com' })
+			// Fuller shape needed for the expanded=true case: mounted()'s
+			// own fetchMessage() drives follow-up itineraries/dkim checks
+			// that read these fields (same shape as the hover-prefetch
+			// block above).
+			store.fetchMessage = vi.fn().mockResolvedValue({
+				databaseId: 999,
+				hasHtmlBody: false,
+				attachments: [],
+				dkimValid: true,
+				itineraries: [],
+			})
+			ViewportPrefetchObserver.runIfViewportPrefetchSlotAvailable.mockImplementation((fn) => fn())
+		})
+
+		afterEach(() => {
+			vi.useRealTimers()
+		})
+
+		function mountThreadEnvelope(expanded = false) {
+			return shallowMount(ThreadEnvelope, {
+				propsData: {
+					account: {},
+					mailbox: {
+						specialRole: '',
+					},
+					envelope: {
+						accountId: 123,
+						databaseId: 999,
+						from: [{ email: 'info@test.com' }],
+						to: [],
+						cc: [],
+						flags: { seen: false, flagged: false, $junk: false, answered: false, hasAttachments: false, draft: false },
+						subject: '',
+						dateInt: 1692200926180,
+					},
+					threadSubject: '',
+					expanded,
+				},
+				computed: {
+					mailbox() {
+						return { myAcls: undefined }
+					},
+					archiveMailbox() {
+						return { myAcls: undefined }
+					},
+				},
+				localVue,
+			})
+		}
+
+		it('registers its own element for viewport visibility on mount, when collapsed', () => {
+			const view = mountThreadEnvelope(false)
+
+			expect(ViewportPrefetchObserver.observeViewportVisibility).toHaveBeenCalledWith(view.vm.$el, expect.any(Function))
+		})
+
+		it('does not register an already-expanded message -- mounted() already fetched it', async () => {
+			mountThreadEnvelope(true)
+			await vi.advanceTimersByTimeAsync(0)
+
+			expect(ViewportPrefetchObserver.observeViewportVisibility).not.toHaveBeenCalled()
+		})
+
+		it('prefetches the collapsed message once continuously visible past the settle delay', async () => {
+			mountThreadEnvelope(false)
+			const onIntersect = ViewportPrefetchObserver.observeViewportVisibility.mock.calls[0][1]
+
+			onIntersect(true)
+			expect(store.fetchMessage).not.toHaveBeenCalled()
+
+			await vi.advanceTimersByTimeAsync(300)
+
+			expect(store.fetchMessage).toHaveBeenCalledWith(999)
+		})
+
+		it('does not prefetch if the row leaves the viewport before the settle delay elapses', async () => {
+			mountThreadEnvelope(false)
+			const onIntersect = ViewportPrefetchObserver.observeViewportVisibility.mock.calls[0][1]
+
+			onIntersect(true)
+			onIntersect(false)
+			await vi.advanceTimersByTimeAsync(500)
+
+			expect(store.fetchMessage).not.toHaveBeenCalled()
+		})
+
+		it('unobserves its element on destroy', () => {
+			const view = mountThreadEnvelope(false)
+			const el = view.vm.$el
+
+			view.destroy()
+
+			expect(ViewportPrefetchObserver.unobserveViewportVisibility).toHaveBeenCalledWith(el)
 		})
 	})
 })

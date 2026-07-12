@@ -578,6 +578,7 @@ import NoTrashMailboxConfiguredError
 import logger from '../logger.js'
 import AttachmentMixin from '../mixins/AttachmentMixin.js'
 import HoverPrefetchMixin from '../mixins/HoverPrefetchMixin.js'
+import ViewportPrefetchMixin from '../mixins/ViewportPrefetchMixin.js'
 import { buildRecipients as buildReplyRecipients } from '../ReplyBuilder.js'
 import { FOLLOW_UP_TAG_LABEL } from '../store/constants.js'
 import useMainStore from '../store/mainStore.js'
@@ -638,7 +639,7 @@ export default {
 		draggableEnvelope: DraggableEnvelopeDirective,
 	},
 
-	mixins: [AttachmentMixin, HoverPrefetchMixin],
+	mixins: [AttachmentMixin, HoverPrefetchMixin, ViewportPrefetchMixin],
 
 	props: {
 		withReply: {
@@ -1009,6 +1010,21 @@ export default {
 	mounted() {
 		this.onWindowResize()
 		window.addEventListener('resize', this.onWindowResize)
+
+		// Drafts open the composer, not a thread view -- nothing here to
+		// prefetch. Mirrors onEnvelopeMouseEnter()/onEnvelopeTouchStart().
+		if (!this.draft) {
+			this.registerViewportPrefetch(() => {
+				this.mainStore.fetchMessage(this.data.databaseId).catch(() => {})
+				this.mainStore.fetchThread(this.data.databaseId).catch(() => {})
+			})
+		}
+	},
+
+	beforeDestroy() {
+		// NOT beforeUnmount(): see nextcloud-mail-vue2-unmount-hook-names
+		// memory / commit 45144e3fd.
+		this.unregisterViewportPrefetch()
 	},
 
 	methods: {

@@ -8,6 +8,9 @@ import { createPinia, setActivePinia } from 'pinia'
 import Envelope from '../../../components/Envelope.vue'
 import Nextcloud from '../../../mixins/Nextcloud.js'
 import useMainStore from '../../../store/mainStore.js'
+import * as ViewportPrefetchObserver from '../../../util/viewportPrefetchObserver.js'
+
+vi.mock('../../../util/viewportPrefetchObserver.js')
 
 const localVue = createLocalVue()
 const $route = {
@@ -546,6 +549,103 @@ describe('Envelope', () => {
 			await vi.advanceTimersByTimeAsync(500)
 
 			expect(store.fetchMessage).not.toHaveBeenCalled()
+		})
+	})
+
+	describe('viewport prefetch', () => {
+		// Scroll-then-tap: a row sitting visible on screen for a while
+		// (not just a fast flick-scroll past it) prefetches without
+		// needing any pointer/touch interaction at all.
+		beforeEach(() => {
+			vi.useFakeTimers()
+			vi.clearAllMocks()
+			store.fetchMessage = vi.fn().mockResolvedValue({})
+			store.fetchThread = vi.fn().mockResolvedValue([])
+			ViewportPrefetchObserver.runIfViewportPrefetchSlotAvailable.mockImplementation((fn) => fn())
+		})
+
+		afterEach(() => {
+			vi.useRealTimers()
+		})
+
+		function mountEnvelope(flagOverrides = {}) {
+			return shallowMount(Envelope, {
+				mocks: { $route },
+				propsData: {
+					mailbox: {
+						specialRole: '',
+						databaseId: '3',
+						myAcls: undefined,
+					},
+					data: {
+						accountId: 123,
+						databaseId: 999,
+						from: [{ email: 'info@test.com' }],
+						flags: { seen: false, flagged: false, $junk: false, answered: false, hasAttachments: false, draft: false, ...flagOverrides },
+					},
+				},
+				store,
+				localVue,
+			})
+		}
+
+		it('registers its own element for viewport visibility on mount', () => {
+			const view = mountEnvelope()
+
+			expect(ViewportPrefetchObserver.observeViewportVisibility).toHaveBeenCalledWith(view.vm.$el, expect.any(Function))
+		})
+
+		it('prefetches once continuously visible past the settle delay', async () => {
+			mountEnvelope()
+			const onIntersect = ViewportPrefetchObserver.observeViewportVisibility.mock.calls[0][1]
+
+			onIntersect(true)
+			expect(store.fetchMessage).not.toHaveBeenCalled()
+
+			await vi.advanceTimersByTimeAsync(300)
+
+			expect(store.fetchMessage).toHaveBeenCalledWith(999)
+			expect(store.fetchThread).toHaveBeenCalledWith(999)
+		})
+
+		it('does not prefetch if the row leaves the viewport before the settle delay elapses', async () => {
+			mountEnvelope()
+			const onIntersect = ViewportPrefetchObserver.observeViewportVisibility.mock.calls[0][1]
+
+			onIntersect(true)
+			onIntersect(false)
+			await vi.advanceTimersByTimeAsync(500)
+
+			expect(store.fetchMessage).not.toHaveBeenCalled()
+		})
+
+		it('does not observe drafts, which open the composer instead of a thread', () => {
+			mountEnvelope({ draft: true })
+
+			expect(ViewportPrefetchObserver.observeViewportVisibility).not.toHaveBeenCalled()
+		})
+
+		it('respects the shared concurrency gate rather than fetching unconditionally', async () => {
+			ViewportPrefetchObserver.runIfViewportPrefetchSlotAvailable.mockImplementation(() => {
+				// Simulate the gate being at capacity -- the real
+				// implementation just skips silently in this case.
+			})
+			mountEnvelope()
+			const onIntersect = ViewportPrefetchObserver.observeViewportVisibility.mock.calls[0][1]
+
+			onIntersect(true)
+			await vi.advanceTimersByTimeAsync(300)
+
+			expect(store.fetchMessage).not.toHaveBeenCalled()
+		})
+
+		it('unobserves its element on destroy', () => {
+			const view = mountEnvelope()
+			const el = view.vm.$el
+
+			view.destroy()
+
+			expect(ViewportPrefetchObserver.unobserveViewportVisibility).toHaveBeenCalledWith(el)
 		})
 	})
 })

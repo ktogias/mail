@@ -423,6 +423,7 @@ import { matchError } from '../errors/match.js'
 import NoTrashMailboxConfiguredError from '../errors/NoTrashMailboxConfiguredError.js'
 import logger from '../logger.js'
 import HoverPrefetchMixin from '../mixins/HoverPrefetchMixin.js'
+import ViewportPrefetchMixin from '../mixins/ViewportPrefetchMixin.js'
 import { buildRecipients as buildReplyRecipients } from '../ReplyBuilder.js'
 import { smartReply } from '../service/AiIntergrationsService.js'
 import { unsubscribe } from '../service/ListService.js'
@@ -479,7 +480,7 @@ export default {
 		SourceModal,
 	},
 
-	mixins: [HoverPrefetchMixin],
+	mixins: [HoverPrefetchMixin, ViewportPrefetchMixin],
 
 	props: {
 		envelope: {
@@ -794,6 +795,11 @@ export default {
 			// Only one envelope is expanded at the time of mounting so we can
 			// assume that this is the relevant envelope to be scrolled to.
 			this.$nextTick(() => this.handleThreadScrolling())
+		} else {
+			// Already fetched above otherwise -- nothing left to prefetch.
+			this.registerViewportPrefetch(() => {
+				this.mainStore.fetchMessage(this.envelope.databaseId).catch(() => {})
+			})
 		}
 		if (this.mainStore.getPreference('internal-addresses', 'false') === 'true') {
 			this.isInternal = this.mainStore.isInternalAddress(this.envelope.from[0].email)
@@ -814,6 +820,7 @@ export default {
 			clearTimeout(this.seenTimer)
 		}
 		window.removeEventListener('resize', this.redrawMenuBar)
+		this.unregisterViewportPrefetch()
 	},
 
 	methods: {
