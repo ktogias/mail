@@ -388,6 +388,20 @@ export default {
 				return
 			}
 
+			// Neither guard existed before (confirmed identical upstream) --
+			// scroll-triggered pagination relied entirely on network latency
+			// to naturally pace repeated calls, which stopped being true
+			// once other fixes made real syncs/fetches noticeably faster:
+			// confirmed live, Priority Inbox appended pages with no visible
+			// limit while scrolling. loadingMore already existed as state
+			// but was never actually consulted before firing again; endReached
+			// was only ever read by the MANUAL button's visibility
+			// (showLoadMore), never by this, the scroll-triggered path.
+			if (this.loadingMore || this.endReached) {
+				logger.debug('loadMore() already in flight or the list is exhausted, ignoring')
+				return
+			}
+
 			logger.debug('fetching next envelope page')
 			this.loadingMore = true
 

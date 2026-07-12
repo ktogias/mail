@@ -19,13 +19,9 @@
 						@search-changed="onUpdateSearchQuery" />
 				</div>
 				<AppContentList
-					v-infinite-scroll="onScroll"
 					v-shortkey.once="shortkeys"
 					class="envelope-list"
-					infinite-scroll-immediate-check="false"
 					:show-details="showThread"
-					:infinite-scroll-disabled="false"
-					:infinite-scroll-distance="300"
 					role="heading"
 					:aria-level="2"
 					@shortkey.native="onShortcut">
@@ -72,6 +68,13 @@
 							:group-envelopes="groupEnvelopes"
 							:initial-page-size="messagesOrderBydate"
 							:collapsible="true" />
+						<!-- Replaces the old v-infinite-scroll directive on
+							AppContentList itself -- see
+							util/loadMoreSentinelObserver.js. Placed after
+							every section so it only comes within range once
+							the user has actually scrolled past everything
+							currently rendered. -->
+						<div ref="loadMoreSentinel" class="load-more-sentinel" />
 					</template>
 
 					<template v-else>
@@ -195,6 +198,7 @@
 						<EmptyMailboxSection
 							v-if="!hasFavoriteEnvelopes && !hasFollowUpEnvelopes && !hasImportantEnvelopes && !hasOtherEnvelopes"
 							key="empty" />
+						<div ref="loadMoreSentinel" class="load-more-sentinel" />
 					</template>
 				</AppContentList>
 			</div>
@@ -217,8 +221,8 @@ import NoMessageSelected from './NoMessageSelected.vue'
 import SearchMessages from './SearchMessages.vue'
 import SectionTitle from './SectionTitle.vue'
 import Thread from './Thread.vue'
-import infiniteScroll from '../directives/infinite-scroll.js'
 import logger from '../logger.js'
+import LoadMoreSentinelMixin from '../mixins/LoadMoreSentinelMixin.js'
 import {
 	FOLLOW_UP_MAILBOX_ID,
 	PRIORITY_INBOX_ID,
@@ -237,9 +241,6 @@ const START_MAILBOX_DEBOUNCE = 5 * 1000
 
 export default {
 	name: 'MailboxThread',
-	directives: {
-		infiniteScroll,
-	},
 
 	components: {
 		AppContent,
@@ -255,7 +256,7 @@ export default {
 		Thread,
 	},
 
-	mixins: [isMobile],
+	mixins: [isMobile, LoadMoreSentinelMixin],
 	props: {
 		account: {
 			type: Object,
@@ -526,10 +527,17 @@ export default {
 		if (this.isThreadShown) {
 			await this.fetchEnvelopes()
 		}
+		// Replaces the old v-infinite-scroll directive -- see
+		// util/loadMoreSentinelObserver.js. Only one of the two
+		// mutually-exclusive template branches' sentinels is ever
+		// actually rendered, so $refs.loadMoreSentinel resolves to
+		// whichever one is currently active.
+		this.registerLoadMoreSentinel(this.$refs.loadMoreSentinel, this.onScroll)
 	},
 
 	beforeDestroy() {
 		clearTimeout(this.startMailboxTimer)
+		this.unregisterLoadMoreSentinel()
 	},
 
 	methods: {
@@ -740,6 +748,14 @@ export default {
 	overflow-y: auto;
 	min-height: 0;
 	contain: none !important;
+}
+
+.load-more-sentinel {
+	// Purely an IntersectionObserver target (see
+	// util/loadMoreSentinelObserver.js) -- 1px tall so it's a real,
+	// observable element rather than collapsing to nothing, invisible and
+	// out of the way otherwise.
+	height: 1px;
 }
 
 .information-icon {

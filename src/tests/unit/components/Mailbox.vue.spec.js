@@ -233,6 +233,52 @@ describe('Mailbox', () => {
 		}
 	})
 
+	describe('loadMore() pacing guards', () => {
+		// Neither guard existed before, in this fork or upstream (confirmed
+		// identical): onScroll()/loadMore() relied entirely on network
+		// latency to naturally pace repeated scroll-triggered calls. That
+		// stopped holding once other fixes made real fetches noticeably
+		// faster -- confirmed live, Priority Inbox appended pages with no
+		// visible limit while scrolling.
+		it('does not start a new page fetch while one is already in flight', async () => {
+			let resolveFetch
+			store.fetchNextEnvelopePage = vi.fn().mockReturnValue(new Promise((resolve) => {
+				resolveFetch = resolve
+			}))
+
+			const view = mountMailbox()
+			const firstCall = view.vm.loadMore()
+			await view.vm.loadMore()
+
+			expect(store.fetchNextEnvelopePage).toHaveBeenCalledTimes(1)
+
+			resolveFetch([])
+			await firstCall
+		})
+
+		it('does not fetch again once the end of the list has already been reached', async () => {
+			store.fetchNextEnvelopePage = vi.fn().mockResolvedValue([])
+
+			const view = mountMailbox()
+			await view.vm.loadMore()
+			expect(view.vm.endReached).toBe(true)
+
+			await view.vm.loadMore()
+
+			expect(store.fetchNextEnvelopePage).toHaveBeenCalledTimes(1)
+		})
+
+		it('still fetches normally when nothing is in flight and the end has not been reached', async () => {
+			store.fetchNextEnvelopePage = vi.fn().mockResolvedValue([{ databaseId: 1 }])
+
+			const view = mountMailbox()
+			await view.vm.loadMore()
+
+			expect(store.fetchNextEnvelopePage).toHaveBeenCalledTimes(1)
+			expect(view.vm.endReached).toBe(false)
+		})
+	})
+
 	it('cleans up its event bus listeners and background-refresh interval on destroy', () => {
 		// Regression: this cleanup lived in an unmounted() hook -- the
 		// Vue-3-style Composition API name, which Vue 2.7 only aliases

@@ -55,7 +55,10 @@ function getScrollTop(element) {
 
 const getComputedStyle = document.defaultView.getComputedStyle
 
-function getScrollEventTarget(element) {
+// Exported for loadMoreSentinelObserver.js, which needs the exact same
+// scrollable-ancestor detection to give an IntersectionObserver-based
+// trigger the correct `root` -- see that file for why.
+export function getScrollEventTarget(element) {
 	let currentNode = element
 	while (currentNode && currentNode.tagName !== 'HTML' && currentNode.tagName !== 'BODY' && currentNode.nodeType === 1) {
 		const overflowY = getComputedStyle(currentNode).overflowY

@@ -6,6 +6,7 @@
 import { createLocalVue, shallowMount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import MailboxThread from '../../../components/MailboxThread.vue'
+import LoadMoreSentinelMixin from '../../../mixins/LoadMoreSentinelMixin.js'
 import Nextcloud from '../../../mixins/Nextcloud.js'
 import { PRIORITY_INBOX_ID, UNIFIED_INBOX_ID } from '../../../store/constants.js'
 import useMainStore from '../../../store/mainStore.js'
@@ -117,6 +118,55 @@ describe('MailboxThread', () => {
 
 		expect(otherTitle.isVisible()).toBe(true)
 		expect(otherMailbox.isVisible()).toBe(true)
+	})
+
+	describe('load-more sentinel (replaces the old v-infinite-scroll directive)', () => {
+		// See util/loadMoreSentinelObserver.js: a scroll-position-math
+		// directive on the whole list was replaced with an
+		// IntersectionObserver watching a sentinel element placed after
+		// everything currently rendered.
+
+		// Each test below spies on LoadMoreSentinelMixin.methods directly
+		// (a module-level object, shared across every test in this file)
+		// -- restore it afterward so a leftover spy doesn't linger into
+		// unrelated tests.
+		afterEach(() => {
+			vi.restoreAllMocks()
+		})
+
+		it('registers the rendered sentinel element with onScroll as the callback on mount', () => {
+			// Spies on the MIXIN's own methods object, not MailboxThread's:
+			// Vue merges mixin methods into the component instance at
+			// mount time, reading from this exact object, so overwriting
+			// it here before mounting is what actually intercepts the
+			// call -- spying on MailboxThread.methods wouldn't, since
+			// this method was never copied onto that object.
+			const registerSpy = vi.spyOn(LoadMoreSentinelMixin.methods, 'registerLoadMoreSentinel')
+
+			const wrapper = mountThread()
+
+			expect(registerSpy).toHaveBeenCalledWith(wrapper.vm.$refs.loadMoreSentinel, wrapper.vm.onScroll)
+			expect(wrapper.vm.$refs.loadMoreSentinel).toBeTruthy()
+		})
+
+		it('unregisters the sentinel observer on destroy', () => {
+			const unregisterSpy = vi.spyOn(LoadMoreSentinelMixin.methods, 'unregisterLoadMoreSentinel')
+
+			const wrapper = mountThread()
+			wrapper.destroy()
+
+			expect(unregisterSpy).toHaveBeenCalled()
+		})
+
+		it("onScroll still emits 'load-more' on the bus, same as the directive used to trigger", () => {
+			const wrapper = mountThread()
+			const bus = wrapper.vm.bus
+			const emitSpy = vi.spyOn(bus, 'emit')
+
+			wrapper.vm.onScroll()
+
+			expect(emitSpy).toHaveBeenCalledWith('load-more')
+		})
 	})
 
 	it("applies the sort-favorites 'not:starred' filter before any child Mailbox mounts", () => {
