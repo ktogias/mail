@@ -40,13 +40,18 @@ describe('Mailbox', () => {
 		mailbox = store.mailboxes[38]
 	})
 
-	function mountMailbox(propsOverride = {}) {
+	function mountMailbox(propsOverride = {}, mocksOverride = {}) {
 		return shallowMount(Mailbox, {
 			propsData: {
 				account,
 				mailbox,
 				bus: { on: vi.fn(), off: vi.fn() },
 				...propsOverride,
+			},
+			mocks: {
+				$route: { params: {} },
+				$router: { push: vi.fn() },
+				...mocksOverride,
 			},
 			store,
 			localVue,
@@ -276,6 +281,76 @@ describe('Mailbox', () => {
 
 			expect(store.fetchNextEnvelopePage).toHaveBeenCalledTimes(1)
 			expect(view.vm.endReached).toBe(false)
+		})
+	})
+
+	describe('records list context when auto-navigating to a neighboring message', () => {
+		// Thread.vue::prefetchListNeighborhood() reads
+		// mainStore.lastOpenedFromList to prefetch this list's neighbors.
+		// handleShortcut()'s j/k-style next/prev navigation and onDelete()'s
+		// auto-jump-to-the-next-message both land on 'message' the same way
+		// a click does, but without going through Envelope.vue's onClick()
+		// -- so without their own recording, opening a message this way
+		// would prefetch stale (or no) neighbors.
+		beforeEach(() => {
+			store.getEnvelopes = vi.fn().mockReturnValue([
+				{ databaseId: 1 },
+				{ databaseId: 2 },
+				{ databaseId: 3 },
+			])
+		})
+
+		it('records the mailbox and search query before jumping to the next message via keyboard shortcut', () => {
+			const view = mountMailbox({ searchQuery: 'is:starred' }, { $route: { params: { threadId: 1 } } })
+
+			view.vm.handleShortcut({ srcKey: 'next' })
+
+			expect(store.lastOpenedFromList).toEqual({ mailboxId: mailbox.databaseId, query: 'is:starred' })
+			expect(view.vm.$router.push).toHaveBeenCalledWith(expect.objectContaining({
+				params: expect.objectContaining({ threadId: 2 }),
+			}))
+		})
+
+		it('records the mailbox and search query before jumping to the previous message via keyboard shortcut', () => {
+			const view = mountMailbox({ searchQuery: 'is:starred' }, { $route: { params: { threadId: 2 } } })
+
+			view.vm.handleShortcut({ srcKey: 'prev' })
+
+			expect(store.lastOpenedFromList).toEqual({ mailboxId: mailbox.databaseId, query: 'is:starred' })
+			expect(view.vm.$router.push).toHaveBeenCalledWith(expect.objectContaining({
+				params: expect.objectContaining({ threadId: 1 }),
+			}))
+		})
+
+		it('does not record anything when a shortcut has no next/previous message to jump to', () => {
+			const view = mountMailbox({ searchQuery: 'is:starred' }, { $route: { params: { threadId: 3 } } })
+
+			view.vm.handleShortcut({ srcKey: 'next' })
+
+			expect(store.lastOpenedFromList).toBeNull()
+			expect(view.vm.$router.push).not.toHaveBeenCalled()
+		})
+
+		it('records the mailbox and search query before onDelete() auto-navigates to the next message', () => {
+			const view = mountMailbox({ searchQuery: 'is:starred' }, { $route: { params: { threadId: 1 } } })
+			store.fetchNextEnvelopes = vi.fn().mockResolvedValue([])
+
+			view.vm.onDelete(1)
+
+			expect(store.lastOpenedFromList).toEqual({ mailboxId: mailbox.databaseId, query: 'is:starred' })
+			expect(view.vm.$router.push).toHaveBeenCalledWith(expect.objectContaining({
+				params: expect.objectContaining({ threadId: 2 }),
+			}))
+		})
+
+		it('does not record anything when onDelete() deletes a message other than the currently open one', () => {
+			const view = mountMailbox({ searchQuery: 'is:starred' }, { $route: { params: { threadId: 1 } } })
+			store.fetchNextEnvelopes = vi.fn().mockResolvedValue([])
+
+			view.vm.onDelete(2)
+
+			expect(store.lastOpenedFromList).toBeNull()
+			expect(view.vm.$router.push).not.toHaveBeenCalled()
 		})
 	})
 

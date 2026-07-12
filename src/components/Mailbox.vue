@@ -499,6 +499,10 @@ export default {
 
 					// Keep the selected account-mailbox combination, but navigate to a different message
 					// (it's not a bug that we don't use next.accountId and next.mailboxId here)
+					this.mainStore.setLastOpenedFromListMutation({
+						mailboxId: this.mailbox.databaseId,
+						query: this.searchQuery,
+					})
 					this.$router.push({
 						name: 'message',
 						params: {
@@ -669,6 +673,10 @@ export default {
 
 			// Keep the selected mailbox, but navigate to a different message
 			// (it's not a bug that we don't use next.mailboxId here)
+			this.mainStore.setLastOpenedFromListMutation({
+				mailboxId: this.mailbox.databaseId,
+				query: this.searchQuery,
+			})
 			this.$router.push({
 				name: 'message',
 				params: {

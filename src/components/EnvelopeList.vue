@@ -527,6 +527,10 @@ export default {
 				}))
 			})
 			if (nextEnvelopeToNavigate) {
+				this.mainStore.setLastOpenedFromListMutation({
+					mailboxId: this.mailbox.databaseId,
+					query: this.searchQuery,
+				})
 				await this.$router.push({
 					name: 'message',
 					params: {
