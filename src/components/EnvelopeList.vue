@@ -122,6 +122,7 @@
 				:key="env.databaseId"
 				:data="env"
 				:mailbox="mailbox"
+				:search-query="searchQuery"
 				:selected="selection.includes(env.databaseId)"
 				:select-mode="selectMode"
 				:has-multiple-accounts="hasMultipleAccounts"

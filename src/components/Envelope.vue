@@ -659,6 +659,16 @@ export default {
 			required: true,
 		},
 
+		// Not used for rendering -- only so onClick() can record which
+		// list this row belongs to (see lastOpenedFromList in
+		// mainStore.js) before navigating. undefined for the plain,
+		// unfiltered case, matching Mailbox.vue's own default.
+		searchQuery: {
+			type: String,
+			required: false,
+			default: undefined,
+		},
+
 		selectMode: {
 			type: Boolean,
 			default: false,
@@ -1159,6 +1169,21 @@ export default {
 						draftId: this.data.databaseId,
 					},
 					templateMessageId: this.data.databaseId,
+				})
+				return
+			}
+
+			// Record which list this row belongs to before the router-link
+			// navigation (the :to="link" binding) actually completes --
+			// Thread.vue::prefetchListNeighborhood() reads this instead of
+			// trying to reconstruct it from route params, since several
+			// lists can share the same route (Priority Inbox's Favorites/
+			// Important/Other, a Favorites sub-list inside a regular
+			// folder, the unified inbox's merge, or any search/filter).
+			if (!this.draft) {
+				this.mainStore.setLastOpenedFromListMutation({
+					mailboxId: this.mailbox.databaseId,
+					query: this.searchQuery,
 				})
 			}
 		},

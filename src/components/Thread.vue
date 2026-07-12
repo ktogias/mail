@@ -48,7 +48,6 @@ import ThreadEnvelope from './ThreadEnvelope.vue'
 import ThreadSummary from './ThreadSummary.vue'
 import logger from '../logger.js'
 import { summarizeThread } from '../service/AiIntergrationsService.js'
-import { PRIORITY_INBOX_ID, UNIFIED_INBOX_ID } from '../store/constants.js'
 import useMainStore from '../store/mainStore.js'
 import { getRandomMessageErrorMessage } from '../util/ErrorMessageFactory.js'
 import { formatDateTimeFromUnix } from '../util/formatDateTime.js'
@@ -287,34 +286,33 @@ export default {
 		// thread (prefetchThreadNeighborhood above). Both directions,
 		// since navigation could go either way.
 		//
-		// Deliberately scoped to a single, unambiguous regular mailbox
-		// view only. Priority Inbox and the unified inbox render several
-		// overlapping lists at once (Favorites/Important/Other, or every
-		// account's own inbox) sharing the same route -- there is no
-		// single "the list" a click came from to reconstruct here, and
-		// guessing wrong would prefetch content the user was never
-		// actually about to read next for no benefit. A regular mailbox
-		// route fully determines its one list via mailboxId + the
-		// optional quick-filter, mirroring MailboxThread.vue's own
-		// query() computed exactly.
+		// Works uniformly for every list -- a regular folder, its own
+		// Favorites sub-list, any Priority Inbox section, the unified
+		// inbox's merged view, or a search/filter's results -- because it
+		// reads mainStore.lastOpenedFromList (set by Envelope.vue's own
+		// onClick(), the only place that unambiguously knows which of
+		// several possibly-simultaneously-rendered lists a row belongs
+		// to) instead of trying to reconstruct "the" list from route
+		// params, which multiple lists can share.
 		prefetchListNeighborhood(openId) {
-			const mailboxId = this.$route.params.mailboxId
-			if (mailboxId === PRIORITY_INBOX_ID || mailboxId === UNIFIED_INBOX_ID) {
+			const openedFrom = this.mainStore.lastOpenedFromList
+			// Absent for any navigation that didn't go through a list
+			// click at all (a direct URL, a bookmark, browser back/
+			// forward, a notification) -- nothing to prefetch against.
+			if (!openedFrom) {
 				return
 			}
 
-			const numericMailboxId = parseInt(mailboxId, 10)
-			// Guards both a genuinely missing/stale route param and, in
-			// tests, a fixture that never registered this mailbox --
-			// getEnvelopes() itself has no such guard (getMailbox()
-			// returning undefined would throw reading its
+			// Guards both a genuinely stale recording (e.g. the mailbox
+			// was since removed) and, in tests, a fixture that never
+			// registered it -- getEnvelopes() itself has no such guard
+			// (getMailbox() returning undefined would throw reading its
 			// .envelopeLists).
-			if (!this.mainStore.getMailbox(numericMailboxId)) {
+			if (!this.mainStore.getMailbox(openedFrom.mailboxId)) {
 				return
 			}
 
-			const query = this.$route.params.filter === 'starred' ? 'is:starred' : undefined
-			const list = this.mainStore.getEnvelopes(numericMailboxId, query)
+			const list = this.mainStore.getEnvelopes(openedFrom.mailboxId, openedFrom.query)
 			const openIndex = list.findIndex((envelope) => envelope.databaseId === openId)
 			if (openIndex === -1) {
 				return

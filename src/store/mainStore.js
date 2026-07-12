@@ -37,6 +37,18 @@ export default defineStore('main', {
 			// Used for view-aware decisions: sync the open mailbox
 			// first, keep refreshing an open priority inbox.
 			currentViewMailboxId: undefined,
+			// Which list (mailboxId + query) the most recent click into a
+			// thread actually came from -- set by Envelope.vue's own
+			// onClick(), the only place that unambiguously knows this
+			// regardless of which of several simultaneously-rendered
+			// lists it belongs to (Priority Inbox's Favorites/Important/
+			// Other sections, a Favorites sub-list inside an otherwise-
+			// regular folder, the unified inbox's merged view, or a
+			// search/filter's results all share the same route, so it
+			// can't be reconstructed from route params alone). Read by
+			// Thread.vue::prefetchListNeighborhood() -- see
+			// mainStore/actions.js.
+			lastOpenedFromList: null,
 			preferences: {},
 			accountsUnmapped: {
 				[UNIFIED_ACCOUNT_ID]: {

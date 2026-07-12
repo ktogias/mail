@@ -7,7 +7,7 @@ import { createLocalVue, shallowMount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import Thread from '../../../components/Thread.vue'
 import Nextcloud from '../../../mixins/Nextcloud.js'
-import { PRIORITY_INBOX_ID, UNIFIED_INBOX_ID } from '../../../store/constants.js'
+import { UNIFIED_INBOX_ID } from '../../../store/constants.js'
 import useMainStore from '../../../store/mainStore.js'
 
 const localVue = createLocalVue()
@@ -682,28 +682,37 @@ describe('Thread', () => {
 		// action is otherwise idle -- prefetch the previous/next message
 		// in the LIST the user opened this one from (not just siblings
 		// within its own thread, see prefetchThreadNeighborhood above).
+		// Reads mainStore.lastOpenedFromList (set by Envelope.vue's own
+		// onClick(), not exercised by these component-level tests) rather
+		// than reconstructing "the list" from route params -- so these
+		// tests set it directly, the same way the real click would have.
 		beforeEach(() => {
 			store.getMailbox = vi.fn().mockImplementation((id) => {
-				if (id === 50) {
-					return { databaseId: 50, name: 'INBOX', specialRole: 'inbox' }
+				if (id === 50 || id === UNIFIED_INBOX_ID) {
+					return { databaseId: id, name: 'INBOX', specialRole: 'inbox' }
 				}
 				return undefined
 			})
-			store.getEnvelopes = vi.fn().mockReturnValue([8001, 8002, 8003, 8004, 8005].map((databaseId) => ({ databaseId })))
+			store.getEnvelopes = vi.fn().mockImplementation((mailboxId, query) => {
+				if (mailboxId === 50 && query === undefined) {
+					return [8001, 8002, 8003, 8004, 8005].map((databaseId) => ({ databaseId }))
+				}
+				if (mailboxId === UNIFIED_INBOX_ID && query === 'is:pi-important') {
+					return [9001, 9002, 9003].map((databaseId) => ({ databaseId }))
+				}
+				if (mailboxId === UNIFIED_INBOX_ID && query === 'is:pi-other') {
+					return [9101, 9102, 9103].map((databaseId) => ({ databaseId }))
+				}
+				return []
+			})
 			store.fetchThread = vi.fn().mockResolvedValue([{ databaseId: 8003 }])
 			store.fetchMessage = vi.fn().mockResolvedValue({})
 		})
 
-		function mountAt(threadId, routeOverrides = {}) {
+		function mountAt(threadId) {
 			return shallowMount(Thread, {
 				mocks: {
-					$route: {
-						params: {
-							mailboxId: 50,
-							threadId,
-							...routeOverrides,
-						},
-					},
+					$route: { params: { mailboxId: 50, threadId } },
 				},
 				store,
 				localVue,
@@ -711,6 +720,8 @@ describe('Thread', () => {
 		}
 
 		it('prefetches both the previous and next message in the list, when the open one sits in the middle', async () => {
+			store.lastOpenedFromList = { mailboxId: 50, query: undefined }
+
 			mountAt(8003)
 			await vi.waitFor(() => {
 				expect(store.fetchMessage).toHaveBeenCalledWith(8002, { speculative: true })
@@ -720,6 +731,8 @@ describe('Thread', () => {
 		})
 
 		it('only prefetches the next message when the open one is first in the list', async () => {
+			store.lastOpenedFromList = { mailboxId: 50, query: undefined }
+
 			mountAt(8001)
 			await vi.waitFor(() => {
 				expect(store.fetchMessage).toHaveBeenCalledWith(8002, { speculative: true })
@@ -729,6 +742,8 @@ describe('Thread', () => {
 		})
 
 		it('only prefetches the previous message when the open one is last in the list', async () => {
+			store.lastOpenedFromList = { mailboxId: 50, query: undefined }
+
 			mountAt(8005)
 			await vi.waitFor(() => {
 				expect(store.fetchMessage).toHaveBeenCalledWith(8004, { speculative: true })
@@ -737,8 +752,10 @@ describe('Thread', () => {
 			expect(store.fetchMessage.mock.calls.filter((call) => call[1]?.speculative)).toHaveLength(1)
 		})
 
-		it('does nothing for the priority inbox -- no single unambiguous list to reconstruct', async () => {
-			mountAt(8003, { mailboxId: PRIORITY_INBOX_ID })
+		it('does nothing when nothing was recorded (a direct URL, bookmark, or browser back/forward)', async () => {
+			store.lastOpenedFromList = null
+
+			mountAt(8003)
 			await vi.waitFor(() => {
 				expect(store.fetchThread).toHaveBeenCalled()
 			})
@@ -746,21 +763,16 @@ describe('Thread', () => {
 			expect(store.getEnvelopes).not.toHaveBeenCalled()
 		})
 
-		it('does nothing for the unified inbox -- same reasoning', async () => {
-			mountAt(8003, { mailboxId: UNIFIED_INBOX_ID })
-			await vi.waitFor(() => {
-				expect(store.fetchThread).toHaveBeenCalled()
-			})
+		it('does not crash when the recorded mailbox no longer exists', () => {
+			store.lastOpenedFromList = { mailboxId: 999, query: undefined }
 
+			expect(() => mountAt(8003)).not.toThrow()
 			expect(store.getEnvelopes).not.toHaveBeenCalled()
 		})
 
-		it('does not crash when the mailbox no longer exists', () => {
-			expect(() => mountAt(8003, { mailboxId: 999 })).not.toThrow()
-			expect(store.getEnvelopes).not.toHaveBeenCalled()
-		})
+		it('does not crash and prefetches nothing when the open message is not in the recorded list', async () => {
+			store.lastOpenedFromList = { mailboxId: 50, query: undefined }
 
-		it('does not crash and prefetches nothing when the open message is not in the list', async () => {
 			mountAt(9999)
 			await vi.waitFor(() => {
 				expect(store.fetchThread).toHaveBeenCalled()
@@ -769,13 +781,37 @@ describe('Thread', () => {
 			expect(store.fetchMessage.mock.calls.filter((call) => call[1]?.speculative)).toHaveLength(0)
 		})
 
-		it("uses the 'starred' quick-filter query when active", async () => {
-			mountAt(8003, { filter: 'starred' })
+		// Priority Inbox's sections all share the SAME mailboxId
+		// (UNIFIED_INBOX_ID) but each has its own distinct query --
+		// getEnvelopes() keys its lists by query within a mailbox, so
+		// this already disambiguates correctly with no special-casing:
+		// unlike the old route-param-based approach, this one works for
+		// Priority Inbox and the unified inbox too, not just a single
+		// regular folder.
+		it('correctly picks the Important section, not Other, when opened from Important', async () => {
+			store.lastOpenedFromList = { mailboxId: UNIFIED_INBOX_ID, query: 'is:pi-important' }
+
+			mountAt(9002)
 			await vi.waitFor(() => {
-				expect(store.getEnvelopes).toHaveBeenCalled()
+				expect(store.fetchMessage).toHaveBeenCalledWith(9001, { speculative: true })
 			})
 
-			expect(store.getEnvelopes).toHaveBeenCalledWith(50, 'is:starred')
+			expect(store.fetchMessage).toHaveBeenCalledWith(9003, { speculative: true })
+			expect(store.fetchMessage).not.toHaveBeenCalledWith(9101, expect.anything())
+			expect(store.fetchMessage).not.toHaveBeenCalledWith(9103, expect.anything())
+		})
+
+		it('correctly picks the Other section, not Important, when opened from Other', async () => {
+			store.lastOpenedFromList = { mailboxId: UNIFIED_INBOX_ID, query: 'is:pi-other' }
+
+			mountAt(9102)
+			await vi.waitFor(() => {
+				expect(store.fetchMessage).toHaveBeenCalledWith(9101, { speculative: true })
+			})
+
+			expect(store.fetchMessage).toHaveBeenCalledWith(9103, { speculative: true })
+			expect(store.fetchMessage).not.toHaveBeenCalledWith(9001, expect.anything())
+			expect(store.fetchMessage).not.toHaveBeenCalledWith(9003, expect.anything())
 		})
 	})
 })

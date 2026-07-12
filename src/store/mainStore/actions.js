@@ -1019,6 +1019,12 @@ export default function mainStoreActions() {
 		setCurrentViewMailboxIdMutation(mailboxId) {
 			this.currentViewMailboxId = mailboxId
 		},
+		// See lastOpenedFromList in mainStore.js's state() for the full
+		// reasoning. mailboxId/query together are exactly what
+		// getEnvelopes() needs to reconstruct the same list later.
+		setLastOpenedFromListMutation({ mailboxId, query }) {
+			this.lastOpenedFromList = { mailboxId, query }
+		},
 		envelopeFetchStartedMutation({ mailboxId, query }) {
 			const key = mailboxId + '::' + normalizedEnvelopeListId(query)
 			Vue.set(this.envelopeFetchCounts, key, (this.envelopeFetchCounts[key] ?? 0) + 1)

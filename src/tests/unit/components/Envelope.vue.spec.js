@@ -449,6 +449,59 @@ describe('Envelope', () => {
 		})
 	})
 
+	describe('onClick records which list this row belongs to', () => {
+		// Thread.vue::prefetchListNeighborhood() reads
+		// mainStore.lastOpenedFromList instead of trying to reconstruct
+		// "the list" from route params -- several lists (Priority Inbox's
+		// Favorites/Important/Other, a Favorites sub-list inside a
+		// regular folder, the unified inbox's merge, any search/filter)
+		// can share the same route, so only the actual click -- which
+		// unambiguously knows its own mailbox/searchQuery props -- can
+		// record this correctly.
+		function mountEnvelope(propsOverride = {}) {
+			return shallowMount(Envelope, {
+				mocks: { $route },
+				propsData: {
+					mailbox: { specialRole: '', databaseId: 42, myAcls: undefined },
+					searchQuery: 'is:starred',
+					data: {
+						accountId: 123,
+						databaseId: 999,
+						from: [{ email: 'info@test.com' }],
+						flags: { seen: false, flagged: false, $junk: false, answered: false, hasAttachments: false, draft: false },
+					},
+					...propsOverride,
+				},
+				store,
+				localVue,
+			})
+		}
+
+		it('records the mailbox and search query on a plain click', async () => {
+			const view = mountEnvelope()
+
+			await view.vm.onClick({})
+
+			expect(store.lastOpenedFromList).toEqual({ mailboxId: 42, query: 'is:starred' })
+		})
+
+		it('does not record anything for a draft (opens the composer instead)', async () => {
+			store.startComposerSession = vi.fn().mockResolvedValue({})
+			const view = mountEnvelope({
+				data: {
+					accountId: 123,
+					databaseId: 999,
+					from: [{ email: 'info@test.com' }],
+					flags: { seen: false, flagged: false, $junk: false, answered: false, hasAttachments: false, draft: true },
+				},
+			})
+
+			await view.vm.onClick({})
+
+			expect(store.lastOpenedFromList).toBeNull()
+		})
+	})
+
 	describe('hover prefetch', () => {
 		// Gmail-style: start fetching a row's message+thread while the
 		// pointer is still hovering, so the data is already there by the
