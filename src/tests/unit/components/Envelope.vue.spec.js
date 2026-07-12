@@ -492,8 +492,8 @@ describe('Envelope', () => {
 
 			await vi.advanceTimersByTimeAsync(200)
 
-			expect(store.fetchMessage).toHaveBeenCalledWith(999)
-			expect(store.fetchThread).toHaveBeenCalledWith(999)
+			expect(store.fetchMessage).toHaveBeenCalledWith(999, { speculative: true })
+			expect(store.fetchThread).toHaveBeenCalledWith(999, { speculative: true })
 		})
 
 		it('does not prefetch when the pointer leaves before the delay elapses', async () => {
@@ -526,8 +526,8 @@ describe('Envelope', () => {
 
 			await vi.advanceTimersByTimeAsync(60)
 
-			expect(store.fetchMessage).toHaveBeenCalledWith(999)
-			expect(store.fetchThread).toHaveBeenCalledWith(999)
+			expect(store.fetchMessage).toHaveBeenCalledWith(999, { speculative: true })
+			expect(store.fetchThread).toHaveBeenCalledWith(999, { speculative: true })
 		})
 
 		it('does not prefetch when touchmove happens before the delay elapses', async () => {
@@ -604,8 +604,8 @@ describe('Envelope', () => {
 
 			await vi.advanceTimersByTimeAsync(300)
 
-			expect(store.fetchMessage).toHaveBeenCalledWith(999)
-			expect(store.fetchThread).toHaveBeenCalledWith(999)
+			expect(store.fetchMessage).toHaveBeenCalledWith(999, { speculative: true })
+			expect(store.fetchThread).toHaveBeenCalledWith(999, { speculative: true })
 		})
 
 		it('does not prefetch if the row leaves the viewport before the settle delay elapses', async () => {

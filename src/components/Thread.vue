@@ -239,11 +239,63 @@ export default {
 			return firstUnread ? firstUnread.databaseId : this.threadId
 		},
 
+		// Proactively prefetch a small, ordered neighborhood around the
+		// message that just got auto-expanded, rather than waiting on
+		// each sibling ThreadEnvelope's own viewport-prefetch to notice
+		// it's scrolled into view: the immediately-previous message
+		// (most likely to be re-read for context while reading the
+		// current one), then the thread's first message (often the
+		// original question/context in a long back-and-forth) -- the
+		// rest of the thread is left to normal viewport-prefetch.
+		// Speculative like every other prefetch trigger: if the user
+		// navigates to a different thread before these resolve,
+		// cancelSpeculativeFetchesExcept() (called at the top of the
+		// NEXT resetThread()) aborts them same as any other.
+		prefetchThreadNeighborhood(openId) {
+			const openIndex = this.thread.findIndex((envelope) => envelope.databaseId === openId)
+			if (openIndex === -1) {
+				return
+			}
+
+			const candidates = []
+			if (openIndex > 0) {
+				candidates.push(this.thread[openIndex - 1])
+			}
+			if (openIndex !== 0) {
+				candidates.push(this.thread[0])
+			}
+
+			// A short thread (e.g. exactly 2 messages) can make
+			// "previous" and "first" the same envelope -- fetchMessage()
+			// dedupes per id regardless, but skip the redundant call.
+			const seen = new Set()
+			for (const envelope of candidates) {
+				if (seen.has(envelope.databaseId)) {
+					continue
+				}
+				seen.add(envelope.databaseId)
+				this.mainStore.fetchMessage(envelope.databaseId, { speculative: true }).catch(() => {})
+			}
+		},
+
 		async resetThread() {
 			// Opening a message is a direct user action -- give it
 			// priority over the background watched-mailbox poller (see
 			// setInteractionPriorityMutation() in the store).
 			this.mainStore.setInteractionPriorityMutation()
+
+			// Every OTHER in-flight speculative (hover/touch/viewport
+			// prefetch-triggered) fetch is now provably wasted work --
+			// the user just committed to opening THIS thread, not
+			// whatever else was being prefetched from list scrolling.
+			// Aborting them frees the mail-pool workers/IMAP connections
+			// they're holding for the fetches below that actually matter
+			// now. Confirmed live: unbounded scroll-triggered prefetch
+			// queued a real thread open behind ~20 unrelated messages'
+			// body fetches for nearly a minute (thread 926521,
+			// 2026-07-12) before this existed.
+			this.mainStore.cancelSpeculativeFetchesExcept(this.threadId)
+
 			this.expandedThreads = [this.initiallyExpandedEnvelopeId()]
 			this.errorMessage = ''
 			this.errorTitle = ''
@@ -304,6 +356,8 @@ export default {
 				if (!this.expandedThreads.includes(target)) {
 					this.expandedThreads = [target]
 				}
+
+				this.prefetchThreadNeighborhood(target)
 
 				this.loading = false
 			} catch (error) {

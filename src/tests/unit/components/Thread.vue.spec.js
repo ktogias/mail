@@ -538,4 +538,134 @@ describe('Thread', () => {
 			expect(store.fetchMessage).toHaveBeenCalledWith(200)
 		})
 	})
+
+	describe('cancels stale speculative prefetches on open', () => {
+		// Confirmed live (thread 926521, 2026-07-12): unrelated
+		// viewport-prefetch requests from list scrolling queued a real
+		// thread open behind them for ~31s. resetThread() -- the one
+		// place that knows a real open just happened -- must cancel
+		// every OTHER speculative fetch immediately, before anything
+		// else, so those workers/connections free up for what actually
+		// matters now.
+		it('calls cancelSpeculativeFetchesExcept with the opened thread id, before fetching anything', () => {
+			const calls = []
+			store.cancelSpeculativeFetchesExcept = vi.fn(() => calls.push('cancel'))
+			store.fetchMessage = vi.fn(() => {
+				calls.push('fetchMessage')
+				return Promise.resolve({ databaseId: 200 })
+			})
+			store.fetchThread = vi.fn(() => {
+				calls.push('fetchThread')
+				return Promise.resolve([])
+			})
+
+			shallowMount(Thread, {
+				mocks: {
+					$route: { params: { threadId: 200 } },
+				},
+				store,
+				localVue,
+			})
+
+			expect(store.cancelSpeculativeFetchesExcept).toHaveBeenCalledWith(200)
+			expect(calls[0]).toBe('cancel')
+		})
+	})
+
+	describe('prefetchThreadNeighborhood', () => {
+		// A dedicated, simple fixture (single inbox mailbox, no trash/
+		// junk exclusion to reason about) rather than reusing the shared
+		// fixtures above -- full control over exactly where the opened
+		// message sits in the thread.
+		beforeEach(() => {
+			store.getEnvelope = vi.fn().mockReturnValue({
+				accountId: 500,
+				threadRootId: 'neighborhood-thread',
+				mailboxId: 50,
+			})
+			store.getEnvelopesByThreadRootId = vi.fn().mockReturnValue([7001, 7002, 7003, 7004, 7005].map((databaseId) => ({
+				accountId: 500,
+				threadRootId: 'neighborhood-thread',
+				mailboxId: 50,
+				databaseId,
+				from: [],
+				to: [],
+				cc: [],
+				flags: { seen: true },
+			})))
+			store.getMailbox = vi.fn().mockReturnValue({
+				databaseId: 50,
+				name: 'INBOX',
+				accountId: 500,
+				specialRole: 'inbox',
+			})
+			store.getMailboxes = vi.fn().mockReturnValue([
+				{ databaseId: 50, name: 'INBOX', specialRole: 'inbox' },
+			])
+			// fetchThread()'s own local method treats an empty array as
+			// "thread not found" and returns early, before ever reaching
+			// prefetchThreadNeighborhood() -- only the .length matters
+			// here, this.thread (the computed prop actually used for the
+			// neighborhood calculation) comes from the getters above.
+			store.fetchThread = vi.fn().mockResolvedValue([{ databaseId: 7001 }])
+		})
+
+		it('prefetches the previous message and the thread\'s first message, when the open one sits in the middle', async () => {
+			store.fetchMessage = vi.fn().mockResolvedValue({ databaseId: 7003 })
+
+			// All read (flags.seen: true) -- initiallyExpandedEnvelopeId()
+			// falls back to the clicked/route id, 7003, which is index 2
+			// of 5: a distinct "previous" (7002) and "first" (7001).
+			shallowMount(Thread, {
+				mocks: {
+					$route: { params: { threadId: 7003 } },
+				},
+				store,
+				localVue,
+			})
+			await vi.waitFor(() => {
+				expect(store.fetchMessage).toHaveBeenCalledWith(7002, { speculative: true })
+			})
+
+			expect(store.fetchMessage).toHaveBeenCalledWith(7001, { speculative: true })
+		})
+
+		it('does not duplicate the fetch when previous and first are the same message', async () => {
+			store.fetchMessage = vi.fn().mockResolvedValue({ databaseId: 7002 })
+
+			// Open at index 1 of 5: previous (index 0) and first
+			// (index 0) are the same envelope, 7001.
+			shallowMount(Thread, {
+				mocks: {
+					$route: { params: { threadId: 7002 } },
+				},
+				store,
+				localVue,
+			})
+			await vi.waitFor(() => {
+				expect(store.fetchMessage.mock.calls.some(([id]) => id === 7001)).toBe(true)
+			})
+
+			expect(store.fetchMessage.mock.calls.filter(([id]) => id === 7001)).toHaveLength(1)
+		})
+
+		it('prefetches nothing beyond the open message itself when it is already the first', async () => {
+			store.fetchMessage = vi.fn().mockResolvedValue({ databaseId: 7001 })
+
+			shallowMount(Thread, {
+				mocks: {
+					$route: { params: { threadId: 7001 } },
+				},
+				store,
+				localVue,
+			})
+			await vi.waitFor(() => {
+				expect(store.fetchThread).toHaveBeenCalled()
+			})
+
+			// Only the open message itself (fetched by resetThread()'s own
+			// parallel-prefetch, non-speculative) -- no neighborhood calls.
+			expect(store.fetchMessage.mock.calls.filter((call) => call[1]?.speculative)).toHaveLength(0)
+		})
+	})
 })

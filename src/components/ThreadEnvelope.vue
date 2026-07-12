@@ -798,7 +798,7 @@ export default {
 		} else {
 			// Already fetched above otherwise -- nothing left to prefetch.
 			this.registerViewportPrefetch(() => {
-				this.mainStore.fetchMessage(this.envelope.databaseId).catch(() => {})
+				this.mainStore.fetchMessage(this.envelope.databaseId, { speculative: true }).catch(() => {})
 			})
 		}
 		if (this.mainStore.getPreference('internal-addresses', 'false') === 'true') {
@@ -851,7 +851,7 @@ export default {
 				return
 			}
 			this.startHoverPrefetch(() => {
-				this.mainStore.fetchMessage(this.envelope.databaseId).catch(() => {})
+				this.mainStore.fetchMessage(this.envelope.databaseId, { speculative: true }).catch(() => {})
 			})
 		},
 
@@ -868,7 +868,7 @@ export default {
 				return
 			}
 			this.startTouchPrefetch(() => {
-				this.mainStore.fetchMessage(this.envelope.databaseId).catch(() => {})
+				this.mainStore.fetchMessage(this.envelope.databaseId, { speculative: true }).catch(() => {})
 			})
 		},
 

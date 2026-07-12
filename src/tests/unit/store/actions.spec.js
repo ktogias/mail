@@ -2592,6 +2592,99 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	describe('cancelSpeculativeFetchesExcept: aborting stale prefetches on real navigation', () => {
+		// Confirmed live (2026-07-12, thread 926521): viewport-prefetch
+		// firing for ~20 messages scrolled past in Priority Inbox
+		// saturated the 3-worker mailwrite pool for over two minutes,
+		// queueing a real, user-clicked message open behind them for
+		// ~31s on top of its own ~25s execution. A speculative fetch
+		// that hasn't resolved by the time the user opens something else
+		// is provably wasted work from that point on -- aborting it
+		// frees the worker/IMAP connection immediately.
+		// Every test here uses a controllable (not eternally-pending)
+		// mock promise and awaits it to completion before finishing, so
+		// pendingMessageFetches/pendingThreadFetches and the speculative
+		// controller maps -- all module-level, not reset between tests --
+		// never leak a dangling entry into a later test that happens to
+		// reuse the same id.
+		it('aborts a speculative fetchMessage for a different id', async () => {
+			let rejectFetch
+			MessageService.fetchMessage.mockReturnValue(new Promise((resolve, reject) => {
+				rejectFetch = reject
+			}))
+
+			const fetchPromise = store.fetchMessage(90001, { speculative: true }).catch(() => {})
+			const signal = MessageService.fetchMessage.mock.calls[0][1].signal
+			expect(signal.aborted).toBe(false)
+
+			store.cancelSpeculativeFetchesExcept(999)
+
+			expect(signal.aborted).toBe(true)
+
+			rejectFetch(new Error('aborted'))
+			await fetchPromise
+		})
+
+		it('does NOT abort the speculative fetch for the id actually being opened', async () => {
+			let resolveFetch
+			MessageService.fetchMessage.mockReturnValue(new Promise((resolve) => {
+				resolveFetch = resolve
+			}))
+
+			const fetchPromise = store.fetchMessage(90002, { speculative: true })
+			const signal = MessageService.fetchMessage.mock.calls[0][1].signal
+
+			store.cancelSpeculativeFetchesExcept(90002)
+
+			expect(signal.aborted).toBe(false)
+
+			resolveFetch({ databaseId: 90002 })
+			await fetchPromise
+		})
+
+		it('never touches a non-speculative fetch', async () => {
+			let resolveFetch
+			MessageService.fetchMessage.mockReturnValue(new Promise((resolve) => {
+				resolveFetch = resolve
+			}))
+
+			const fetchPromise = store.fetchMessage(90003)
+			const signal = MessageService.fetchMessage.mock.calls[0][1].signal
+
+			store.cancelSpeculativeFetchesExcept(999)
+
+			expect(signal.aborted).toBe(false)
+
+			resolveFetch({ databaseId: 90003 })
+			await fetchPromise
+		})
+
+		it('aborts a speculative fetchThread for a different id', async () => {
+			let rejectFetch
+			MessageService.fetchThread.mockReturnValue(new Promise((resolve, reject) => {
+				rejectFetch = reject
+			}))
+
+			const fetchPromise = store.fetchThread(90004, { speculative: true }).catch(() => {})
+			const signal = MessageService.fetchThread.mock.calls[0][1].signal
+
+			store.cancelSpeculativeFetchesExcept(999)
+
+			expect(signal.aborted).toBe(true)
+
+			rejectFetch(new Error('aborted'))
+			await fetchPromise
+		})
+
+		it('clears the speculative registration once the fetch settles, so a later cancel has nothing left to abort', async () => {
+			MessageService.fetchMessage.mockResolvedValue({ databaseId: 90005 })
+
+			await store.fetchMessage(90005, { speculative: true })
+
+			expect(() => store.cancelSpeculativeFetchesExcept(999)).not.toThrow()
+		})
+	})
+
 	describe('syncEnvelopes: malformed response retry', () => {
 		// Regression: confirmed live -- a sync response missing
 		// newMessages/changedMessages crashed with a raw TypeError and

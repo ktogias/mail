@@ -257,6 +257,26 @@ const pendingThreadFetches = new Map()
 // (~25-60s cache-miss body via a slow provider), well below forever.
 const FETCH_MESSAGE_TIMEOUT_MS = 90 * 1000
 
+// Speculative (prefetch-triggered, i.e. called with { speculative: true }
+// from HoverPrefetchMixin/ViewportPrefetchMixin) fetches get their own
+// AbortController here, tracked separately from pendingMessageFetches/
+// pendingThreadFetches above (which exist purely for dedup, not
+// cancellation) -- so a REAL navigation (Thread.vue::resetThread()) can
+// call cancelSpeculativeFetchesExcept() below to abort every OTHER
+// in-flight speculative fetch the instant it happens.
+//
+// Confirmed live (2026-07-12, thread 926521): viewport-prefetch firing
+// for ~20 messages scrolled past in Priority Inbox saturated the 3-worker
+// mailwrite pool for over two minutes, queueing a real, user-clicked
+// message open behind them for ~31s on top of its own ~25s execution --
+// nearly a minute total for what should have been an ordinary open. A
+// prefetch that hasn't resolved by the time the user commits to opening
+// something else is provably wasted work from that moment on; aborting it
+// frees the worker/IMAP connection immediately, and costs nothing since
+// the request was never going to be used anyway.
+const speculativeMessageFetchControllers = new Map()
+const speculativeThreadFetchControllers = new Map()
+
 // toggleEnvelopeSeen()/toggleEnvelopeJunk()/markEnvelopeFavoriteOrUnfavorite()
 // all optimistically set a flag via flagEnvelopeMutation() and await their
 // own PUT to confirm it -- but a completely independent sync request
@@ -2057,9 +2077,24 @@ export default function mainStoreActions() {
 				}
 			})
 		},
-		async fetchThread(id) {
+		async fetchThread(id, { speculative = false } = {}) {
 			if (pendingThreadFetches.has(id)) {
 				return pendingThreadFetches.get(id)
+			}
+
+			// speculative=true (HoverPrefetchMixin/ViewportPrefetchMixin
+			// only): combine the usual hung-request timeout with a second,
+			// externally-triggerable AbortController so
+			// cancelSpeculativeFetchesExcept() can cut this short the
+			// instant it's no longer the thread the user's actually
+			// opening. Real (non-speculative) callers keep the plain
+			// timeout-only signal -- never abortable out from under an
+			// actual navigation.
+			let signal = AbortSignal.timeout(FETCH_MESSAGE_TIMEOUT_MS)
+			if (speculative) {
+				const controller = new AbortController()
+				speculativeThreadFetchControllers.set(id, controller)
+				signal = AbortSignal.any([signal, controller.signal])
 			}
 
 			// Same reasoning as fetchMessage() below: this promise gates
@@ -2068,7 +2103,7 @@ export default function mainStoreActions() {
 			// prefetch racing an actual open) reuses it instead of firing
 			// a duplicate request.
 			const promise = handleHttpAuthErrors(async () => {
-				const thread = await fetchThread(id, { signal: AbortSignal.timeout(FETCH_MESSAGE_TIMEOUT_MS) })
+				const thread = await fetchThread(id, { signal })
 				this.addEnvelopeThreadMutation({
 					id,
 					thread,
@@ -2076,11 +2111,12 @@ export default function mainStoreActions() {
 				return thread
 			}).finally(() => {
 				pendingThreadFetches.delete(id)
+				speculativeThreadFetchControllers.delete(id)
 			})
 			pendingThreadFetches.set(id, promise)
 			return promise
 		},
-		async fetchMessage(id) {
+		async fetchMessage(id, { speculative = false } = {}) {
 			if (this.messages[id]) {
 				return this.messages[id]
 			}
@@ -2103,7 +2139,13 @@ export default function mainStoreActions() {
 			// slow provider measured up to ~25-60s; nginx's own upstream
 			// timeout (120s on the body tier) makes anything beyond this a
 			// dead connection, not a slow response.
-			const signal = AbortSignal.timeout(FETCH_MESSAGE_TIMEOUT_MS)
+			let signal = AbortSignal.timeout(FETCH_MESSAGE_TIMEOUT_MS)
+			if (speculative) {
+				// See fetchThread() above for the reasoning.
+				const controller = new AbortController()
+				speculativeMessageFetchControllers.set(id, controller)
+				signal = AbortSignal.any([signal, controller.signal])
+			}
 
 			const promise = handleHttpAuthErrors(async () => {
 				const message = await fetchMessage(id, { signal })
@@ -2116,9 +2158,33 @@ export default function mainStoreActions() {
 				return message
 			}).finally(() => {
 				pendingMessageFetches.delete(id)
+				speculativeMessageFetchControllers.delete(id)
 			})
 			pendingMessageFetches.set(id, promise)
 			return promise
+		},
+		// Called from Thread.vue::resetThread() the instant a real open
+		// happens, before anything else: every OTHER in-flight speculative
+		// fetch is now provably wasted work (the user just committed to a
+		// different message/thread), so abort it immediately rather than
+		// let it keep occupying a mail-pool worker/IMAP connection the
+		// real open needs. The id actually being opened is exempted --
+		// if it already had a speculative fetch in flight (a hover/touch/
+		// viewport prefetch that happened to guess right), that request
+		// keeps going and the real open's own fetchMessage()/fetchThread()
+		// call dedupes into it via pendingMessageFetches/
+		// pendingThreadFetches, rather than being needlessly restarted.
+		cancelSpeculativeFetchesExcept(id) {
+			for (const [fetchId, controller] of speculativeMessageFetchControllers) {
+				if (fetchId !== id) {
+					controller.abort()
+				}
+			}
+			for (const [fetchId, controller] of speculativeThreadFetchControllers) {
+				if (fetchId !== id) {
+					controller.abort()
+				}
+			}
 		},
 		async fetchItineraries(id) {
 			return handleHttpAuthErrors(async () => {

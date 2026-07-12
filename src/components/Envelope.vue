@@ -1015,8 +1015,8 @@ export default {
 		// prefetch. Mirrors onEnvelopeMouseEnter()/onEnvelopeTouchStart().
 		if (!this.draft) {
 			this.registerViewportPrefetch(() => {
-				this.mainStore.fetchMessage(this.data.databaseId).catch(() => {})
-				this.mainStore.fetchThread(this.data.databaseId).catch(() => {})
+				this.mainStore.fetchMessage(this.data.databaseId, { speculative: true }).catch(() => {})
+				this.mainStore.fetchThread(this.data.databaseId, { speculative: true }).catch(() => {})
 			})
 		}
 	},
@@ -1170,8 +1170,8 @@ export default {
 				return
 			}
 			this.startHoverPrefetch(() => {
-				this.mainStore.fetchMessage(this.data.databaseId).catch(() => {})
-				this.mainStore.fetchThread(this.data.databaseId).catch(() => {})
+				this.mainStore.fetchMessage(this.data.databaseId, { speculative: true }).catch(() => {})
+				this.mainStore.fetchThread(this.data.databaseId, { speculative: true }).catch(() => {})
 			})
 		},
 
@@ -1188,8 +1188,8 @@ export default {
 				return
 			}
 			this.startTouchPrefetch(() => {
-				this.mainStore.fetchMessage(this.data.databaseId).catch(() => {})
-				this.mainStore.fetchThread(this.data.databaseId).catch(() => {})
+				this.mainStore.fetchMessage(this.data.databaseId, { speculative: true }).catch(() => {})
+				this.mainStore.fetchThread(this.data.databaseId, { speculative: true }).catch(() => {})
 			})
 		},
 
