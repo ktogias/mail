@@ -74,6 +74,15 @@ export default {
 			summaryText: '',
 			summaryError: false,
 			loadedThreads: 0,
+			// Set when fetchThread() fails on a network-shaped error (no
+			// HTTP response at all -- a lost connection, or the browser
+			// itself killing an in-flight request when the tab is
+			// backgrounded on mobile) rather than a definitive 403/500
+			// from the server. onVisibilityChange() retries automatically
+			// once the tab is visible again, instead of leaving the user
+			// stuck on an error for something that was never really about
+			// this thread not existing.
+			retryOnVisible: false,
 		}
 	},
 
@@ -173,10 +182,12 @@ export default {
 	created() {
 		this.resetThread()
 		window.addEventListener('keydown', this.handleKeyDown)
+		document.addEventListener('visibilitychange', this.onVisibilityChange)
 	},
 
 	beforeDestroy() {
 		window.removeEventListener('keydown', this.handleKeyDown)
+		document.removeEventListener('visibilitychange', this.onVisibilityChange)
 	},
 
 	methods: {
@@ -378,6 +389,7 @@ export default {
 			this.loading = true
 			this.errorMessage = ''
 			this.errorTitle = ''
+			this.retryOnVisible = false
 			const threadId = this.threadId
 
 			try {
@@ -458,8 +470,39 @@ export default {
 					this.error = { message: t('mail', 'Email was not able to be opened') }
 					this.loading = false
 				} else {
+					// No HTTP response at all -- a network-shaped failure
+					// (lost connection, or the browser killing an
+					// in-flight request when the tab is backgrounded on
+					// mobile), not a definitive answer about this thread.
+					// Confirmed live: previously left `loading` stuck true
+					// forever here -- the one branch in this otherwise-
+					// consistent set that never reset it -- so the
+					// template's loading/error v-if chain kept showing
+					// the spinner forever instead of ever reaching the
+					// error message this branch had just set.
+					// retryOnVisible lets onVisibilityChange() retry
+					// automatically rather than leaving the user stuck.
 					this.errorMessage = t('mail', 'Could not load your message thread')
+					this.loading = false
+					this.retryOnVisible = true
 				}
+			}
+		},
+
+		// Mirrors App.vue's own visibilitychange handling (background
+		// sync tiering) -- same Page Visibility API, different purpose
+		// here: a thread that failed to load on a network-shaped error
+		// while the tab was backgrounded gets one automatic retry the
+		// moment the user actually looks at it again, instead of being
+		// left on an error (or, before the fix above, a stuck spinner)
+		// for something that was never really about this thread.
+		onVisibilityChange() {
+			if (document.visibilityState === 'visible' && this.retryOnVisible) {
+				this.retryOnVisible = false
+				logger.debug('Retrying thread load after the tab became visible again following a network-shaped failure', {
+					threadId: this.threadId,
+				})
+				this.resetThread()
 			}
 		},
 

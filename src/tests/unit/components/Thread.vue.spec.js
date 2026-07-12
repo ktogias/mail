@@ -514,6 +514,126 @@ describe('Thread', () => {
 		})
 	})
 
+	describe('resume-on-visibility after a network-shaped failure', () => {
+		// Confirmed live: backgrounding the tab on Android mid-thread-load
+		// then returning previously left the loading spinner stuck
+		// forever. fetchThread()'s catch() branch for a network-shaped
+		// error (no HTTP response at all -- exactly what a backgrounded
+		// tab's dropped connection produces) never reset `loading`, so
+		// the template's loading/error v-if chain never reached the error
+		// message that branch had actually just set.
+		function setVisibility(state) {
+			Object.defineProperty(document, 'visibilityState', {
+				value: state,
+				configurable: true,
+			})
+		}
+
+		afterEach(() => {
+			setVisibility('visible')
+		})
+
+		it('stops the loading spinner and shows the error for a network-shaped failure, marking it retryable', async () => {
+			store.fetchThread = vi.fn().mockRejectedValue(new Error('Network Error'))
+
+			const view = shallowMount(Thread, {
+				mocks: { $route: { params: { threadId: 900 } } },
+				store,
+				localVue,
+			})
+			await Promise.resolve()
+			await Promise.resolve()
+
+			expect(view.vm.loading).toBe(false)
+			expect(view.vm.errorMessage).toBeTruthy()
+			expect(view.vm.retryOnVisible).toBe(true)
+		})
+
+		it('does not mark a definitive 403 (thread genuinely gone) as retryable', async () => {
+			const error = new Error('Forbidden')
+			error.response = { status: 403 }
+			store.fetchThread = vi.fn().mockRejectedValue(error)
+
+			const view = shallowMount(Thread, {
+				mocks: { $route: { params: { threadId: 900 } } },
+				store,
+				localVue,
+			})
+			await Promise.resolve()
+			await Promise.resolve()
+
+			expect(view.vm.retryOnVisible).toBe(false)
+		})
+
+		it('retries automatically once the tab becomes visible again', async () => {
+			store.fetchThread = vi.fn().mockRejectedValue(new Error('Network Error'))
+			const view = shallowMount(Thread, {
+				mocks: { $route: { params: { threadId: 900 } } },
+				store,
+				localVue,
+			})
+			await Promise.resolve()
+			await Promise.resolve()
+			expect(view.vm.retryOnVisible).toBe(true)
+
+			store.fetchThread = vi.fn().mockResolvedValue([{ databaseId: 900 }])
+			setVisibility('visible')
+			document.dispatchEvent(new Event('visibilitychange'))
+
+			expect(store.fetchThread).toHaveBeenCalled()
+			expect(view.vm.retryOnVisible).toBe(false)
+		})
+
+		it('does not retry while the tab is still hidden', async () => {
+			store.fetchThread = vi.fn().mockRejectedValue(new Error('Network Error'))
+			shallowMount(Thread, {
+				mocks: { $route: { params: { threadId: 900 } } },
+				store,
+				localVue,
+			})
+			await Promise.resolve()
+			await Promise.resolve()
+
+			store.fetchThread = vi.fn().mockResolvedValue([])
+			setVisibility('hidden')
+			document.dispatchEvent(new Event('visibilitychange'))
+
+			expect(store.fetchThread).not.toHaveBeenCalled()
+		})
+
+		it('does not retry when nothing marked the failure as retryable', async () => {
+			store.fetchThread = vi.fn().mockResolvedValue([{ databaseId: 900 }])
+			shallowMount(Thread, {
+				mocks: { $route: { params: { threadId: 900 } } },
+				store,
+				localVue,
+			})
+			await Promise.resolve()
+			await Promise.resolve()
+
+			store.fetchThread = vi.fn().mockResolvedValue([])
+			setVisibility('visible')
+			document.dispatchEvent(new Event('visibilitychange'))
+
+			expect(store.fetchThread).not.toHaveBeenCalled()
+		})
+
+		it('removes the visibilitychange listener on destroy', () => {
+			store.fetchThread = vi.fn().mockResolvedValue([])
+			const view = shallowMount(Thread, {
+				mocks: { $route: { params: { threadId: 900 } } },
+				store,
+				localVue,
+			})
+			const removeSpy = vi.spyOn(document, 'removeEventListener')
+
+			view.destroy()
+
+			expect(removeSpy).toHaveBeenCalledWith('visibilitychange', expect.any(Function))
+			removeSpy.mockRestore()
+		})
+	})
+
 	describe('message prefetch', () => {
 		// The clicked message's databaseId is already known from the
 		// route, before the thread listing resolves -- fetching it in
