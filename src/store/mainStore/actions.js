@@ -2409,6 +2409,18 @@ export default function mainStoreActions() {
 			})
 		},
 		async deleteThread({ envelope }) {
+			// Every singular-message equivalent (deleteMessage/moveMessage/
+			// snoozeMessage) arms this synchronously, first thing -- this
+			// whole Thread family didn't, so syncWatchedMailboxes()'s
+			// background poller had no signal that a delete/move/snooze
+			// was just requested and was free to race the optimistic
+			// removeEnvelopeMutation() below with its own priority-inbox
+			// refresh, re-adding the just-deleted envelope from a response
+			// that reflects server state from before the delete landed.
+			// Confirmed live: deleting a thread from Priority Inbox on a
+			// slower (mobile) connection sometimes reappeared seconds
+			// later. See nextcloud-mail-oauth-integration.md.
+			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
 				this.removeEnvelopeMutation({ id: envelope.databaseId })
 
@@ -2426,6 +2438,7 @@ export default function mainStoreActions() {
 			envelope,
 			destMailboxId,
 		}) {
+			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
 				this.removeEnvelopeMutation({ id: envelope.databaseId })
 
@@ -2444,6 +2457,7 @@ export default function mainStoreActions() {
 			unixTimestamp,
 			destMailboxId,
 		}) {
+			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
 				try {
 					await ThreadService.snoozeThread(envelope.databaseId, unixTimestamp, destMailboxId)
@@ -2457,6 +2471,7 @@ export default function mainStoreActions() {
 			})
 		},
 		async unSnoozeThread({ envelope }) {
+			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
 				try {
 					await ThreadService.unSnoozeThread(envelope.databaseId)

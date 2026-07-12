@@ -11,6 +11,7 @@ import * as AccountService from '../../../service/AccountService.js'
 import * as MailboxService from '../../../service/MailboxService.js'
 import * as MessageService from '../../../service/MessageService.js'
 import * as NotificationService from '../../../service/NotificationService.js'
+import * as ThreadService from '../../../service/ThreadService.js'
 import { PAGE_SIZE, UNIFIED_INBOX_ID } from '../../../store/constants.js'
 import useMainStore from '../../../store/mainStore.js'
 import { computeLockRetryDelayMs } from '../../../store/mainStore/actions.js'
@@ -21,6 +22,7 @@ vi.mock('../../../service/AccountService.js')
 vi.mock('../../../service/MailboxService.js')
 vi.mock('../../../service/MessageService.js')
 vi.mock('../../../service/NotificationService.js')
+vi.mock('../../../service/ThreadService.js')
 vi.mock('../../../util/normalization.js', () => ({
 	__esModule: true,
 	// Supply a default list id ('') to prevent annoying errors
@@ -2335,6 +2337,51 @@ describe('Vuex store actions', () => {
 			expect(store.isInteractionPriorityActive()).toBe(false)
 
 			store.deleteMessage({ id: 1 })
+
+			expect(store.isInteractionPriorityActive()).toBe(true)
+		})
+
+		// The whole Thread family (deleteThread/moveThread/snoozeThread/
+		// unSnoozeThread) was missing this call entirely -- unlike every
+		// singular-message equivalent above, syncWatchedMailboxes()'s
+		// background poller had no signal that one of these had just been
+		// requested, and could race the optimistic removeEnvelopeMutation()
+		// with its own priority-inbox refresh, reinstating the
+		// just-removed envelope from a stale response. Confirmed live:
+		// deleting a thread from Priority Inbox on a slower connection
+		// sometimes reappeared seconds later.
+		it('deleteThread arms interaction priority immediately, synchronously', () => {
+			ThreadService.deleteThread.mockResolvedValue({})
+			expect(store.isInteractionPriorityActive()).toBe(false)
+
+			store.deleteThread({ envelope: { databaseId: 1 } })
+
+			expect(store.isInteractionPriorityActive()).toBe(true)
+		})
+
+		it('moveThread arms interaction priority immediately, synchronously', () => {
+			ThreadService.moveThread.mockResolvedValue({})
+			expect(store.isInteractionPriorityActive()).toBe(false)
+
+			store.moveThread({ envelope: { databaseId: 1 }, destMailboxId: 2 })
+
+			expect(store.isInteractionPriorityActive()).toBe(true)
+		})
+
+		it('snoozeThread arms interaction priority immediately, synchronously', () => {
+			ThreadService.snoozeThread.mockResolvedValue({})
+			expect(store.isInteractionPriorityActive()).toBe(false)
+
+			store.snoozeThread({ envelope: { databaseId: 1 }, unixTimestamp: 12345, destMailboxId: 2 })
+
+			expect(store.isInteractionPriorityActive()).toBe(true)
+		})
+
+		it('unSnoozeThread arms interaction priority immediately, synchronously', () => {
+			ThreadService.unSnoozeThread.mockResolvedValue({})
+			expect(store.isInteractionPriorityActive()).toBe(false)
+
+			store.unSnoozeThread({ envelope: { databaseId: 1 } })
 
 			expect(store.isInteractionPriorityActive()).toBe(true)
 		})
