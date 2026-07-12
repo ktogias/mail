@@ -116,6 +116,24 @@ class BackfillJob extends TimedJob {
 			return;
 		}
 
+		// isServerBusy() only sees CONCURRENCY (how many real syncs are in
+		// flight instance-wide) -- it never caught this job's OWN IMAP
+		// activity in the first place (this job calls the synchronizer
+		// directly, not SyncService::syncMailbox(), so it never
+		// incremented that counter either). This second, per-account
+		// check catches LATENCY instead: if this account's IMAP provider
+		// has recently been responding slowly (Gmail-side account
+		// throttling, confirmed live 2026-07-12 -- mailbox 149 sync
+		// regularly running 15-38s while this job kept adding its own
+		// connections against the same account the whole time), skip
+		// this tick rather than adding more pressure to an already
+		// struggling account. A calm account elsewhere on the same
+		// instance is unaffected.
+		if ($this->syncService->isAccountResponseSlow($accountId)) {
+			$this->logger->debug("Account {$accountId}'s IMAP provider has been responding slowly, skipping this tick");
+			return;
+		}
+
 		$incomplete = array_values(array_filter(
 			$this->mailboxMapper->findAll($account),
 			static fn (Mailbox $mailbox) => $mailbox->getSelectable() && !$mailbox->isCached(),
@@ -140,6 +158,7 @@ class BackfillJob extends TimedJob {
 
 		$client = $this->clientFactory->getClient($account);
 		$advanceCursor = true;
+		$syncStartedAt = microtime(true);
 		try {
 			$this->synchronizer->sync($account, $client, $next, $this->logger);
 			$this->logger->debug("Backfill: mailbox {$next->getId()} finished its initial sync");
@@ -164,6 +183,12 @@ class BackfillJob extends TimedJob {
 				'exception' => $e,
 			]);
 		} finally {
+			// This job never goes through SyncService::syncMailbox(), so
+			// this is the only place its own IMAP activity ever gets
+			// timed for isAccountResponseSlow() -- feeds the same signal
+			// this job itself checks above, so a slow tick here makes the
+			// NEXT one (for this account) back off too.
+			$this->syncService->recordSyncDuration($accountId, microtime(true) - $syncStartedAt);
 			$client->logout();
 		}
 

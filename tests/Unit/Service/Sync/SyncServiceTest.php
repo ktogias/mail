@@ -223,10 +223,18 @@ final class SyncServiceTest extends TestCase {
 		$this->messageMapper->method('findUidsForIds')->willReturn([]);
 		$this->synchronizer->expects($this->once())->method('sync');
 		$this->mailboxSync->expects($this->once())->method('syncStats');
-		// now (10_000) + SYNC_FRESHNESS_WINDOW (18)
-		$this->freshnessCache->expects($this->once())
-			->method('set')
-			->with('149', 10_018, $this->greaterThan(18));
+		// set() is now called for TWO different keys (the freshness gate
+		// AND recordSyncDuration()'s own per-account key) -- track calls
+		// manually rather than a single strict ->with() matcher, which can
+		// only pin one call site (same reasoning as the add()-tracking
+		// callback elsewhere in this file).
+		$setCalls = [];
+		$this->freshnessCache->method('set')->willReturnCallback(
+			function (string $key, $value, int $ttl) use (&$setCalls) {
+				$setCalls[] = [$key, $value, $ttl];
+				return true;
+			}
+		);
 
 		$this->syncService->syncMailbox(
 			$account,
@@ -236,6 +244,9 @@ final class SyncServiceTest extends TestCase {
 			null,
 			[]
 		);
+
+		// now (10_000) + SYNC_FRESHNESS_WINDOW (18)
+		$this->assertContains(['149', 10_018, 72], $setCalls);
 	}
 
 	public function testLockedMailboxServesTheDatabaseDiffOnPartialSync(): void {
@@ -261,7 +272,18 @@ final class SyncServiceTest extends TestCase {
 		// sync is filling the database right now, so the current diff is
 		// served instead.
 		$this->mailboxSync->expects($this->never())->method('syncStats');
-		$this->freshnessCache->expects($this->never())->method('set');
+		// The freshness gate specifically must not arm on a locked/failed
+		// sync -- recordSyncDuration() legitimately still calls set() too
+		// (for a DIFFERENT key, timing the attempt regardless of outcome),
+		// so track calls rather than blanket-forbidding the shared mock
+		// method entirely.
+		$setCalls = [];
+		$this->freshnessCache->method('set')->willReturnCallback(
+			function (string $key, $value, int $ttl) use (&$setCalls) {
+				$setCalls[] = $key;
+				return true;
+			}
+		);
 		$client->expects($this->once())->method('logout');
 
 		$response = $this->syncService->syncMailbox(
@@ -272,6 +294,8 @@ final class SyncServiceTest extends TestCase {
 			null,
 			[]
 		);
+
+		$this->assertNotContains('149', $setCalls);
 
 		$this->assertEquals(new Response([], [], [], new MailboxStats(42, 10, null)), $response);
 	}
@@ -384,6 +408,112 @@ final class SyncServiceTest extends TestCase {
 		$this->assertTrue($this->syncService->isServerBusy());
 		// Above it: still busy.
 		$this->assertTrue($this->syncService->isServerBusy());
+	}
+
+	public function testRecordSyncDurationStoresItPerAccount(): void {
+		$this->freshnessCache->expects($this->once())
+			->method('set')
+			->with('account_sync_duration_13', 12.5, 1200);
+
+		$this->syncService->recordSyncDuration(13, 12.5);
+	}
+
+	public function testRecordSyncDurationIsANoOpWithoutADistributedMemcache(): void {
+		$cacheFactory = $this->createMock(\OCP\ICacheFactory::class);
+		$cacheFactory->method('createDistributed')->willReturn($this->createStub(\OCP\ICache::class));
+		$syncService = new SyncService(
+			$this->clientFactory,
+			$this->synchronizer,
+			$this->createStub(FilterStringParser::class),
+			$this->messageMapper,
+			$this->createStub(PreviewEnhancer::class),
+			$this->createStub(\Psr\Log\LoggerInterface::class),
+			$this->mailboxSync,
+			$cacheFactory,
+			$this->timeFactory
+		);
+
+		// Must not throw calling set() on a plain ICache (no such method).
+		$syncService->recordSyncDuration(13, 12.5);
+		$this->addToAssertionCount(1);
+	}
+
+	public function testIsAccountResponseSlowReflectsTheMostRecentlyRecordedDuration(): void {
+		$this->freshnessCache->method('get')->with('account_sync_duration_13')
+			->willReturnOnConsecutiveCalls(null, 2.5, 10.0, 15.0);
+
+		// Never recorded: never claim slow.
+		$this->assertFalse($this->syncService->isAccountResponseSlow(13));
+		// Below SLOW_RESPONSE_THRESHOLD_SECONDS (10): not slow.
+		$this->assertFalse($this->syncService->isAccountResponseSlow(13));
+		// At the threshold: slow.
+		$this->assertTrue($this->syncService->isAccountResponseSlow(13));
+		// Above it: still slow.
+		$this->assertTrue($this->syncService->isAccountResponseSlow(13));
+	}
+
+	public function testIsAccountResponseSlowIsPerAccountNotInstanceWide(): void {
+		$this->freshnessCache->method('get')->willReturnMap([
+			['account_sync_duration_13', 25.0],
+			['account_sync_duration_17', null],
+		]);
+
+		$this->assertTrue($this->syncService->isAccountResponseSlow(13));
+		$this->assertFalse($this->syncService->isAccountResponseSlow(17));
+	}
+
+	public function testIsAccountResponseSlowNeverClaimsSlowWithoutADistributedMemcache(): void {
+		$cacheFactory = $this->createMock(\OCP\ICacheFactory::class);
+		$cacheFactory->method('createDistributed')->willReturn($this->createStub(\OCP\ICache::class));
+		$syncService = new SyncService(
+			$this->clientFactory,
+			$this->synchronizer,
+			$this->createStub(FilterStringParser::class),
+			$this->messageMapper,
+			$this->createStub(PreviewEnhancer::class),
+			$this->createStub(\Psr\Log\LoggerInterface::class),
+			$this->mailboxSync,
+			$cacheFactory,
+			$this->timeFactory
+		);
+
+		$this->assertFalse($syncService->isAccountResponseSlow(13));
+	}
+
+	public function testARealSyncRecordsItsOwnDuration(): void {
+		$account = $this->createMock(Account::class);
+		$account->method('getUserId')->willReturn('user');
+		$account->method('getId')->willReturn(13);
+		$mailbox = new Mailbox();
+		$mailbox->setId(149);
+		$mailbox->setMessages(42);
+		$mailbox->setUnseen(10);
+		$mailbox->setSyncNewToken('a');
+		$mailbox->setSyncChangedToken('b');
+		$mailbox->setSyncVanishedToken('c');
+
+		$this->freshnessCache->method('get')->willReturn(null);
+		$this->freshnessCache->method('add')->willReturn(true);
+		$this->clientFactory->method('getClient')
+			->willReturn($this->createStub(\Horde_Imap_Client_Socket::class));
+		$this->messageMapper->method('findUidsForIds')->willReturn([]);
+		$this->synchronizer->method('sync')->willReturn(true);
+
+		$setCalls = [];
+		$this->freshnessCache->method('set')->willReturnCallback(
+			function (string $key, $value, int $ttl) use (&$setCalls) {
+				$setCalls[$key] = [$value, $ttl];
+				return true;
+			}
+		);
+
+		$this->syncService->syncMailbox($account, $mailbox, 0, true, null, []);
+
+		$this->assertArrayHasKey('account_sync_duration_13', $setCalls);
+		[$duration, $ttl] = $setCalls['account_sync_duration_13'];
+		$this->assertIsFloat($duration);
+		$this->assertGreaterThanOrEqual(0.0, $duration);
+		$this->assertSame(1200, $ttl);
 	}
 
 	public function testIsServerBusyNeverClaimsBusyWithoutADistributedMemcache(): void {

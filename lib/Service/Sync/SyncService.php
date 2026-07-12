@@ -89,6 +89,33 @@ class SyncService {
 	private const LOAD_BUSY_THRESHOLD = 2;
 
 	/**
+	 * isServerBusy() above only sees CONCURRENCY (how many real syncs are
+	 * in flight right now), not LATENCY (how long they're taking) -- a
+	 * single slow sync only increments that counter to 1, comfortably
+	 * under its threshold of 2, so it reports "not busy" for the entire
+	 * duration of a real slowdown. Confirmed live (account 13/Gmail,
+	 * 2026-07-12): mailbox 149's own sync regularly ran 15-38s during an
+	 * episode of Gmail-side account throttling -- BackfillJob kept firing
+	 * its own additional IMAP connections against the same account the
+	 * whole time, since isServerBusy() never caught it. This threshold is
+	 * well above the established healthy baseline (2-5s) but comfortably
+	 * below where things start actually failing (the mail pool's own 75s
+	 * request_terminate_timeout).
+	 */
+	private const SLOW_RESPONSE_THRESHOLD_SECONDS = 10.0;
+
+	/**
+	 * How long a recorded sync duration stays relevant to
+	 * isAccountResponseSlow(). Chosen to comfortably span BackfillJob's
+	 * own 15-minute tick cadence, so its own previous reading for an
+	 * account is still valid the next time it checks even with no other
+	 * (web-facing) traffic against that account in between -- short
+	 * enough that a recovered account isn't held "slow" for hours after
+	 * Gmail's own throttling has actually cleared.
+	 */
+	private const SYNC_DURATION_TTL = 20 * 60;
+
+	/**
 	 * A client with truly empty knownIds -- a fresh browser session, or a
 	 * mailbox/query bucket never fetched before -- has no known state to
 	 * diff against, so there is no "what changed" to compute. Returning
@@ -237,6 +264,12 @@ class SyncService {
 
 		$client = $this->clientFactory->getClient($account);
 
+		// Measures the whole real-sync attempt (connection included --
+		// establishing it is itself part of "how slow is this account
+		// responding right now"), regardless of whether it ultimately
+		// succeeds, so a slow-but-failing sync is just as informative to
+		// isAccountResponseSlow() as a slow-but-successful one.
+		$syncStartedAt = microtime(true);
 		try {
 			$this->synchronizer->sync(
 				$account,
@@ -271,6 +304,11 @@ class SyncService {
 			$this->logger->debug("Mailbox {$mailbox->getId()} is locked by another syncer, serving current database state instead of a retry hint");
 		} finally {
 			if ($countingLoad) {
+				// Only recorded when a real sync was actually attempted
+				// (not the lock-conflict short-circuit above, which never
+				// touches IMAP at all and would understate how this
+				// account is really responding).
+				$this->recordSyncDuration((int)$account->getId(), microtime(true) - $syncStartedAt);
 				$freshnessCache->dec(self::LOAD_COUNTER_KEY);
 			}
 			if ($syncMutexAcquired && $freshnessCache instanceof IMemcache) {
@@ -318,6 +356,44 @@ class SyncService {
 		}
 		$count = $cache->get(self::LOAD_COUNTER_KEY);
 		return $count !== null && (int)$count >= self::LOAD_BUSY_THRESHOLD;
+	}
+
+	/**
+	 * Records how long a single real sync against this account actually
+	 * took, for isAccountResponseSlow() below to read. Per-account (not
+	 * instance-wide, unlike isServerBusy()) because IMAP/provider
+	 * throttling is an account-specific phenomenon in practice --
+	 * repeatedly observed as a Gmail-account-wide (not mailbox-specific)
+	 * slowdown elsewhere in this codebase's own history, never affecting
+	 * every account on the instance at once.
+	 */
+	public function recordSyncDuration(int $accountId, float $durationSeconds): void {
+		$cache = $this->cacheFactory->createDistributed('mail_sync_freshness');
+		if (!($cache instanceof IMemcache)) {
+			return;
+		}
+		$cache->set(self::syncDurationKey($accountId), $durationSeconds, self::SYNC_DURATION_TTL);
+	}
+
+	/**
+	 * Whether this account's IMAP provider has recently been responding
+	 * slowly -- a signal isServerBusy() cannot provide (see
+	 * SLOW_RESPONSE_THRESHOLD_SECONDS above). No recent recording (never
+	 * synced, or the last one aged out of SYNC_DURATION_TTL) reads as
+	 * "not slow" rather than guessing, same philosophy as isServerBusy()'s
+	 * own memcache-unavailable fallback.
+	 */
+	public function isAccountResponseSlow(int $accountId): bool {
+		$cache = $this->cacheFactory->createDistributed('mail_sync_freshness');
+		if (!($cache instanceof IMemcache)) {
+			return false;
+		}
+		$duration = $cache->get(self::syncDurationKey($accountId));
+		return $duration !== null && (float)$duration >= self::SLOW_RESPONSE_THRESHOLD_SECONDS;
+	}
+
+	private static function syncDurationKey(int $accountId): string {
+		return 'account_sync_duration_' . $accountId;
 	}
 
 	/**

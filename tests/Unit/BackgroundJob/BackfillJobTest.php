@@ -146,6 +146,37 @@ class BackfillJobTest extends TestCase {
 		$this->job->start($this->createMock(JobList::class));
 	}
 
+	/**
+	 * isServerBusy() only sees CONCURRENCY instance-wide and never caught
+	 * this job's own IMAP activity in the first place (it calls the
+	 * synchronizer directly, bypassing SyncService::syncMailbox() and its
+	 * load counter entirely). This second, per-account check catches
+	 * LATENCY instead -- confirmed live (account 13/Gmail, 2026-07-12):
+	 * mailbox 149's own sync regularly ran 15-38s while this job kept
+	 * adding its own connections against the same account regardless.
+	 */
+	public function testSkipsTheTickWhenTheAccountIsRespondingSlowly(): void {
+		$this->serviceMock->getParameter('accountService')
+			->method('findById')
+			->willReturn($this->account());
+		$this->serviceMock->getParameter('userManager')
+			->method('get')
+			->willReturn($this->createConfiguredMock(IUser::class, ['isEnabled' => true]));
+		$this->serviceMock->getParameter('syncService')
+			->method('isServerBusy')
+			->willReturn(false);
+		$this->serviceMock->getParameter('syncService')
+			->expects(self::once())
+			->method('isAccountResponseSlow')
+			->with(123)
+			->willReturn(true);
+		$this->serviceMock->getParameter('mailboxMapper')
+			->expects(self::never())
+			->method('findAll');
+
+		$this->job->start($this->createMock(JobList::class));
+	}
+
 	public function testNothingToBackfillTouchesNoMailbox(): void {
 		$this->serviceMock->getParameter('accountService')
 			->method('findById')
@@ -361,6 +392,48 @@ class BackfillJobTest extends TestCase {
 			->expects(self::once())
 			->method('setUserValue')
 			->with('user123', 'mail', 'backfill-last-mailbox-123', '50');
+
+		$this->job->start($this->createMock(JobList::class));
+	}
+
+	/**
+	 * This job never goes through SyncService::syncMailbox(), so it's the
+	 * only place its own IMAP activity gets timed for
+	 * isAccountResponseSlow() -- feeds the very signal
+	 * testSkipsTheTickWhenTheAccountIsRespondingSlowly() checks, so a slow
+	 * tick here makes the NEXT one (for this account) back off too.
+	 * Recorded regardless of outcome (an IncompleteSyncException here is
+	 * still a real, completed IMAP round trip, just as informative as a
+	 * finished one).
+	 */
+	public function testRecordsItsOwnSyncDurationRegardlessOfOutcome(): void {
+		$this->serviceMock->getParameter('accountService')
+			->method('findById')
+			->willReturn($this->account());
+		$this->serviceMock->getParameter('userManager')
+			->method('get')
+			->willReturn($this->createConfiguredMock(IUser::class, ['isEnabled' => true]));
+		$this->serviceMock->getParameter('syncService')
+			->method('isServerBusy')
+			->willReturn(false);
+		$mailboxA = $this->mailbox(50, false);
+		$this->serviceMock->getParameter('mailboxMapper')
+			->method('findAll')
+			->willReturn([$mailboxA]);
+		$this->serviceMock->getParameter('config')
+			->method('getUserValue')
+			->willReturn('0');
+		$client = $this->createMock(Horde_Imap_Client_Socket::class);
+		$this->serviceMock->getParameter('clientFactory')
+			->method('getClient')
+			->willReturn($client);
+		$this->serviceMock->getParameter('synchronizer')
+			->method('sync')
+			->willThrowException(new IncompleteSyncException('still going'));
+		$this->serviceMock->getParameter('syncService')
+			->expects(self::once())
+			->method('recordSyncDuration')
+			->with(123, self::isType('float'));
 
 		$this->job->start($this->createMock(JobList::class));
 	}
