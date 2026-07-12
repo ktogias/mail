@@ -7,6 +7,7 @@ import { createLocalVue, shallowMount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import Thread from '../../../components/Thread.vue'
 import Nextcloud from '../../../mixins/Nextcloud.js'
+import { PRIORITY_INBOX_ID, UNIFIED_INBOX_ID } from '../../../store/constants.js'
 import useMainStore from '../../../store/mainStore.js'
 
 const localVue = createLocalVue()
@@ -602,6 +603,13 @@ describe('Thread', () => {
 			store.getMailboxes = vi.fn().mockReturnValue([
 				{ databaseId: 50, name: 'INBOX', specialRole: 'inbox' },
 			])
+			// prefetchListNeighborhood() also runs on every resetThread()
+			// now, calling the REAL (unmocked) getEnvelopes(), which reads
+			// getMailbox(id).envelopeLists -- the mock above has no such
+			// property. These tests aren't about that method; mock it
+			// directly so it's a no-op ([] -> openIndex -1 -> early
+			// return) rather than coupling this fixture to its internals.
+			store.getEnvelopes = vi.fn().mockReturnValue([])
 			// fetchThread()'s own local method treats an empty array as
 			// "thread not found" and returns early, before ever reaching
 			// prefetchThreadNeighborhood() -- only the .length matters
@@ -666,6 +674,108 @@ describe('Thread', () => {
 			// Only the open message itself (fetched by resetThread()'s own
 			// parallel-prefetch, non-speculative) -- no neighborhood calls.
 			expect(store.fetchMessage.mock.calls.filter((call) => call[1]?.speculative)).toHaveLength(0)
+		})
+	})
+
+	describe('prefetchListNeighborhood', () => {
+		// The reading time between opening a message and the user's next
+		// action is otherwise idle -- prefetch the previous/next message
+		// in the LIST the user opened this one from (not just siblings
+		// within its own thread, see prefetchThreadNeighborhood above).
+		beforeEach(() => {
+			store.getMailbox = vi.fn().mockImplementation((id) => {
+				if (id === 50) {
+					return { databaseId: 50, name: 'INBOX', specialRole: 'inbox' }
+				}
+				return undefined
+			})
+			store.getEnvelopes = vi.fn().mockReturnValue([8001, 8002, 8003, 8004, 8005].map((databaseId) => ({ databaseId })))
+			store.fetchThread = vi.fn().mockResolvedValue([{ databaseId: 8003 }])
+			store.fetchMessage = vi.fn().mockResolvedValue({})
+		})
+
+		function mountAt(threadId, routeOverrides = {}) {
+			return shallowMount(Thread, {
+				mocks: {
+					$route: {
+						params: {
+							mailboxId: 50,
+							threadId,
+							...routeOverrides,
+						},
+					},
+				},
+				store,
+				localVue,
+			})
+		}
+
+		it('prefetches both the previous and next message in the list, when the open one sits in the middle', async () => {
+			mountAt(8003)
+			await vi.waitFor(() => {
+				expect(store.fetchMessage).toHaveBeenCalledWith(8002, { speculative: true })
+			})
+
+			expect(store.fetchMessage).toHaveBeenCalledWith(8004, { speculative: true })
+		})
+
+		it('only prefetches the next message when the open one is first in the list', async () => {
+			mountAt(8001)
+			await vi.waitFor(() => {
+				expect(store.fetchMessage).toHaveBeenCalledWith(8002, { speculative: true })
+			})
+
+			expect(store.fetchMessage.mock.calls.filter((call) => call[1]?.speculative)).toHaveLength(1)
+		})
+
+		it('only prefetches the previous message when the open one is last in the list', async () => {
+			mountAt(8005)
+			await vi.waitFor(() => {
+				expect(store.fetchMessage).toHaveBeenCalledWith(8004, { speculative: true })
+			})
+
+			expect(store.fetchMessage.mock.calls.filter((call) => call[1]?.speculative)).toHaveLength(1)
+		})
+
+		it('does nothing for the priority inbox -- no single unambiguous list to reconstruct', async () => {
+			mountAt(8003, { mailboxId: PRIORITY_INBOX_ID })
+			await vi.waitFor(() => {
+				expect(store.fetchThread).toHaveBeenCalled()
+			})
+
+			expect(store.getEnvelopes).not.toHaveBeenCalled()
+		})
+
+		it('does nothing for the unified inbox -- same reasoning', async () => {
+			mountAt(8003, { mailboxId: UNIFIED_INBOX_ID })
+			await vi.waitFor(() => {
+				expect(store.fetchThread).toHaveBeenCalled()
+			})
+
+			expect(store.getEnvelopes).not.toHaveBeenCalled()
+		})
+
+		it('does not crash when the mailbox no longer exists', () => {
+			expect(() => mountAt(8003, { mailboxId: 999 })).not.toThrow()
+			expect(store.getEnvelopes).not.toHaveBeenCalled()
+		})
+
+		it('does not crash and prefetches nothing when the open message is not in the list', async () => {
+			mountAt(9999)
+			await vi.waitFor(() => {
+				expect(store.fetchThread).toHaveBeenCalled()
+			})
+
+			expect(store.fetchMessage.mock.calls.filter((call) => call[1]?.speculative)).toHaveLength(0)
+		})
+
+		it("uses the 'starred' quick-filter query when active", async () => {
+			mountAt(8003, { filter: 'starred' })
+			await vi.waitFor(() => {
+				expect(store.getEnvelopes).toHaveBeenCalled()
+			})
+
+			expect(store.getEnvelopes).toHaveBeenCalledWith(50, 'is:starred')
 		})
 	})
 })
