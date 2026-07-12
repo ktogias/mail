@@ -29,6 +29,14 @@ export function fetchEnvelope(accountId, id) {
 			if (error.response && error.response.status === 404) {
 				return undefined
 			}
+			if (!error.response) {
+				// A network failure (or the browser killing an in-flight
+				// request when the tab is backgrounded) never receives an
+				// HTTP response -- nothing for parseErrorResponse() to
+				// parse. Reject with the original error so its actual
+				// message survives, instead of losing it.
+				return Promise.reject(error)
+			}
 			return Promise.reject(parseErrorResponse(error.response))
 		})
 }
@@ -228,6 +236,14 @@ export async function fetchMessage(id, { signal } = {}) {
 			// as-is so callers can tell the two apart.
 			throw error
 		}
+		if (!error.response) {
+			// A network failure that isn't a recognized cancel -- e.g. the
+			// browser itself killing an in-flight request when the tab is
+			// backgrounded on mobile (confirmed live, Android). Still no
+			// HTTP response to parse; rethrow the original error rather
+			// than crash reading .headers off nothing.
+			throw error
+		}
 
 		throw parseErrorResponse(error.response)
 	}
@@ -257,6 +273,13 @@ export async function fetchMessageItineraries(id) {
 		if (error.response && error.response.status === 404) {
 			return undefined
 		}
+		if (!error.response) {
+			// No HTTP response at all -- a genuine network failure (see
+			// fetchMessage() above for the reasoning). Rethrow the
+			// original error rather than crash reading .headers off
+			// nothing.
+			throw error
+		}
 
 		throw parseErrorResponse(error.response)
 	}
@@ -273,6 +296,13 @@ export async function fetchMessageDkim(id) {
 	} catch (error) {
 		if (error.response && error.response.status === 404) {
 			return undefined
+		}
+		if (!error.response) {
+			// No HTTP response at all -- a genuine network failure (see
+			// fetchMessage() above for the reasoning). Rethrow the
+			// original error rather than crash reading .headers off
+			// nothing.
+			throw error
 		}
 
 		throw parseErrorResponse(error.response)

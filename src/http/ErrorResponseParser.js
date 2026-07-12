@@ -4,7 +4,13 @@
  */
 
 function isErrorResponse(resp) {
-	return 'x-mail-response' in resp.headers && resp.data.status === 'error'
+	// resp is undefined for any axios error that never received an HTTP
+	// response at all -- a genuine network failure (lost connection, DNS
+	// failure, or the browser itself killing an in-flight request when
+	// the tab is backgrounded on mobile: confirmed live, Android,
+	// backgrounding mid-message-load then returning). Guard here rather
+	// than assume every caller remembers to check first.
+	return !!resp && 'x-mail-response' in resp.headers && resp.data.status === 'error'
 }
 
 export function parseErrorResponse(resp) {

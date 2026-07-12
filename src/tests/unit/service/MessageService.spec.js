@@ -54,6 +54,49 @@ describe('service/MessageService test suite', () => {
 		})
 	})
 
+	describe('rethrows the original error instead of crashing when a request never receives a response', () => {
+		// Confirmed live: backgrounding the browser tab on Android mid-load
+		// (or any other network failure with no HTTP response at all --
+		// lost connection, DNS failure) previously crashed inside
+		// parseErrorResponse() trying to read .headers off `undefined`,
+		// surfacing to the user as "can't access property 'headers', e is
+		// undefined" instead of a real error. error.response is undefined
+		// for exactly this class of failure -- these calls never even
+		// reach the 404/isCancel branches above them.
+		it('fetchMessage', async () => {
+			generateUrl.mockReturnValueOnce('/generated-url')
+			axios.isCancel.mockReturnValue(false)
+			const networkError = new Error('Network Error')
+			axios.get.mockRejectedValueOnce(networkError)
+
+			await expect(MessageService.fetchMessage(42)).rejects.toBe(networkError)
+		})
+
+		it('fetchMessageItineraries', async () => {
+			generateUrl.mockReturnValueOnce('/generated-url')
+			const networkError = new Error('Network Error')
+			axios.get.mockRejectedValueOnce(networkError)
+
+			await expect(MessageService.fetchMessageItineraries(42)).rejects.toBe(networkError)
+		})
+
+		it('fetchMessageDkim', async () => {
+			generateUrl.mockReturnValueOnce('/generated-url')
+			const networkError = new Error('Network Error')
+			axios.get.mockRejectedValueOnce(networkError)
+
+			await expect(MessageService.fetchMessageDkim(42)).rejects.toBe(networkError)
+		})
+
+		it('fetchEnvelope', async () => {
+			generateUrl.mockReturnValueOnce('/generated-url')
+			const networkError = new Error('Network Error')
+			axios.get.mockRejectedValueOnce(networkError)
+
+			await expect(MessageService.fetchEnvelope(13, 42)).rejects.toBe(networkError)
+		})
+	})
+
 	describe('syncEnvelopes', () => {
 		beforeEach(() => {
 			generateUrl.mockReturnValue('/generated-url')
