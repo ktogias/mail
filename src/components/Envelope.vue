@@ -1024,9 +1024,22 @@ export default {
 		// Drafts open the composer, not a thread view -- nothing here to
 		// prefetch. Mirrors onEnvelopeMouseEnter()/onEnvelopeTouchStart().
 		if (!this.draft) {
+			// registerViewportPrefetch()'s 2-concurrent cap only holds this
+			// callback's *slot* open for as long as the promise it returns
+			// is pending -- fire-and-forgetting the fetches here (the
+			// previous shape, with no return) let the callback resolve on
+			// the next microtask regardless of whether the requests were
+			// actually still in flight, so the cap never held anything back
+			// in practice. Confirmed live: a fast scroll through Priority
+			// Inbox produced far more than 2 concurrent speculative body
+			// fetches, several genuine cache-misses at 10-40s each,
+			// saturating the 3-worker mailwrite pool ahead of the user's
+			// actual click.
 			this.registerViewportPrefetch(() => {
-				this.mainStore.fetchMessage(this.data.databaseId, { speculative: true }).catch(() => {})
-				this.mainStore.fetchThread(this.data.databaseId, { speculative: true }).catch(() => {})
+				return Promise.all([
+					this.mainStore.fetchMessage(this.data.databaseId, { speculative: true }).catch(() => {}),
+					this.mainStore.fetchThread(this.data.databaseId, { speculative: true }).catch(() => {}),
+				])
 			})
 		}
 	},

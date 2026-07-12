@@ -277,6 +277,31 @@ const FETCH_MESSAGE_TIMEOUT_MS = 90 * 1000
 const speculativeMessageFetchControllers = new Map()
 const speculativeThreadFetchControllers = new Map()
 
+// How many speculative fetchMessage() calls -- from ANY of the five
+// trigger paths (HoverPrefetchMixin's mouseenter/touchstart,
+// ViewportPrefetchMixin's scroll-settle, Thread.vue's own
+// prefetchThreadNeighborhood()/prefetchListNeighborhood()) -- are allowed
+// an in-flight /body request at once, app-wide. This is the one genuinely
+// expensive step in the whole prefetch story: a body fetch that misses
+// the 30-day cache is a live IMAP round-trip, measured up to ~30-40s
+// against a slow-responding account, and the mailwrite pool serving it is
+// only 3 workers wide (see nextcloud-mail-oauth-integration.md). Before
+// this cap existed, only ViewportPrefetchMixin nominally limited itself
+// (to 2, via viewportPrefetchObserver.js's runIfViewportPrefetchSlotAvailable)
+// and even that didn't hold in practice -- its callback fired the fetches
+// without returning their promises, so the cap's own "await fn()" resolved
+// on the next microtask regardless of whether the requests were still in
+// flight, never actually throttling anything (fixed separately in
+// Envelope.vue). Hover/touch/thread-neighbor/list-neighbor had no cap at
+// all. Confirmed live: a fast scroll through Priority Inbox produced 7+
+// concurrent speculative body fetches, several of them slow cache misses,
+// saturating every mailwrite worker well ahead of the user's actual click.
+// Enforced here, at the one place all five paths converge, rather than in
+// each caller -- skipped, not queued, same "a message that misses its
+// speculative window still fetches normally, for real, the instant it's
+// actually opened" philosophy as the (now-redundant) viewport-specific cap.
+const MAX_CONCURRENT_SPECULATIVE_MESSAGE_FETCHES = 2
+
 // toggleEnvelopeSeen()/toggleEnvelopeJunk()/markEnvelopeFavoriteOrUnfavorite()
 // all optimistically set a flag via flagEnvelopeMutation() and await their
 // own PUT to confirm it -- but a completely independent sync request
@@ -2129,6 +2154,15 @@ export default function mainStoreActions() {
 
 			if (pendingMessageFetches.has(id)) {
 				return pendingMessageFetches.get(id)
+			}
+
+			// Skip rather than queue once every speculative slot is taken --
+			// see MAX_CONCURRENT_SPECULATIVE_MESSAGE_FETCHES above. Never
+			// applies to a real (non-speculative) call: the user's actual
+			// click always fetches, regardless of how much speculative
+			// activity is in flight.
+			if (speculative && speculativeMessageFetchControllers.size >= MAX_CONCURRENT_SPECULATIVE_MESSAGE_FETCHES) {
+				return undefined
 			}
 
 			// A promise held by UI (ThreadEnvelope's loading skeleton

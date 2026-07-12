@@ -661,6 +661,52 @@ describe('Envelope', () => {
 			expect(store.fetchThread).toHaveBeenCalledWith(999, { speculative: true })
 		})
 
+		it('keeps its concurrency-gate slot held until both the message and thread fetches settle', async () => {
+			// Regression: the callback used to fire both fetches without
+			// returning them ("fire and forget"), so
+			// runIfViewportPrefetchSlotAvailable's own "await fn()"
+			// resolved on the next microtask regardless of whether the
+			// requests were still in flight -- the 2-concurrent cap never
+			// actually held anything back. Confirmed live: a fast scroll
+			// through Priority Inbox produced far more than 2 concurrent
+			// speculative body fetches. The callback must return a promise
+			// that only settles once the underlying fetches do.
+			let resolveFetchMessage
+			let resolveFetchThread
+			store.fetchMessage = vi.fn().mockReturnValue(new Promise((resolve) => {
+				resolveFetchMessage = resolve
+			}))
+			store.fetchThread = vi.fn().mockReturnValue(new Promise((resolve) => {
+				resolveFetchThread = resolve
+			}))
+
+			let callbackResult
+			ViewportPrefetchObserver.runIfViewportPrefetchSlotAvailable.mockImplementation((fn) => {
+				callbackResult = fn()
+				return callbackResult
+			})
+
+			mountEnvelope()
+			const onIntersect = ViewportPrefetchObserver.observeViewportVisibility.mock.calls[0][1]
+			onIntersect(true)
+			await vi.advanceTimersByTimeAsync(300)
+
+			expect(callbackResult).toBeInstanceOf(Promise)
+
+			let settled = false
+			callbackResult.then(() => {
+				settled = true
+			})
+			await Promise.resolve()
+			expect(settled).toBe(false)
+
+			resolveFetchMessage({})
+			resolveFetchThread([])
+			await callbackResult
+
+			expect(settled).toBe(true)
+		})
+
 		it('does not prefetch if the row leaves the viewport before the settle delay elapses', async () => {
 			mountEnvelope()
 			const onIntersect = ViewportPrefetchObserver.observeViewportVisibility.mock.calls[0][1]

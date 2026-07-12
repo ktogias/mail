@@ -2685,6 +2685,103 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	describe('fetchMessage: caps concurrent speculative (prefetch) requests app-wide', () => {
+		// Confirmed live (2026-07-12): a fast scroll through Priority Inbox
+		// produced 7+ concurrent speculative body fetches -- several of
+		// them genuine cache misses taking 10-40s against a slow-responding
+		// account -- saturating the 3-worker mailwrite pool ahead of the
+		// user's own click. ViewportPrefetchMixin nominally capped itself
+		// to 2 via viewportPrefetchObserver.js, but its caller
+		// (Envelope.vue) fired the fetches without returning their
+		// promises, so that cap's own "await fn()" resolved on the next
+		// microtask regardless of whether the requests were still in
+		// flight -- never actually throttling anything. Hover/touch/
+		// thread-neighbor/list-neighbor prefetch had no cap at all. This
+		// cap replaces all of that with one enforced where every
+		// speculative caller converges: fetchMessage() itself.
+		it('allows up to the cap (2) concurrent speculative fetches', async () => {
+			let resolveFirst
+			let resolveSecond
+			MessageService.fetchMessage
+				.mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve }))
+				.mockReturnValueOnce(new Promise((resolve) => { resolveSecond = resolve }))
+
+			const firstCall = store.fetchMessage(90010, { speculative: true })
+			const secondCall = store.fetchMessage(90011, { speculative: true })
+
+			expect(MessageService.fetchMessage).toHaveBeenCalledTimes(2)
+
+			resolveFirst({ databaseId: 90010 })
+			resolveSecond({ databaseId: 90011 })
+			await firstCall
+			await secondCall
+		})
+
+		it('skips a third speculative fetch once the cap is reached, without calling the service', async () => {
+			let resolveFirst
+			let resolveSecond
+			MessageService.fetchMessage
+				.mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve }))
+				.mockReturnValueOnce(new Promise((resolve) => { resolveSecond = resolve }))
+
+			const firstCall = store.fetchMessage(90012, { speculative: true })
+			const secondCall = store.fetchMessage(90013, { speculative: true })
+
+			const result = await store.fetchMessage(90014, { speculative: true })
+
+			expect(result).toBeUndefined()
+			expect(MessageService.fetchMessage).toHaveBeenCalledTimes(2)
+
+			resolveFirst({ databaseId: 90012 })
+			resolveSecond({ databaseId: 90013 })
+			await firstCall
+			await secondCall
+		})
+
+		it('frees a slot once a speculative fetch settles, letting the next one through', async () => {
+			let resolveFirst
+			let resolveSecond
+			MessageService.fetchMessage
+				.mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve }))
+				.mockReturnValueOnce(new Promise((resolve) => { resolveSecond = resolve }))
+
+			const firstCall = store.fetchMessage(90015, { speculative: true })
+			const secondCall = store.fetchMessage(90016, { speculative: true })
+
+			resolveFirst({ databaseId: 90015 })
+			await firstCall
+
+			MessageService.fetchMessage.mockResolvedValueOnce({ databaseId: 90017 })
+			const thirdResult = await store.fetchMessage(90017, { speculative: true })
+
+			expect(thirdResult).toEqual({ databaseId: 90017 })
+
+			resolveSecond({ databaseId: 90016 })
+			await secondCall
+		})
+
+		it('never caps a non-speculative (real) fetch, even with every speculative slot full', async () => {
+			let resolveFirst
+			let resolveSecond
+			MessageService.fetchMessage
+				.mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve }))
+				.mockReturnValueOnce(new Promise((resolve) => { resolveSecond = resolve }))
+
+			const firstCall = store.fetchMessage(90018, { speculative: true })
+			const secondCall = store.fetchMessage(90019, { speculative: true })
+
+			MessageService.fetchMessage.mockResolvedValueOnce({ databaseId: 90020 })
+			const realResult = await store.fetchMessage(90020)
+
+			expect(realResult).toEqual({ databaseId: 90020 })
+
+			resolveFirst({ databaseId: 90018 })
+			resolveSecond({ databaseId: 90019 })
+			await firstCall
+			await secondCall
+		})
+	})
+
 	describe('syncEnvelopes: malformed response retry', () => {
 		// Regression: confirmed live -- a sync response missing
 		// newMessages/changedMessages crashed with a raw TypeError and
