@@ -14,7 +14,9 @@ use OCA\Mail\Account;
 use OCA\Mail\AppInfo\Application;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\Http\Client\IClientService;
+use OCP\ICacheFactory;
 use OCP\IConfig;
+use OCP\IMemcache;
 use OCP\IURLGenerator;
 use OCP\Security\ICrypto;
 use Psr\Log\LoggerInterface;
@@ -27,6 +29,10 @@ class MicrosoftIntegration {
 	private IClientService $clientService;
 	private IURLGenerator $urlGenerator;
 
+	// See GoogleIntegration::REFRESH_LOCK_TTL for the reasoning -- same
+	// race, same fix, for Microsoft accounts.
+	private const REFRESH_LOCK_TTL = 30;
+
 	public function __construct(
 		ITimeFactory $timeFactory,
 		IConfig $config,
@@ -34,6 +40,7 @@ class MicrosoftIntegration {
 		IClientService $clientService,
 		IURLGenerator $urlGenerator,
 		private LoggerInterface $logger,
+		private ICacheFactory $cacheFactory,
 	) {
 		$this->timeFactory = $timeFactory;
 		$this->clientService = $clientService;
@@ -142,6 +149,14 @@ class MicrosoftIntegration {
 		// Only refresh if the token expires in the next minute
 		if ($this->timeFactory->getTime() <= ($account->getMailAccount()->getOauthTokenTtl() - 60)) {
 			// No need to refresh yet
+			return $account;
+		}
+
+		// See GoogleIntegration::refresh() for the reasoning -- same
+		// unpooled-IMAP-connection race, same fix.
+		$lockCache = $this->cacheFactory->createDistributed('mail_oauth_refresh_lock');
+		$lockKey = 'microsoft_account_' . $account->getId();
+		if ($lockCache instanceof IMemcache && !$lockCache->add($lockKey, true, self::REFRESH_LOCK_TTL)) {
 			return $account;
 		}
 

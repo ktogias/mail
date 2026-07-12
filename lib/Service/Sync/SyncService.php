@@ -372,7 +372,24 @@ class SyncService {
 		if (!($cache instanceof IMemcache)) {
 			return;
 		}
-		$cache->set(self::syncDurationKey($accountId), $durationSeconds, self::SYNC_DURATION_TTL);
+		$key = self::syncDurationKey($accountId);
+		// Track the worst duration seen within the TTL window, not just
+		// the most recent one. A plain overwrite meant a single slow
+		// sync sandwiched between two fast ones was masked within
+		// seconds -- confirmed live: a 67.8s mailbox sync was
+		// overwritten by an unrelated 3.1s one moments later, so
+		// isAccountResponseSlow() never saw the spike and BackfillJob's
+		// backoff never engaged, even though the account genuinely was
+		// struggling. Skipping the write when the new duration is
+		// *better* than what's already recorded leaves the existing
+		// (worse) entry's own TTL ticking down untouched, so it decays
+		// on its own schedule -- neither masked immediately nor kept
+		// alive forever by every later fast sync resetting the clock.
+		$existing = $cache->get($key);
+		if ($existing !== null && $durationSeconds < (float)$existing) {
+			return;
+		}
+		$cache->set($key, $durationSeconds, self::SYNC_DURATION_TTL);
 	}
 
 	/**

@@ -14,7 +14,9 @@ use OCA\Mail\Account;
 use OCA\Mail\AppInfo\Application;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\Http\Client\IClientService;
+use OCP\ICacheFactory;
 use OCP\IConfig;
+use OCP\IMemcache;
 use OCP\IURLGenerator;
 use OCP\Security\ICrypto;
 use Psr\Log\LoggerInterface;
@@ -28,6 +30,14 @@ class GoogleIntegration {
 	private IClientService $clientService;
 	private IURLGenerator $urlGenerator;
 
+	// How long a request is allowed to hold the refresh lock before it's
+	// considered abandoned (e.g. the holder crashed or was killed
+	// mid-refresh) and another request may try again. Generous relative
+	// to a normal refresh (a single HTTPS round trip to Google), well
+	// short of the 60s grace window refresh() itself waits for before
+	// this is even reached.
+	private const REFRESH_LOCK_TTL = 30;
+
 	public function __construct(
 		ITimeFactory $timeFactory,
 		IConfig $config,
@@ -35,6 +45,7 @@ class GoogleIntegration {
 		IClientService $clientService,
 		IURLGenerator $urlGenerator,
 		private LoggerInterface $logger,
+		private ICacheFactory $cacheFactory,
 	) {
 		$this->timeFactory = $timeFactory;
 		$this->clientService = $clientService;
@@ -128,6 +139,26 @@ class GoogleIntegration {
 		// Only refresh if the token expires in the next minute
 		if ($this->timeFactory->getTime() <= ($account->getMailAccount()->getOauthTokenTtl() - 60)) {
 			// No need to refresh yet
+			return $account;
+		}
+
+		// IMAP connections aren't pooled across requests (see
+		// IMAPClientFactory::getClient() -- a fresh one is opened, and
+		// this refresh() re-checked, on every single API call), so
+		// several concurrent requests for the same account routinely
+		// observe "about to expire" at the same moment. Without
+		// coordination, all of them raced Google's token endpoint at
+		// once -- confirmed live: intermittent "Mail server denied
+		// authentication" IMAP rejections for this account (see
+		// nextcloud-mail-oauth-integration.md), each costing a full
+		// failed connection attempt on top of the wasted duplicate
+		// refreshes. A short, best-effort lock lets exactly one request
+		// actually refresh; everyone else just proceeds with the token
+		// they already have (still valid for the 60s grace period above)
+		// and picks up the refreshed one on their own next request.
+		$lockCache = $this->cacheFactory->createDistributed('mail_oauth_refresh_lock');
+		$lockKey = 'google_account_' . $account->getId();
+		if ($lockCache instanceof IMemcache && !$lockCache->add($lockKey, true, self::REFRESH_LOCK_TTL)) {
 			return $account;
 		}
 

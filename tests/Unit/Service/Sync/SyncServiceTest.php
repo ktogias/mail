@@ -418,6 +418,38 @@ final class SyncServiceTest extends TestCase {
 		$this->syncService->recordSyncDuration(13, 12.5);
 	}
 
+	/**
+	 * Confirmed live: a 67.8s mailbox sync was overwritten by an
+	 * unrelated 3.1s sync moments later, so isAccountResponseSlow()
+	 * never saw the spike at all -- a plain overwrite only ever
+	 * remembers the single most recent duration, not the worst one
+	 * within the window it's meant to cover.
+	 */
+	public function testRecordSyncDurationDoesNotLetABetterDurationMaskAWorseOneAlreadyRecorded(): void {
+		$this->freshnessCache->method('get')->with('account_sync_duration_13')->willReturn(67.8);
+		$this->freshnessCache->expects($this->never())->method('set');
+
+		$this->syncService->recordSyncDuration(13, 3.1);
+	}
+
+	public function testRecordSyncDurationDoesOverwriteWhenTheNewDurationIsWorse(): void {
+		$this->freshnessCache->method('get')->with('account_sync_duration_13')->willReturn(3.1);
+		$this->freshnessCache->expects($this->once())
+			->method('set')
+			->with('account_sync_duration_13', 67.8, 1200);
+
+		$this->syncService->recordSyncDuration(13, 67.8);
+	}
+
+	public function testRecordSyncDurationOverwritesWhenNothingWasRecordedYet(): void {
+		$this->freshnessCache->method('get')->with('account_sync_duration_13')->willReturn(null);
+		$this->freshnessCache->expects($this->once())
+			->method('set')
+			->with('account_sync_duration_13', 5.0, 1200);
+
+		$this->syncService->recordSyncDuration(13, 5.0);
+	}
+
 	public function testRecordSyncDurationIsANoOpWithoutADistributedMemcache(): void {
 		$cacheFactory = $this->createMock(\OCP\ICacheFactory::class);
 		$cacheFactory->method('createDistributed')->willReturn($this->createStub(\OCP\ICache::class));
