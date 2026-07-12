@@ -50,6 +50,7 @@ use OCP\AppFramework\Http\ZipResponse;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\Files\Folder;
 use OCP\Files\IMimeTypeDetector;
+use OCP\ICache;
 use OCP\ICacheFactory;
 use OCP\IL10N;
 use OCP\IRequest;
@@ -288,6 +289,210 @@ class MessagesControllerTest extends TestCase {
 
 		$this->assertEquals($expectedPlainResponse, $actualPlainResponse);
 		$this->assertEquals($expectedRichResponse, $actualRichResponse);
+	}
+
+	/**
+	 * setUp() wires every test's controller to a NullCache (always misses,
+	 * set() is a no-op) so every other test's IMAP-call-count expectations
+	 * stay accurate. The caching tests below need a real, inspectable
+	 * ICache instead -- rebuilds the controller with the exact same mocks
+	 * setUp() already configured, just swapping the cache.
+	 */
+	private function rebuildControllerWithCache(ICache $cache): void {
+		$cacheFactory = $this->createMock(ICacheFactory::class);
+		$cacheFactory->method('createDistributed')->willReturn($cache);
+
+		$this->controller = new MessagesController(
+			$this->appName,
+			$this->request,
+			$this->accountService,
+			$this->mailManager,
+			$this->mailSearch,
+			$this->itineraryService,
+			$this->userId,
+			$this->userFolder,
+			$this->logger,
+			$this->l10n,
+			$this->mimeTypeDetector,
+			$this->urlGenerator,
+			$this->nonceManager,
+			$this->trustedSenderService,
+			$this->mailTransmission,
+			$this->smimeService,
+			$this->clientFactory,
+			$this->dkimService,
+			$this->userPreferences,
+			$this->snoozeService,
+			$this->aiIntegrationsService,
+			$cacheFactory,
+			$this->delegationService,
+		);
+	}
+
+	/**
+	 * Confirmed live: every open of a message -- the first time or the
+	 * fiftieth -- previously cost its own full live IMAP fetch, because
+	 * getBody() populated a cache (for getHtmlBody()'s benefit) but never
+	 * consulted it itself. The same message reloaded slowly 7 times
+	 * within 7 minutes in one observed window.
+	 */
+	public function testGetBodyReturnsTheCachedFullMessageWithoutTouchingImapOnAHit(): void {
+		$accountId = 17;
+		$mailboxId = 13;
+		$messageId = 4321;
+		$this->account->method('getId')->willReturn($accountId);
+		$mailbox = new Mailbox();
+		$mailbox->setAccountId($accountId);
+		$message = new DbMessage();
+		$message->setMailboxId($mailboxId);
+		$message->setUid(123);
+		$this->mailManager->method('getMessage')->with($this->userId, $messageId)->willReturn($message);
+		$this->mailManager->method('getMailbox')->with($this->userId, $mailboxId)->willReturn($mailbox);
+		$this->accountService->method('find')->with($this->userId, $accountId)->willReturn($this->account);
+
+		$cachedJson = [
+			'uid' => 123,
+			'subject' => 'Cached subject',
+			'body' => '<p>cached html</p>',
+			'attachments' => [],
+			'inlineAttachments' => [],
+			'flags' => [],
+			'hasHtmlBody' => true,
+			'smimeIsEncrypted' => false,
+			'smimeIsSigned' => false,
+			'smimeSignatureValid' => false,
+		];
+		$cache = $this->createMock(ICache::class);
+		$cache->method('get')->with("message_$messageId")->willReturn($cachedJson);
+		$cache->expects($this->never())->method('set');
+		$this->rebuildControllerWithCache($cache);
+
+		$this->clientFactory->expects($this->never())->method('getClient');
+		$this->mailManager->expects($this->never())->method('getImapMessage');
+
+		$response = $this->controller->getBody($messageId);
+
+		$this->assertSame('Cached subject', $response->getData()['subject']);
+		$this->assertSame('<p>cached html</p>', $response->getData()['body']);
+	}
+
+	public function testGetBodyFetchesLiveAndPopulatesTheCacheOnAMiss(): void {
+		$accountId = 17;
+		$mailboxId = 13;
+		$messageId = 4321;
+		$this->account->method('getId')->willReturn($accountId);
+		$mailbox = new Mailbox();
+		$mailbox->setAccountId($accountId);
+		$message = new DbMessage();
+		$message->setMailboxId($mailboxId);
+		$message->setUid(123);
+		$this->mailManager->method('getMessage')->with($this->userId, $messageId)->willReturn($message);
+		$this->mailManager->method('getMailbox')->with($this->userId, $mailboxId)->willReturn($mailbox);
+		$this->accountService->method('find')->with($this->userId, $accountId)->willReturn($this->account);
+
+		$client = $this->createStub(Horde_Imap_Client_Socket::class);
+		$this->clientFactory->method('getClient')->with($this->account)->willReturn($client);
+		$imapMessage = $this->createMock(IMAPMessage::class);
+		$imapMessage->method('hasHtmlMessage')->willReturn(true);
+		$imapMessage->method('isEncrypted')->willReturn(false);
+		$imapMessage->method('isSigned')->willReturn(false);
+		$fullMessage = [
+			'uid' => 123,
+			'subject' => 'Live subject',
+			'body' => '<p>live html</p>',
+			'attachments' => [],
+			'inlineAttachments' => [],
+			'flags' => [],
+			'hasHtmlBody' => true,
+		];
+		$imapMessage->method('getFullMessage')->with($messageId)->willReturn($fullMessage);
+		$this->mailManager->method('getImapMessage')
+			->with($client, $this->account, $mailbox, 123, true)
+			->willReturn($imapMessage);
+
+		// getBody() also stamps the IMAP-derived S/MIME flags onto $json
+		// before caching it (see MessagesController::getBody()) -- the
+		// cached value is $fullMessage plus those.
+		$expectedCached = $fullMessage + [
+			'smimeIsEncrypted' => false,
+			'smimeIsSigned' => false,
+			'smimeSignatureValid' => false,
+		];
+		$cache = $this->createMock(ICache::class);
+		$cache->method('get')->with("message_$messageId")->willReturn(null);
+		$cache->expects($this->once())
+			->method('set')
+			->with("message_$messageId", $expectedCached, 24 * 60 * 60);
+		$this->rebuildControllerWithCache($cache);
+
+		$response = $this->controller->getBody($messageId);
+
+		$this->assertSame('Live subject', $response->getData()['subject']);
+	}
+
+	public function testGetBodyDoesNotCacheAPlainTextOnlyMessage(): void {
+		$accountId = 17;
+		$mailboxId = 13;
+		$messageId = 4321;
+		$this->account->method('getId')->willReturn($accountId);
+		$mailbox = new Mailbox();
+		$mailbox->setAccountId($accountId);
+		$message = new DbMessage();
+		$message->setMailboxId($mailboxId);
+		$message->setUid(123);
+		$this->mailManager->method('getMessage')->with($this->userId, $messageId)->willReturn($message);
+		$this->mailManager->method('getMailbox')->with($this->userId, $mailboxId)->willReturn($mailbox);
+		$this->accountService->method('find')->with($this->userId, $accountId)->willReturn($this->account);
+
+		$client = $this->createStub(Horde_Imap_Client_Socket::class);
+		$this->clientFactory->method('getClient')->with($this->account)->willReturn($client);
+		$imapMessage = $this->createMock(IMAPMessage::class);
+		// Plain-text-only message -- matches the existing (unchanged)
+		// gating: never cached, same as before this fix.
+		$imapMessage->method('hasHtmlMessage')->willReturn(false);
+		$imapMessage->method('getFullMessage')->willReturn([
+			'uid' => 123,
+			'body' => 'plain text',
+			'attachments' => [],
+			'inlineAttachments' => [],
+		]);
+		$this->mailManager->method('getImapMessage')->willReturn($imapMessage);
+
+		$cache = $this->createMock(ICache::class);
+		$cache->method('get')->willReturn(null);
+		$cache->expects($this->never())->method('set');
+		$this->rebuildControllerWithCache($cache);
+
+		$this->controller->getBody($messageId);
+	}
+
+	public function testGetHtmlBodyReadsFromTheSharedCachePopulatedByGetBody(): void {
+		$accountId = 17;
+		$mailboxId = 13;
+		$messageId = 4321;
+		$this->account->method('getId')->willReturn($accountId);
+		$mailbox = new Mailbox();
+		$mailbox->setAccountId($accountId);
+		$message = new DbMessage();
+		$message->setMailboxId($mailboxId);
+		$message->setUid(123);
+		$this->mailManager->method('getMessage')->with($this->userId, $messageId)->willReturn($message);
+		$this->mailManager->method('getMailbox')->with($this->userId, $mailboxId)->willReturn($mailbox);
+		$this->accountService->method('find')->with($this->userId, $accountId)->willReturn($this->account);
+
+		$cache = $this->createMock(ICache::class);
+		$cache->method('get')->with("message_$messageId")->willReturn([
+			'body' => '<p>from getBody\'s own cache</p>',
+			'hasHtmlBody' => true,
+		]);
+		$this->rebuildControllerWithCache($cache);
+
+		$this->clientFactory->expects($this->never())->method('getClient');
+		$this->mailManager->expects($this->never())->method('getImapMessage');
+
+		$response = $this->controller->getHtmlBody($messageId, true);
+
+		$this->assertStringContainsString('from getBody\'s own cache', $response->render());
 	}
 
 	public function testDownloadAttachment() {
