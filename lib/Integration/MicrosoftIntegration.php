@@ -143,7 +143,11 @@ class MicrosoftIntegration {
 		return $account;
 	}
 
-	public function refresh(Account $account): Account {
+	/**
+	 * @param bool $force See GoogleIntegration::refresh()'s $force doc
+	 *   comment -- same reasoning, same fix, for Microsoft accounts.
+	 */
+	public function refresh(Account $account, bool $force = false): Account {
 		$oauthRefreshToken = $account->getMailAccount()->getOauthRefreshToken();
 		if ($account->getMailAccount()->getOauthTokenTtl() === null || $oauthRefreshToken === null) {
 			// Account is not authorized yet
@@ -151,7 +155,7 @@ class MicrosoftIntegration {
 		}
 
 		// Only refresh if the token is within REFRESH_BUFFER_SECONDS of expiry
-		if ($this->timeFactory->getTime() <= ($account->getMailAccount()->getOauthTokenTtl() - self::REFRESH_BUFFER_SECONDS)) {
+		if (!$force && $this->timeFactory->getTime() <= ($account->getMailAccount()->getOauthTokenTtl() - self::REFRESH_BUFFER_SECONDS)) {
 			// No need to refresh yet
 			return $account;
 		}
@@ -160,7 +164,8 @@ class MicrosoftIntegration {
 		// unpooled-IMAP-connection race, same fix.
 		$lockCache = $this->cacheFactory->createDistributed('mail_oauth_refresh_lock');
 		$lockKey = 'microsoft_account_' . $account->getId();
-		if ($lockCache instanceof IMemcache && !$lockCache->add($lockKey, true, self::REFRESH_LOCK_TTL)) {
+		$gotLock = !($lockCache instanceof IMemcache) || $lockCache->add($lockKey, true, self::REFRESH_LOCK_TTL);
+		if (!$gotLock && !$force) {
 			return $account;
 		}
 

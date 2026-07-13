@@ -13,6 +13,7 @@ use Horde_Imap_Client;
 use Horde_Imap_Client_Base;
 use Horde_Imap_Client_Exception;
 use Horde_Imap_Client_Ids;
+use Horde_Imap_Client_Password_Xoauth2;
 use OCA\Mail\Account;
 use OCA\Mail\Cache\HordeSyncToken;
 use OCA\Mail\Cache\HordeSyncTokenParser;
@@ -35,11 +36,15 @@ use OCA\Mail\IMAP\IMAPClientFactory;
 use OCA\Mail\IMAP\MessageMapper as ImapMessageMapper;
 use OCA\Mail\IMAP\Sync\Request;
 use OCA\Mail\IMAP\Sync\Synchronizer;
+use OCA\Mail\Integration\GoogleIntegration;
+use OCA\Mail\Integration\MicrosoftIntegration;
 use OCA\Mail\Model\IMAPMessage;
+use OCA\Mail\Service\AccountService;
 use OCA\Mail\Service\Classification\NewMessagesClassifier;
 use OCA\Mail\Support\PerformanceLogger;
 use OCP\AppFramework\Db\DoesNotExistException;
 use OCP\EventDispatcher\IEventDispatcher;
+use OCP\Security\ICrypto;
 use Psr\Log\LoggerInterface;
 use Throwable;
 use function array_chunk;
@@ -70,6 +75,10 @@ class ImapToDbSynchronizer {
 		private NewMessagesClassifier $newMessagesClassifier,
 		private HordeSyncTokenParser $syncTokenParser,
 		private SyncFastPathStats $fastPathStats,
+		private GoogleIntegration $googleIntegration,
+		private MicrosoftIntegration $microsoftIntegration,
+		private AccountService $accountService,
+		private ICrypto $crypto,
 	) {
 		$this->dispatcher = $dispatcher;
 	}
@@ -221,7 +230,22 @@ class ImapToDbSynchronizer {
 			return $rebuildThreads;
 		}
 
-		$client->login(); // Need to login before fetching capabilities.
+		try {
+			$client->login(); // Need to login before fetching capabilities.
+		} catch (Horde_Imap_Client_Exception $e) {
+			// Confirmed live for a Google account, well within its
+			// stored token's declared validity window (so not simply
+			// caught by REFRESH_BUFFER_SECONDS, see
+			// GoogleIntegration::refresh()): "Mail server denied
+			// authentication" still happens occasionally. Since we
+			// already know -- right now -- that our current token
+			// doesn't work, force a real refresh and retry login once
+			// before giving up. A second failure propagates normally.
+			if (!$this->isRetryableAuthFailure($e) || !$this->forceRefreshTokenAndUpdateClient($account, $client)) {
+				throw $e;
+			}
+			$client->login();
+		}
 
 		// There is no partial sync when using QRESYNC. As per RFC the client will always pull
 		// all changes. This is a cheap operation when using QRESYNC as the server keeps track
@@ -301,6 +325,54 @@ class ImapToDbSynchronizer {
 		}
 
 		return $rebuildThreads;
+	}
+
+	private function isRetryableAuthFailure(Horde_Imap_Client_Exception $e): bool {
+		// Same check HordeImapClient's own rate limiter uses -- these are
+		// the two messages Horde reports for a rejected login, as
+		// opposed to a connection/network-level failure that a token
+		// refresh can't do anything about anyway.
+		return $e->getCode() === Horde_Imap_Client_Exception::LOGIN_AUTHENTICATIONFAILED
+			&& in_array($e->getMessage(), ['Authentication failed.', 'Mail server denied authentication.'], true);
+	}
+
+	/**
+	 * Forces a real OAuth token refresh (bypassing REFRESH_BUFFER_SECONDS
+	 * entirely -- see GoogleIntegration::refresh()'s $force doc comment)
+	 * and, if it actually produced a new token, updates $client's XOAUTH2
+	 * credential in place so the caller's very next login() attempt uses
+	 * it.
+	 *
+	 * @return bool whether a new token was obtained and the client updated
+	 */
+	private function forceRefreshTokenAndUpdateClient(Account $account, Horde_Imap_Client_Base $client): bool {
+		if ($this->googleIntegration->isGoogleOauthAccount($account)) {
+			$integration = $this->googleIntegration;
+		} elseif ($this->microsoftIntegration->isMicrosoftOauthAccount($account)) {
+			$integration = $this->microsoftIntegration;
+		} else {
+			// Not an OAuth account (e.g. a plain IMAP password that's
+			// wrong, or was just changed) -- no token to refresh.
+			return false;
+		}
+
+		$oldAccessToken = $account->getMailAccount()->getOauthAccessToken();
+		$updated = $integration->refresh($account, true);
+		$newAccessToken = $updated->getMailAccount()->getOauthAccessToken();
+		if ($newAccessToken === null || $newAccessToken === $oldAccessToken) {
+			// The forced refresh itself didn't produce a new token (the
+			// network call to the provider failed, or the account
+			// genuinely isn't authorized) -- retrying login would just
+			// fail the exact same way again.
+			return false;
+		}
+
+		$this->accountService->update($updated->getMailAccount());
+		$client->setParam(
+			'xoauth2_token',
+			new Horde_Imap_Client_Password_Xoauth2($account->getEmail(), $this->crypto->decrypt($newAccessToken)),
+		);
+		return true;
 	}
 
 	private function unlockMailbox(bool $force, int $criteria, LoggerInterface $logger, Mailbox $mailbox): void {

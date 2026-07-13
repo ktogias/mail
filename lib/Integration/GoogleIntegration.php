@@ -144,7 +144,19 @@ class GoogleIntegration {
 		return $account;
 	}
 
-	public function refresh(Account $account): Account {
+	/**
+	 * @param bool $force Skip the expiry check and the lock's "someone
+	 *   else is already refreshing" early-out, and always attempt the
+	 *   network call. Meant only for ImapToDbSynchronizer's retry after
+	 *   an actual IMAP authentication rejection has already been
+	 *   observed: at that point REFRESH_BUFFER_SECONDS didn't save this
+	 *   request (see its own doc comment for why that can still
+	 *   happen), the caller already knows its current token doesn't
+	 *   work, and getting a working one back matters more than avoiding
+	 *   an extra call to Google's token endpoint -- a cost that's
+	 *   negligible given how rarely this path is reached.
+	 */
+	public function refresh(Account $account, bool $force = false): Account {
 		$oauthRefreshToken = $account->getMailAccount()->getOauthRefreshToken();
 		if ($account->getMailAccount()->getOauthTokenTtl() === null || $oauthRefreshToken === null) {
 			// Account is not authorized yet
@@ -152,7 +164,7 @@ class GoogleIntegration {
 		}
 
 		// Only refresh if the token is within REFRESH_BUFFER_SECONDS of expiry
-		if ($this->timeFactory->getTime() <= ($account->getMailAccount()->getOauthTokenTtl() - self::REFRESH_BUFFER_SECONDS)) {
+		if (!$force && $this->timeFactory->getTime() <= ($account->getMailAccount()->getOauthTokenTtl() - self::REFRESH_BUFFER_SECONDS)) {
 			// No need to refresh yet
 			return $account;
 		}
@@ -172,10 +184,15 @@ class GoogleIntegration {
 		// they already have and picks up the refreshed one on their own
 		// next request, by which point REFRESH_BUFFER_SECONDS has
 		// generally given the winner's refresh time to land in the
-		// database (see REFRESH_BUFFER_SECONDS for why).
+		// database (see REFRESH_BUFFER_SECONDS for why). A forced
+		// refresh still takes the lock as a courtesy (it costs nothing
+		// when uncontended), but never backs off just because someone
+		// else holds it -- unlike the normal path, it can't fall back on
+		// "the token I already have is still good enough".
 		$lockCache = $this->cacheFactory->createDistributed('mail_oauth_refresh_lock');
 		$lockKey = 'google_account_' . $account->getId();
-		if ($lockCache instanceof IMemcache && !$lockCache->add($lockKey, true, self::REFRESH_LOCK_TTL)) {
+		$gotLock = !($lockCache instanceof IMemcache) || $lockCache->add($lockKey, true, self::REFRESH_LOCK_TTL);
+		if (!$gotLock && !$force) {
 			return $account;
 		}
 
