@@ -692,6 +692,15 @@ class MessageMapper extends QBMapper {
 	 * @param Tag[][] $tags
 	 * @param PerformanceLoggerTask $perf
 	 */
+	private static function tagListIncludesImportant(array $tags): bool {
+		foreach ($tags as $tag) {
+			if ($tag->getImapLabel() === Tag::LABEL_IMPORTANT) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	private function updateTags(Account $account, Message $message, array $tags, PerformanceLoggerTask $perf): void {
 		$imapTags = $message->getTags();
 		$messageId = $message->getMessageId();
@@ -702,8 +711,40 @@ class MessageMapper extends QBMapper {
 			return;
 		}
 
+		// The important tag ($label1) is flag_important's own value, in
+		// tag form -- historically the same concept stored twice (see
+		// MigrateImportantFromImapAndDb.php). Both are derived from the
+		// exact same IMAP fetch in toDbMessage(), yet only flag_important
+		// was ever protected from the race a fresh-but-not-yet-settled IMAP
+		// read causes (see shouldTrustFlagImportantReading() and its own
+		// comment above): a message the classifier (or the user, via
+		// markEnvelopeImportantOrUnimportant()) had just tagged important
+		// would get silently UNTAGGED by the very next flags-resync pass,
+		// since Gmail's own backend hadn't yet made the keyword visible on
+		// that fresh fetch -- confirmed live as the important badge
+		// (Envelope.vue's isImportant(), which reads this tag, not
+		// flag_important) disappearing right after appearing, only
+		// returning once a later poll caught up. Reusing the identical
+		// confirmation flag_important already computes, rather than a
+		// second independent grace window, is what keeps the flag and its
+		// tag twin from ever disagreeing. Only computed when the important
+		// tag is actually in play at all, to skip the extra cache
+		// round-trip for the common case of a message with no importance
+		// history whatsoever.
+		$trustImportantReading = true;
+		if (self::tagListIncludesImportant($imapTags) || self::tagListIncludesImportant($dbTags)) {
+			$trustImportantReading = $this->shouldTrustFlagImportantReading(
+				$message->getMailboxId(),
+				$message->getUid(),
+				$message->getFlagImportant(),
+			);
+		}
+
 		$toAdd = array_udiff($imapTags, $dbTags, static fn (Tag $a, Tag $b) => strcmp($a->getImapLabel(), $b->getImapLabel()));
 		foreach ($toAdd as $tag) {
+			if ($tag->getImapLabel() === Tag::LABEL_IMPORTANT && !$trustImportantReading) {
+				continue;
+			}
 			$this->tagMapper->tagMessage($tag, $message->getMessageId(), $account->getUserId());
 		}
 		$perf->step('Tagged messages');
@@ -715,6 +756,9 @@ class MessageMapper extends QBMapper {
 
 		$toRemove = array_udiff($dbTags, $imapTags, static fn (Tag $a, Tag $b) => strcmp($a->getImapLabel(), $b->getImapLabel()));
 		foreach ($toRemove as $tag) {
+			if ($tag->getImapLabel() === Tag::LABEL_IMPORTANT && !$trustImportantReading) {
+				continue;
+			}
 			$this->tagMapper->untagMessage($tag, $message->getMessageId());
 		}
 		$perf->step('Untagged messages');

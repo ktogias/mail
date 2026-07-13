@@ -16,6 +16,7 @@ use OCA\Mail\Contracts\IMailSearch;
 use OCA\Mail\Db\Mailbox;
 use OCA\Mail\Db\Message;
 use OCA\Mail\Db\MessageMapper;
+use OCA\Mail\Db\Tag;
 use OCA\Mail\Db\TagMapper;
 use OCA\Mail\Service\Search\Flag;
 use OCA\Mail\Service\Search\SearchQuery;
@@ -25,6 +26,7 @@ use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\DB\QueryBuilder\IQueryBuilder;
 use OCP\ICacheFactory;
 use OCP\IDBConnection;
+use OCP\IL10N;
 use OCP\IMemcache;
 use Psr\Log\LoggerInterface;
 use function array_map;
@@ -132,6 +134,8 @@ class MessageMapperTest extends TestCase {
 	/** @var MessageMapper */
 	private $mapper;
 
+	private TagMapper $tagMapper;
+
 	private ArrayMemcache $flagImportantCache;
 
 	protected function setUp(): void {
@@ -140,7 +144,13 @@ class MessageMapperTest extends TestCase {
 		$this->db = \OCP\Server::get(\OCP\IDBConnection::class);
 		$this->time = $this->createMock(ITimeFactory::class);
 		$this->time->method('getTime')->willReturnCallback(fn () => $this->timestamp);
-		$tagMapper = $this->createMock(TagMapper::class);
+		// A real TagMapper, not a mock: the important-tag protection tests
+		// below (see updateTags()) need genuine get/insert/delete
+		// round-trips against mail_tags/mail_message_tags, the same
+		// reasoning ArrayMemcache above exists for IMemcache. IL10N is
+		// only ever touched by createDefaultTags(), which nothing here
+		// calls.
+		$this->tagMapper = new TagMapper($this->db, $this->createMock(IL10N::class));
 		$performanceLogger = $this->createMock(PerformanceLogger::class);
 		// start() has a non-nullable PerformanceLoggerTask return type --
 		// updateBulk() (used by the tests below) calls ->step() on
@@ -156,7 +166,7 @@ class MessageMapperTest extends TestCase {
 		$this->mapper = new MessageMapper(
 			$this->db,
 			$this->time,
-			$tagMapper,
+			$this->tagMapper,
 			$performanceLogger,
 			$cacheFactory,
 		);
@@ -165,6 +175,11 @@ class MessageMapperTest extends TestCase {
 
 		$delete = $qb->delete($this->mapper->getTableName());
 		$delete->executeStatement();
+
+		// Cleaned the same way as mail_messages above -- the important-tag
+		// protection tests below leave real rows in these two tables.
+		$this->db->getQueryBuilder()->delete('mail_message_tags')->executeStatement();
+		$this->db->getQueryBuilder()->delete('mail_tags')->executeStatement();
 	}
 
 	private function insertMessage(int $uid, int $mailbox_id): void {
@@ -467,6 +482,219 @@ class MessageMapperTest extends TestCase {
 		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessage($uid, $mailboxId, false));
 
 		self::assertTrue($this->selectFlagImportant($uid, $mailboxId));
+	}
+
+	/**
+	 * @param Tag[] $imapTags whatever this fetch's toDbMessage() derived
+	 *                        the message's tags to be, right now
+	 */
+	private function freshlyFetchedMessageWithTags(int $uid, int $mailboxId, bool $flagImportant, array $imapTags): Message {
+		$message = $this->freshlyFetchedMessage($uid, $mailboxId, $flagImportant);
+		$message->setMessageId($this->messageIdFor($uid, $mailboxId));
+		$message->setTags($imapTags);
+		return $message;
+	}
+
+	private function messageIdFor(int $uid, int $mailboxId): string {
+		return '<abc' . $uid . $mailboxId . '@123.com>';
+	}
+
+	private function importantTag(): Tag {
+		$tag = new Tag();
+		$tag->setImapLabel(Tag::LABEL_IMPORTANT);
+		$tag->setUserId('testuser');
+		$tag->setDisplayName('Important');
+		return $tag;
+	}
+
+	private function workTag(): Tag {
+		$tag = new Tag();
+		$tag->setImapLabel(Tag::LABEL_WORK);
+		$tag->setUserId('testuser');
+		$tag->setDisplayName('Work');
+		return $tag;
+	}
+
+	private function messageIsTagged(int $uid, int $mailboxId, string $imapLabel): bool {
+		$qb = $this->db->getQueryBuilder();
+		$result = $qb->select($qb->func()->count('*'))
+			->from('mail_message_tags', 'mt')
+			->join('mt', 'mail_tags', 't', $qb->expr()->eq('mt.tag_id', 't.id', IQueryBuilder::PARAM_INT))
+			->where(
+				$qb->expr()->eq('mt.imap_message_id', $qb->createNamedParameter($this->messageIdFor($uid, $mailboxId))),
+				$qb->expr()->eq('t.imap_label', $qb->createNamedParameter($imapLabel))
+			)
+			->executeQuery();
+		$count = (int)$result->fetchOne();
+		$result->closeCursor();
+		return $count > 0;
+	}
+
+	/**
+	 * The important TAG ($label1, read by Envelope.vue's isImportant() to
+	 * show the badge) is flag_important's own value stored a second time,
+	 * historically (see MigrateImportantFromImapAndDb.php). Both are
+	 * derived from the exact same IMAP fetch in toDbMessage(), yet before
+	 * this fix only flag_important was protected from a fresh-but-not-
+	 * yet-settled IMAP read -- updateTags() untagged a message the
+	 * classifier had just tagged important the moment the very next
+	 * flags-resync (often the same poll, since the classifier's own IMAP
+	 * write already bumps HIGHESTMODSEQ) re-fetched it before Gmail's own
+	 * backend made the keyword visible. Confirmed live: the important
+	 * badge disappearing right after appearing, with flag_important
+	 * itself staying correctly true throughout.
+	 */
+	public function testUpdateBulkProtectsARecentlyAddedImportantTagFromBeingRemovedByAContradictingReading(): void {
+		$mailboxId = 1;
+		$uid = 47;
+		$this->insertMessage($uid, $mailboxId);
+		$account = $this->createMock(Account::class);
+		$account->method('getId')->willReturn(13);
+		$account->method('getName')->willReturn('test account');
+		$account->method('getUserId')->willReturn('testuser');
+
+		// The classifier's own write: flag_important true, tag applied --
+		// confirms the grace window for both at once.
+		$this->mapper->updateBulk(
+			$account,
+			true,
+			$this->freshlyFetchedMessageWithTags($uid, $mailboxId, true, [$this->importantTag()]),
+		);
+		self::assertTrue($this->selectFlagImportant($uid, $mailboxId));
+		self::assertTrue($this->messageIsTagged($uid, $mailboxId, Tag::LABEL_IMPORTANT));
+
+		// A routine resync re-fetching this same message moments later,
+		// with Gmail's own IMAP keyword state not yet reporting either
+		// the flag or the label -- exactly what happens while that same
+		// write is still settling.
+		$this->mapper->updateBulk(
+			$account,
+			true,
+			$this->freshlyFetchedMessageWithTags($uid, $mailboxId, false, []),
+		);
+
+		self::assertTrue($this->selectFlagImportant($uid, $mailboxId));
+		self::assertTrue($this->messageIsTagged($uid, $mailboxId, Tag::LABEL_IMPORTANT));
+	}
+
+	/**
+	 * The symmetric counterpart: a user removing importance via
+	 * markEnvelopeImportantOrUnimportant() shouldn't have the tag
+	 * silently re-added by a stale/concurrent sync still reporting
+	 * Gmail's pre-removal state -- same reasoning as
+	 * shouldTrustFlagImportantReading() itself having no separate
+	 * "upgrade"/"downgrade" branch.
+	 */
+	public function testUpdateBulkProtectsARecentlyRemovedImportantTagFromBeingReAddedByAContradictingReading(): void {
+		$mailboxId = 1;
+		$uid = 48;
+		$this->insertMessage($uid, $mailboxId);
+		$account = $this->createMock(Account::class);
+		$account->method('getId')->willReturn(13);
+		$account->method('getName')->willReturn('test account');
+		$account->method('getUserId')->willReturn('testuser');
+
+		// Confirms flag_important+tag false immediately -- e.g. the user
+		// just removed importance via markEnvelopeImportantOrUnimportant()
+		// and that propagated to IMAP, and this is the sync that first
+		// observes it. No prior confirmation exists yet for this uid, so
+		// (mirroring testUpdateBulkProtectsARecentFalseConfirmationFrom
+		// AContradictingTrueReading() above) this is trusted immediately
+		// rather than needing a separate earlier "confirm true" step,
+		// which -- within the same grace window -- would itself have been
+		// protected and left both the flag and the tag at true.
+		$this->mapper->updateBulk(
+			$account,
+			true,
+			$this->freshlyFetchedMessageWithTags($uid, $mailboxId, false, []),
+		);
+		self::assertFalse($this->selectFlagImportant($uid, $mailboxId));
+		self::assertFalse($this->messageIsTagged($uid, $mailboxId, Tag::LABEL_IMPORTANT));
+
+		// A different, concurrent sync that happened to read IMAP just
+		// before the removal took effect there, still reporting the old
+		// "important" state for both the flag and the tag.
+		$this->mapper->updateBulk(
+			$account,
+			true,
+			$this->freshlyFetchedMessageWithTags($uid, $mailboxId, true, [$this->importantTag()]),
+		);
+
+		self::assertFalse($this->selectFlagImportant($uid, $mailboxId));
+		self::assertFalse($this->messageIsTagged($uid, $mailboxId, Tag::LABEL_IMPORTANT));
+	}
+
+	/**
+	 * Once the grace period has genuinely elapsed, a contradicting
+	 * reading is trusted for the tag exactly as it already is for
+	 * flag_important -- otherwise a message manually untagged important
+	 * directly in Gmail would stay stuck tagged in this app permanently.
+	 */
+	public function testUpdateBulkTrustsAContradictingTagReadingOnceTheGracePeriodHasElapsed(): void {
+		$mailboxId = 1;
+		$uid = 49;
+		$this->insertMessage($uid, $mailboxId);
+		$account = $this->createMock(Account::class);
+		$account->method('getId')->willReturn(13);
+		$account->method('getName')->willReturn('test account');
+		$account->method('getUserId')->willReturn('testuser');
+
+		$this->mapper->updateBulk(
+			$account,
+			true,
+			$this->freshlyFetchedMessageWithTags($uid, $mailboxId, true, [$this->importantTag()]),
+		);
+		self::assertTrue($this->messageIsTagged($uid, $mailboxId, Tag::LABEL_IMPORTANT));
+
+		// Past FLAG_IMPORTANT_GRACE_SECONDS (120s).
+		$this->timestamp += 130;
+
+		$this->mapper->updateBulk(
+			$account,
+			true,
+			$this->freshlyFetchedMessageWithTags($uid, $mailboxId, false, []),
+		);
+
+		self::assertFalse($this->selectFlagImportant($uid, $mailboxId));
+		self::assertFalse($this->messageIsTagged($uid, $mailboxId, Tag::LABEL_IMPORTANT));
+	}
+
+	/**
+	 * The important-tag protection above must not turn into blanket
+	 * protection for every tag on a message -- an ordinary, unrelated tag
+	 * (e.g. a user-applied "Work" label, with no flag_important
+	 * involvement at all) keeps following IMAP's fresh reading normally,
+	 * added and removed immediately, exactly as before this fix.
+	 */
+	public function testUpdateBulkStillUpdatesUnrelatedTagsNormallyWhenTheImportantTagIsProtected(): void {
+		$mailboxId = 1;
+		$uid = 50;
+		$this->insertMessage($uid, $mailboxId);
+		$account = $this->createMock(Account::class);
+		$account->method('getId')->willReturn(13);
+		$account->method('getName')->willReturn('test account');
+		$account->method('getUserId')->willReturn('testuser');
+
+		$this->mapper->updateBulk(
+			$account,
+			true,
+			$this->freshlyFetchedMessageWithTags($uid, $mailboxId, true, [$this->importantTag(), $this->workTag()]),
+		);
+		self::assertTrue($this->messageIsTagged($uid, $mailboxId, Tag::LABEL_IMPORTANT));
+		self::assertTrue($this->messageIsTagged($uid, $mailboxId, Tag::LABEL_WORK));
+
+		// A stale reading missing both tags: the important tag is
+		// protected by the still-active grace window, but Work -- having
+		// nothing to do with flag_important -- is removed immediately,
+		// same as any ordinary flag/tag sync always has been.
+		$this->mapper->updateBulk(
+			$account,
+			true,
+			$this->freshlyFetchedMessageWithTags($uid, $mailboxId, false, []),
+		);
+
+		self::assertTrue($this->messageIsTagged($uid, $mailboxId, Tag::LABEL_IMPORTANT));
+		self::assertFalse($this->messageIsTagged($uid, $mailboxId, Tag::LABEL_WORK));
 	}
 
 	public function testFindIdsByQuery(): void {
