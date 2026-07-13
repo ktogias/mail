@@ -187,4 +187,47 @@ describe('MailboxThread', () => {
 
 		expect(wrapper.vm.searchQuery).toBe('not:starred')
 	})
+
+	describe('sortFavorites watcher (toggling the preference live, not on initial mount)', () => {
+		// Regression: the ternary's branches were backwards. Turning the
+		// preference on with an ALREADY-active search query discarded it
+		// outright (replaced with the bare 'not:starred', silently
+		// dropping whatever the user had typed); turning it on with NO
+		// active query produced the literal string "undefined
+		// not:starred" (this.searchQuery, still unset, coerced to a
+		// string by the + concatenation) -- the exact same "poisoned
+		// query" class of bug appendToSearch()'s own comment documents
+		// elsewhere in this file, just reachable by toggling the setting
+		// live instead of by mounting.
+		it('appends not:starred to an existing search query instead of discarding it', async () => {
+			const wrapper = mountThread()
+			await wrapper.setData({ searchQuery: 'mentions:false match:allof' })
+
+			store.savePreferenceMutation({ key: 'sort-favorites', value: 'true' })
+			await wrapper.vm.$nextTick()
+
+			expect(wrapper.vm.searchQuery).toBe('mentions:false match:allof not:starred')
+		})
+
+		it('sets the bare not:starred, not "undefined not:starred", when there is no existing query', async () => {
+			const wrapper = mountThread()
+			expect(wrapper.vm.searchQuery).toBeUndefined()
+
+			store.savePreferenceMutation({ key: 'sort-favorites', value: 'true' })
+			await wrapper.vm.$nextTick()
+
+			expect(wrapper.vm.searchQuery).toBe('not:starred')
+		})
+
+		it('removes not:starred again when the preference is turned back off', async () => {
+			store.savePreferenceMutation({ key: 'sort-favorites', value: 'true' })
+			const wrapper = mountThread()
+			expect(wrapper.vm.searchQuery).toBe('not:starred')
+
+			store.savePreferenceMutation({ key: 'sort-favorites', value: 'false' })
+			await wrapper.vm.$nextTick()
+
+			expect(wrapper.vm.searchQuery).toBe('')
+		})
+	})
 })

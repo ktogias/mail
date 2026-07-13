@@ -1523,7 +1523,9 @@ describe('Vuex store actions', () => {
 					value: true,
 				})
 
-				vi.advanceTimersByTime(30 * 1000)
+				// Past RECENT_FLAG_CHANGE_GRACE_MS (120s, raised from the
+				// original 20s -- see actions.js for why).
+				vi.advanceTimersByTime(130 * 1000)
 
 				store.updateEnvelopeMutation({
 					envelope: { databaseId: 903, mailboxId: 11, flags: { seen: false }, tags: {} },
@@ -1533,6 +1535,49 @@ describe('Vuex store actions', () => {
 				// seen:false is a genuine, later server-side change (e.g.
 				// read on another device) and must win.
 				expect(store.envelopes[903].flags.seen).toBe(false)
+			} finally {
+				vi.useRealTimers()
+			}
+		})
+
+		it('still protects a flag from a stale sync landing well past the old 20s window', () => {
+			// Confirmed live, 2026-07-13: this account's own IMAP sync
+			// responses have been measured up to 67.8s -- comfortably
+			// past the original 20s grace window, so a stale response
+			// could (and did) land after protection had already expired,
+			// silently reverting a flag the user had just changed (e.g.
+			// starring a message), then flip-flopping back on the next
+			// successful sync. Reproduces that exact timing with the
+			// fixed 120s window and confirms it now holds.
+			vi.useFakeTimers()
+			try {
+				const account13 = { id: 13 }
+				store.addAccountMutation(account13)
+				store.addMailboxMutation({
+					account: account13,
+					mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+				})
+				store.addEnvelopesMutation({
+					envelopes: [{ databaseId: 904, mailboxId: 11, uid: 1, flags: { flagged: false }, tags: {} }],
+					addToUnifiedMailboxes: false,
+				})
+
+				store.flagEnvelopeMutation({
+					envelope: store.envelopes[904],
+					flag: 'flagged',
+					value: true,
+				})
+
+				// A sync as slow as the worst one actually measured for
+				// this account -- would have already cleared the old 20s
+				// window, incorrectly reverting the star.
+				vi.advanceTimersByTime(68 * 1000)
+
+				store.updateEnvelopeMutation({
+					envelope: { databaseId: 904, mailboxId: 11, flags: { flagged: false }, tags: {} },
+				})
+
+				expect(store.envelopes[904].flags.flagged).toBe(true)
 			} finally {
 				vi.useRealTimers()
 			}

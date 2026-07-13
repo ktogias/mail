@@ -315,7 +315,19 @@ const MAX_CONCURRENT_SPECULATIVE_MESSAGE_FETCHES = 2
 // unread/bold the moment the user opened a different thread. This map
 // lets a flag mutation protect itself from being clobbered by a stale
 // sync response for a short window after being set.
-const RECENT_FLAG_CHANGE_GRACE_MS = 20 * 1000
+//
+// 20s (the original value) comfortably covered ordinary sync latency,
+// but this account's own IMAP responses have since been measured up to
+// 67.8s (see nextcloud-mail-oauth-integration.md, 2026-07-13) -- well
+// past that window. A star toggled (or any flag change) while a sync
+// that slow is in flight got its protection expire before that sync's
+// stale response even landed, silently reverting the flag and then
+// flip-flopping back on the next successful sync -- confirmed live as
+// the Favorites section's contents visibly fluctuating. Raised to
+// comfortably clear the worst latency actually observed, same
+// "generous bound above the slowest legitimate case" reasoning as
+// FETCH_MESSAGE_TIMEOUT_MS above.
+const RECENT_FLAG_CHANGE_GRACE_MS = 120 * 1000
 const recentFlagChanges = new Map()
 
 /**

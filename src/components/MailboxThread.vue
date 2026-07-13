@@ -479,7 +479,16 @@ export default {
 
 		sortFavorites(enabled) {
 			if (enabled) {
-				this.searchQuery = this.searchQuery ? 'not:starred' : this.searchQuery + ' not:starred'
+				// Was backwards: an existing searchQuery got discarded and
+				// replaced with the bare 'not:starred' (silently dropping
+				// whatever the user had actually typed), while having no
+				// existing query yet produced the literal string
+				// "undefined not:starred" (JS coercing the unset
+				// this.searchQuery to a string before concatenating) --
+				// the same class of leak documented elsewhere in this file
+				// (see appendToSearch()'s own comment), just triggered by
+				// toggling this preference live instead of by mounting.
+				this.searchQuery = this.searchQuery ? (this.searchQuery + ' not:starred') : 'not:starred'
 			} else if (this.searchQuery.includes('not:starred')) {
 				this.searchQuery = this.searchQuery.replace('not:starred', '')
 			}
