@@ -23,11 +23,100 @@ use OCA\Mail\Support\PerformanceLogger;
 use OCA\Mail\Support\PerformanceLoggerTask;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\DB\QueryBuilder\IQueryBuilder;
+use OCP\ICacheFactory;
 use OCP\IDBConnection;
+use OCP\IMemcache;
 use Psr\Log\LoggerInterface;
 use function array_map;
 use function range;
 use function time;
+
+/**
+ * Minimal, real (not a dumb mock) in-memory IMemcache: the
+ * flag_important grace-window logic under test is driven by comparing
+ * a stored confirmation timestamp against the (mockable) ITimeFactory,
+ * not by the cache backend's own physical TTL -- a get()/set() round
+ * trip that actually stores the value is what these tests need, and
+ * whatever this disposable container's real ICacheFactory happens to
+ * resolve to (possibly a no-op NullCache without Redis configured) is
+ * not guaranteed to provide that.
+ */
+class ArrayMemcache implements IMemcache {
+	private array $values = [];
+
+	public function get($key) {
+		return $this->values[$key] ?? null;
+	}
+
+	public function set($key, $value, $ttl = 0) {
+		$this->values[$key] = $value;
+		return true;
+	}
+
+	public function hasKey($key) {
+		return array_key_exists($key, $this->values);
+	}
+
+	public function remove($key) {
+		unset($this->values[$key]);
+		return true;
+	}
+
+	public function clear($prefix = '') {
+		$this->values = [];
+		return true;
+	}
+
+	public static function isAvailable(): bool {
+		return true;
+	}
+
+	public function add($key, $value, $ttl = 0) {
+		if ($this->hasKey($key)) {
+			return false;
+		}
+		return $this->set($key, $value, $ttl);
+	}
+
+	public function inc($key, $step = 1) {
+		$value = ($this->values[$key] ?? 0) + $step;
+		$this->values[$key] = $value;
+		return $value;
+	}
+
+	public function dec($key, $step = 1) {
+		if (!$this->hasKey($key)) {
+			return false;
+		}
+		$value = $this->values[$key] - $step;
+		$this->values[$key] = $value;
+		return $value;
+	}
+
+	public function cas($key, $old, $new) {
+		if (($this->values[$key] ?? null) !== $old) {
+			return false;
+		}
+		$this->values[$key] = $new;
+		return true;
+	}
+
+	public function cad($key, $old) {
+		if (($this->values[$key] ?? null) !== $old) {
+			return false;
+		}
+		unset($this->values[$key]);
+		return true;
+	}
+
+	public function ncad(string $key, mixed $old): bool {
+		if (($this->values[$key] ?? null) === $old) {
+			return false;
+		}
+		unset($this->values[$key]);
+		return true;
+	}
+}
 
 class MessageMapperTest extends TestCase {
 	use DatabaseTransaction;
@@ -42,6 +131,8 @@ class MessageMapperTest extends TestCase {
 
 	/** @var MessageMapper */
 	private $mapper;
+
+	private ArrayMemcache $flagImportantCache;
 
 	protected function setUp(): void {
 		parent::setUp();
@@ -59,11 +150,15 @@ class MessageMapperTest extends TestCase {
 		$performanceLogger->method('start')->willReturn(
 			new PerformanceLoggerTask('test', $this->time, $this->createMock(LoggerInterface::class))
 		);
+		$this->flagImportantCache = new ArrayMemcache();
+		$cacheFactory = $this->createMock(ICacheFactory::class);
+		$cacheFactory->method('createDistributed')->willReturn($this->flagImportantCache);
 		$this->mapper = new MessageMapper(
 			$this->db,
 			$this->time,
 			$tagMapper,
-			$performanceLogger
+			$performanceLogger,
+			$cacheFactory,
 		);
 
 		$qb = $this->db->getQueryBuilder();
@@ -219,7 +314,8 @@ class MessageMapperTest extends TestCase {
 	 * flag with shared, multi-client meaning the way \Seen/\Flagged/
 	 * \Answered are. Confirmed live: NewMessagesClassifier locally decides
 	 * a message is important and tries to propagate that back to Gmail
-	 * via IMAP, but if that propagation hasn't landed yet (or fails, e.g.
+	 * via IMAP, but if that propagation hasn't landed yet (or Gmail's own
+	 * backend has a moment of eventual-consistency lag for it, plausible
 	 * under the slow/unreliable IMAP conditions documented elsewhere for
 	 * this account) by the time the next routine resync re-fetches the
 	 * message, toDbMessage() recomputes flag_important fresh from
@@ -228,28 +324,53 @@ class MessageMapperTest extends TestCase {
 	 * decision back to false. The Priority Inbox's "Important" section
 	 * visibly lost and regained messages with no user action involved.
 	 */
-	public function testUpdateBulkNeverDowngradesFlagImportant(): void {
+	public function testUpdateBulkNeverDowngradesFlagImportantWithinTheGracePeriod(): void {
 		$mailboxId = 1;
 		$uid = 42;
 		$this->insertMessage($uid, $mailboxId);
-		$qb = $this->db->getQueryBuilder();
-		$qb->update($this->mapper->getTableName())
-			->set('flag_important', $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL))
-			->where($qb->expr()->eq('uid', $qb->createNamedParameter($uid, IQueryBuilder::PARAM_INT), IQueryBuilder::PARAM_INT))
-			->executeStatement();
-		self::assertTrue($this->selectFlagImportant($uid, $mailboxId));
-
 		$account = $this->createMock(Account::class);
 		$account->method('getId')->willReturn(13);
 		$account->method('getName')->willReturn('test account');
 
-		// A routine resync re-fetching this same message, with Gmail's
-		// own IMAP keyword state (still) not reporting it as important --
-		// exactly what happens while the classifier's own propagation is
-		// still in flight.
+		// An upgrade -- confirms flag_important true and starts the
+		// grace window (see markFlagImportantConfirmed()).
+		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessage($uid, $mailboxId, true));
+		self::assertTrue($this->selectFlagImportant($uid, $mailboxId));
+
+		// A routine resync re-fetching this same message moments later,
+		// with Gmail's own IMAP keyword state (still) not reporting it
+		// as important -- exactly what happens while that same write is
+		// still settling.
 		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessage($uid, $mailboxId, false));
 
 		self::assertTrue($this->selectFlagImportant($uid, $mailboxId));
+	}
+
+	/**
+	 * The flip side of the test above: once the grace window has
+	 * genuinely elapsed, a contradicting reading is trusted rather than
+	 * dismissed forever -- otherwise a message whose importance was
+	 * deliberately removed directly in Gmail would stay stuck important
+	 * in this app permanently, which is exactly the concern that
+	 * motivated a time-bounded grace period over a flat "never downgrade".
+	 */
+	public function testUpdateBulkAllowsTheDowngradeOnceTheGracePeriodHasElapsed(): void {
+		$mailboxId = 1;
+		$uid = 44;
+		$this->insertMessage($uid, $mailboxId);
+		$account = $this->createMock(Account::class);
+		$account->method('getId')->willReturn(13);
+		$account->method('getName')->willReturn('test account');
+
+		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessage($uid, $mailboxId, true));
+		self::assertTrue($this->selectFlagImportant($uid, $mailboxId));
+
+		// Long past FLAG_IMPORTANT_DOWNGRADE_GRACE_SECONDS (15 min).
+		$this->timestamp += 16 * 60;
+
+		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessage($uid, $mailboxId, false));
+
+		self::assertFalse($this->selectFlagImportant($uid, $mailboxId));
 	}
 
 	public function testUpdateBulkStillUpgradesFlagImportant(): void {
@@ -267,6 +388,49 @@ class MessageMapperTest extends TestCase {
 		// directly in Gmail, or Gmail's own classifier flagged it) --
 		// still a legitimate signal to accept.
 		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessage($uid, $mailboxId, true));
+
+		self::assertTrue($this->selectFlagImportant($uid, $mailboxId));
+	}
+
+	/**
+	 * insertBulk() (a message's very first sync) seeds flag_important
+	 * from Gmail's own state at that point -- correct and unchanged by
+	 * this fix. It must also start the SAME grace window an updateBulk()
+	 * upgrade does, or a routine resync landing moments after the
+	 * initial sync could immediately undo a message that arrived
+	 * already marked important.
+	 */
+	public function testInsertBulkAlsoStartsTheGracePeriodForAMessageThatArrivesAlreadyImportant(): void {
+		$mailboxId = 1;
+		$uid = 45;
+		$message = new Message();
+		$message->setUid($uid);
+		$message->setMessageId('<initial-sync-' . $uid . '@test.com>');
+		$message->setMailboxId($mailboxId);
+		$message->setSubject('TEST');
+		$message->setSentAt($this->time->getTime());
+		$message->setFlagAnswered(false);
+		$message->setFlagDeleted(false);
+		$message->setFlagDraft(false);
+		$message->setFlagFlagged(false);
+		$message->setFlagSeen(false);
+		$message->setFlagForwarded(false);
+		$message->setFlagJunk(false);
+		$message->setFlagNotjunk(false);
+		$message->setFlagMdnsent(false);
+		$message->setFlagImportant(true);
+
+		$account = $this->createMock(Account::class);
+		$account->method('getId')->willReturn(13);
+		$account->method('getName')->willReturn('test account');
+
+		$this->mapper->insertBulk($account, $message);
+		self::assertTrue($this->selectFlagImportant($uid, $mailboxId));
+
+		// A routine resync landing moments after the initial sync, with
+		// Gmail's own IMAP keyword state not (yet?) reporting it as
+		// important on this particular fetch.
+		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessage($uid, $mailboxId, false));
 
 		self::assertTrue($this->selectFlagImportant($uid, $mailboxId));
 	}

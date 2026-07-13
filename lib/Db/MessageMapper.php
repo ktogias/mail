@@ -26,7 +26,9 @@ use OCP\AppFramework\Db\TTransactional;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\DB\Exception;
 use OCP\DB\QueryBuilder\IQueryBuilder;
+use OCP\ICacheFactory;
 use OCP\IDBConnection;
+use OCP\IMemcache;
 use OCP\IUser;
 use RuntimeException;
 use Throwable;
@@ -53,11 +55,24 @@ class MessageMapper extends QBMapper {
 	/** @var ITimeFactory */
 	private $timeFactory;
 
+	// How long a message that was just confirmed important (flag_important
+	// written true, whether from this app's own classifier eventually
+	// reaching IMAP or Gmail's own state) stays protected from being
+	// downgraded by a routine resync reading a contradicting "false". Long
+	// enough to cover this account's own measured worst-case sync latency
+	// and IMAP's own eventual-consistency lag for a still-settling write
+	// (a fresh write is not always immediately visible to every
+	// subsequent read); short enough that a genuine, deliberate removal
+	// of importance directly in Gmail is still reflected within one
+	// BackfillJob cycle (15 minutes) rather than staying stuck forever.
+	private const FLAG_IMPORTANT_DOWNGRADE_GRACE_SECONDS = 15 * 60;
+
 	public function __construct(
 		IDBConnection $db,
 		ITimeFactory $timeFactory,
 		private TagMapper $tagMapper,
 		private PerformanceLogger $performanceLogger,
+		private ICacheFactory $cacheFactory,
 	) {
 		parent::__construct($db, 'mail_messages');
 		$this->timeFactory = $timeFactory;
@@ -355,6 +370,13 @@ class MessageMapper extends QBMapper {
 				$qb1->setParameter('flag_mdnsent', $message->getFlagMdnsent(), IQueryBuilder::PARAM_BOOL);
 				$qb1->executeStatement();
 
+				if ($message->getFlagImportant()) {
+					// Seeded from Gmail's own state on this message's very
+					// first sync -- starts the same downgrade-protection
+					// window a later routine resync's own upgrade would.
+					$this->markFlagImportantConfirmed($message->getMailboxId(), $message->getUid());
+				}
+
 				$message->setId($qb1->getLastInsertId());
 				$recipientTypes = [
 					Address::TYPE_FROM => $message->getFrom(),
@@ -389,6 +411,55 @@ class MessageMapper extends QBMapper {
 
 			throw $e;
 		}
+	}
+
+	private static function flagImportantConfirmationKey(int $mailboxId, int $uid): string {
+		return "confirmed_important_{$mailboxId}_{$uid}";
+	}
+
+	/**
+	 * Record that flag_important was just written true for this message --
+	 * see FLAG_IMPORTANT_DOWNGRADE_GRACE_SECONDS above for why. Stores the
+	 * actual confirmation timestamp (via the injected, mockable
+	 * ITimeFactory), not just a boolean -- wasFlagImportantRecentlyConfirmed()
+	 * compares against it directly rather than relying solely on the cache
+	 * backend's own physical TTL, which uses real wall-clock time no test
+	 * can fast-forward. The TTL below is still set generously (double the
+	 * grace period) purely so an old entry doesn't linger in the cache
+	 * forever; it is not what enforces the grace window itself.
+	 */
+	private function markFlagImportantConfirmed(int $mailboxId, int $uid): void {
+		$cache = $this->cacheFactory->createDistributed('mail_flag_important');
+		if (!($cache instanceof IMemcache)) {
+			return;
+		}
+		$cache->set(
+			self::flagImportantConfirmationKey($mailboxId, $uid),
+			$this->timeFactory->getTime(),
+			self::FLAG_IMPORTANT_DOWNGRADE_GRACE_SECONDS * 2,
+		);
+	}
+
+	/**
+	 * Whether flag_important was confirmed true recently enough that a
+	 * routine resync's contradicting "false" reading should still be
+	 * distrusted (likely eventual-consistency lag, not a genuine
+	 * removal). No distributed memcache available reads as "not
+	 * protected" -- same fail-open philosophy as isServerBusy()'s own
+	 * memcache-unavailable fallback elsewhere in this app: better to
+	 * risk the rare stale-read downgrade than to permanently refuse
+	 * every legitimate one.
+	 */
+	private function wasFlagImportantRecentlyConfirmed(int $mailboxId, int $uid): bool {
+		$cache = $this->cacheFactory->createDistributed('mail_flag_important');
+		if (!($cache instanceof IMemcache)) {
+			return false;
+		}
+		$confirmedAt = $cache->get(self::flagImportantConfirmationKey($mailboxId, $uid));
+		if ($confirmedAt === null) {
+			return false;
+		}
+		return $this->timeFactory->getTime() < ((int)$confirmedAt + self::FLAG_IMPORTANT_DOWNGRADE_GRACE_SECONDS);
 	}
 
 	/**
@@ -496,30 +567,39 @@ class MessageMapper extends QBMapper {
 					$updateData['flag_mdnsent_false'][] = $message->getUid();
 				}
 
-				// Deliberately upgrade-only, unlike every other flag in this
-				// loop: flag_important represents THIS APP's own importance
+				// Not treated like every other flag in this loop:
+				// flag_important represents THIS APP's own importance
 				// classification (see ImportanceClassifier.php), not a
 				// genuine externally-synced IMAP flag with shared,
-				// multi-client meaning the way \Seen/\Flagged/\Answered are.
-				// toDbMessage() recomputes it fresh from whatever Gmail's
-				// own IMAP keyword state happens to say on THIS fetch --
-				// if NewMessagesClassifier's own propagation of that
-				// keyword back to IMAP hasn't landed yet (or never
-				// reliably does, e.g. under the slow/unreliable IMAP
-				// conditions documented elsewhere in this account's
-				// history), a routine resync landing in between silently
-				// overwrote the classifier's local decision back to false
-				// -- confirmed live as the Priority Inbox's "Important"
-				// section visibly losing and re-gaining messages with no
-				// user action involved. The classifier itself never sets
-				// this false (only true, for a newly-classified message);
-				// the only place false is a deliberate action is the
-				// user's own markEnvelopeImportantOrUnimportant(), a
-				// completely separate code path from this bulk resync.
-				// Never downgrading here closes that race outright,
-				// rather than just narrowing its window.
+				// multi-client meaning the way \Seen/\Flagged/\Answered
+				// are. toDbMessage() recomputes it fresh from whatever
+				// Gmail's own IMAP keyword state happens to say on THIS
+				// fetch -- if NewMessagesClassifier's own propagation of
+				// that keyword back to IMAP hasn't fully settled yet (or
+				// Gmail's own backend has a moment of eventual-
+				// consistency lag for it, plausible given the slow/
+				// unreliable IMAP conditions documented elsewhere in this
+				// account's history), a routine resync landing in that
+				// window would otherwise silently revert the classifier's
+				// decision back to false -- confirmed live as the
+				// Priority Inbox's "Important" section visibly losing and
+				// re-gaining messages with no user action involved.
+				//
+				// An upgrade (false -> true) is always applied normally
+				// -- see the "true" branch. A downgrade is only applied
+				// once FLAG_IMPORTANT_DOWNGRADE_GRACE_SECONDS has passed
+				// since flag_important was last confirmed true (via
+				// wasFlagImportantRecentlyConfirmed()): recent enough to
+				// still plausibly be that same settling window (skip,
+				// protect it), or old enough to trust as a genuine,
+				// deliberate change -- e.g. importance removed directly
+				// in Gmail, which must still be reflected here eventually
+				// rather than getting stuck important forever.
 				if ($message->getFlagImportant()) {
 					$updateData['flag_important_true'][] = $message->getUid();
+					$this->markFlagImportantConfirmed($message->getMailboxId(), $message->getUid());
+				} elseif (!$this->wasFlagImportantRecentlyConfirmed($message->getMailboxId(), $message->getUid())) {
+					$updateData['flag_important_false'][] = $message->getUid();
 				}
 			}
 		}
