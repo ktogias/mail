@@ -34,9 +34,24 @@ class GoogleIntegration {
 	// considered abandoned (e.g. the holder crashed or was killed
 	// mid-refresh) and another request may try again. Generous relative
 	// to a normal refresh (a single HTTPS round trip to Google), well
-	// short of the 60s grace window refresh() itself waits for before
-	// this is even reached.
+	// short of the REFRESH_BUFFER_SECONDS window refresh() itself waits
+	// for before this is even reached.
 	private const REFRESH_LOCK_TTL = 30;
+
+	// How long before the token's declared expiry to start refreshing.
+	// Confirmed live: even with the refresh lock below, a 60s buffer left
+	// every "losing" concurrent request holding a token with under a
+	// minute of declared validity left -- sometimes already past it by
+	// the time its IMAP round trip reached Gmail, since Account rows are
+	// loaded fresh (and independently) per PHP-FPM request, so a loser
+	// never sees the winner's refreshed token mid-request. Widening the
+	// buffer doesn't remove the race (several requests can still start
+	// at the exact same instant), but it gives the winner's refresh
+	// (a single HTTPS round trip, normally well under a second) time to
+	// land in the database before the *next* wave of requests -- e.g.
+	// the following polling tick -- reads the account row again and
+	// picks up the already-refreshed token instead of racing at all.
+	private const REFRESH_BUFFER_SECONDS = 300;
 
 	public function __construct(
 		ITimeFactory $timeFactory,
@@ -136,8 +151,8 @@ class GoogleIntegration {
 			return $account;
 		}
 
-		// Only refresh if the token expires in the next minute
-		if ($this->timeFactory->getTime() <= ($account->getMailAccount()->getOauthTokenTtl() - 60)) {
+		// Only refresh if the token is within REFRESH_BUFFER_SECONDS of expiry
+		if ($this->timeFactory->getTime() <= ($account->getMailAccount()->getOauthTokenTtl() - self::REFRESH_BUFFER_SECONDS)) {
 			// No need to refresh yet
 			return $account;
 		}
@@ -154,8 +169,10 @@ class GoogleIntegration {
 		// failed connection attempt on top of the wasted duplicate
 		// refreshes. A short, best-effort lock lets exactly one request
 		// actually refresh; everyone else just proceeds with the token
-		// they already have (still valid for the 60s grace period above)
-		// and picks up the refreshed one on their own next request.
+		// they already have and picks up the refreshed one on their own
+		// next request, by which point REFRESH_BUFFER_SECONDS has
+		// generally given the winner's refresh time to land in the
+		// database (see REFRESH_BUFFER_SECONDS for why).
 		$lockCache = $this->cacheFactory->createDistributed('mail_oauth_refresh_lock');
 		$lockKey = 'google_account_' . $account->getId();
 		if ($lockCache instanceof IMemcache && !$lockCache->add($lockKey, true, self::REFRESH_LOCK_TTL)) {

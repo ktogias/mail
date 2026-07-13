@@ -64,8 +64,9 @@ class GoogleIntegrationTest extends TestCase {
 		$mailAccount->setId(13);
 		$mailAccount->setOauthRefreshToken('encrypted-refresh-token');
 		$mailAccount->setOauthAccessToken('encrypted-old-access-token');
-		// Within the 60s grace window refresh() checks -- "now" is
-		// mocked to 1000 below, so this is already inside it.
+		// Within the REFRESH_BUFFER_SECONDS (300s) window refresh()
+		// checks -- "now" is mocked to 1000 below, so this is already
+		// inside it.
 		$mailAccount->setOauthTokenTtl(1030);
 		return new Account($mailAccount);
 	}
@@ -120,10 +121,8 @@ class GoogleIntegrationTest extends TestCase {
 		$account = $this->accountAboutToExpire();
 		$result = $this->integration->refresh($account);
 
-		// Unchanged -- the token this request already had is still
-		// valid for the 60s grace period; whichever request holds the
-		// lock will refresh it, and this account picks up the new one on
-		// its own next request.
+		// Unchanged -- whichever request holds the lock will refresh it,
+		// and this account picks up the new one on its own next request.
 		self::assertSame('encrypted-old-access-token', $result->getMailAccount()->getOauthAccessToken());
 	}
 
@@ -133,7 +132,7 @@ class GoogleIntegrationTest extends TestCase {
 		$mailAccount->setId(13);
 		$mailAccount->setOauthRefreshToken('encrypted-refresh-token');
 		$mailAccount->setOauthAccessToken('encrypted-old-access-token');
-		// Far from expiring -- well outside the 60s grace window.
+		// Far from expiring -- well outside the REFRESH_BUFFER_SECONDS window.
 		$mailAccount->setOauthTokenTtl(100000);
 		$account = new Account($mailAccount);
 
@@ -141,5 +140,51 @@ class GoogleIntegrationTest extends TestCase {
 		$this->clientService->expects(self::never())->method('newClient');
 
 		$this->integration->refresh($account);
+	}
+
+	/**
+	 * Pins the actual fix: a token 4 minutes from expiry sat outside the
+	 * old 60s buffer and was left completely untouched by refresh() until
+	 * requests started falling inside that last minute -- exactly where,
+	 * confirmed live, concurrent "losing" requests hold a token with
+	 * under 60s (sometimes negative) declared validity left and get
+	 * "Mail server denied authentication" from Gmail. 300s gives the
+	 * winner's refresh time to land in the database before that point.
+	 */
+	public function testRefreshesWithinTheWidenedFiveMinuteBuffer(): void {
+		$this->timeFactory->method('getTime')->willReturn(1000);
+		$this->crypto->method('decrypt')->willReturnArgument(0);
+		$this->crypto->method('encrypt')->willReturnArgument(0);
+		$this->config->method('getAppValue')->willReturnMap([
+			['mail', 'google_oauth_client_id', '', 'client-id'],
+			['mail', 'google_oauth_client_secret', '', 'encrypted-client-secret'],
+		]);
+		$mailAccount = new MailAccount();
+		$mailAccount->setId(13);
+		$mailAccount->setOauthRefreshToken('encrypted-refresh-token');
+		$mailAccount->setOauthAccessToken('encrypted-old-access-token');
+		// 4 minutes (240s) from expiry: outside the old 60s buffer, inside
+		// the new 300s one.
+		$mailAccount->setOauthTokenTtl(1240);
+		$account = new Account($mailAccount);
+
+		$this->lockCache->expects(self::once())
+			->method('add')
+			->with('google_account_13', true, 30)
+			->willReturn(true);
+
+		$response = $this->createMock(IResponse::class);
+		$response->method('getBody')->willReturn(json_encode([
+			'access_token' => 'new-access-token',
+			'refresh_token' => 'new-refresh-token',
+			'expires_in' => 3600,
+		]));
+		$httpClient = $this->createMock(\OCP\Http\Client\IClient::class);
+		$httpClient->expects(self::once())->method('post')->willReturn($response);
+		$this->clientService->method('newClient')->willReturn($httpClient);
+
+		$result = $this->integration->refresh($account);
+
+		self::assertSame('new-access-token', $result->getMailAccount()->getOauthAccessToken());
 	}
 }

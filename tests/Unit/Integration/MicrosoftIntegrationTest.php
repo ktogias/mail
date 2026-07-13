@@ -127,4 +127,42 @@ class MicrosoftIntegrationTest extends TestCase {
 
 		$this->integration->refresh($account);
 	}
+
+	// Pins the fix: see GoogleIntegrationTest::testRefreshesWithinTheWidenedFiveMinuteBuffer().
+	public function testRefreshesWithinTheWidenedFiveMinuteBuffer(): void {
+		$this->timeFactory->method('getTime')->willReturn(1000);
+		$this->crypto->method('decrypt')->willReturnArgument(0);
+		$this->crypto->method('encrypt')->willReturnArgument(0);
+		$this->config->method('getAppValue')->willReturnMap([
+			['mail', 'microsoft_oauth_tenant_id', '', 'tenant-id'],
+			['mail', 'microsoft_oauth_client_id', '', 'client-id'],
+			['mail', 'microsoft_oauth_client_secret', '', 'encrypted-client-secret'],
+		]);
+		$mailAccount = new MailAccount();
+		$mailAccount->setId(21);
+		$mailAccount->setOauthRefreshToken('encrypted-refresh-token');
+		$mailAccount->setOauthAccessToken('encrypted-old-access-token');
+		// 4 minutes (240s) from expiry: outside the old 60s buffer, inside
+		// the new 300s one.
+		$mailAccount->setOauthTokenTtl(1240);
+		$account = new Account($mailAccount);
+
+		$this->lockCache->expects(self::once())
+			->method('add')
+			->with('microsoft_account_21', true, 30)
+			->willReturn(true);
+
+		$response = $this->createMock(IResponse::class);
+		$response->method('getBody')->willReturn(json_encode([
+			'access_token' => 'new-access-token',
+			'expires_in' => 3600,
+		]));
+		$httpClient = $this->createMock(\OCP\Http\Client\IClient::class);
+		$httpClient->expects(self::once())->method('post')->willReturn($response);
+		$this->clientService->method('newClient')->willReturn($httpClient);
+
+		$result = $this->integration->refresh($account);
+
+		self::assertSame('new-access-token', $result->getMailAccount()->getOauthAccessToken());
+	}
 }

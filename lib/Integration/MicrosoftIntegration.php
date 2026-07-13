@@ -33,6 +33,10 @@ class MicrosoftIntegration {
 	// race, same fix, for Microsoft accounts.
 	private const REFRESH_LOCK_TTL = 30;
 
+	// See GoogleIntegration::REFRESH_BUFFER_SECONDS for the reasoning --
+	// same race, same fix, for Microsoft accounts.
+	private const REFRESH_BUFFER_SECONDS = 300;
+
 	public function __construct(
 		ITimeFactory $timeFactory,
 		IConfig $config,
@@ -146,8 +150,8 @@ class MicrosoftIntegration {
 			return $account;
 		}
 
-		// Only refresh if the token expires in the next minute
-		if ($this->timeFactory->getTime() <= ($account->getMailAccount()->getOauthTokenTtl() - 60)) {
+		// Only refresh if the token is within REFRESH_BUFFER_SECONDS of expiry
+		if ($this->timeFactory->getTime() <= ($account->getMailAccount()->getOauthTokenTtl() - self::REFRESH_BUFFER_SECONDS)) {
 			// No need to refresh yet
 			return $account;
 		}
