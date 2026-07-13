@@ -639,6 +639,75 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	describe('stripMalformedUndefinedToken: fetchEnvelopes/syncEnvelopes never send a literal "undefined" token', () => {
+		// Regression: a query string containing the literal word
+		// "undefined" (an undefined value stringified into a compound
+		// query somewhere upstream -- appendToSearch()'s own comment in
+		// MailboxThread.vue documents one already-fixed instance of
+		// exactly this class of bug) is not just wrong, it's
+		// catastrophically expensive: the backend's filter parser treats
+		// an unrecognized token as a free-text search term, firing the
+		// heaviest query the app has. Confirmed live: an 87s/502 and
+		// repeated 20s/504 timeouts, specifically hammering every
+		// Sent-role mailbox during an active search, once the
+		// priority-inbox refresh started actually running on every tick
+		// (see maybeStartPriorityInboxRefresh()) instead of rarely at
+		// all -- a once-created envelopeLists key is never pruned, so a
+		// malformed one keeps getting re-synced forever otherwise.
+		beforeEach(() => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			const account = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: { id: 'Sent', name: 'Sent', databaseId: 33, accountId: 13, specialRole: 'sent' },
+			})
+		})
+
+		it('fetchEnvelopes strips a trailing "undefined" token before calling the service', async () => {
+			MessageService.fetchEnvelopes.mockResolvedValue([])
+
+			await store.fetchEnvelopes({ mailboxId: 33, query: 'not:starred undefined' })
+
+			expect(MessageService.fetchEnvelopes).toHaveBeenCalledTimes(1)
+			const calledQuery = MessageService.fetchEnvelopes.mock.calls[0][2]
+			expect(calledQuery).toBe('not:starred')
+		})
+
+		it('syncEnvelopes strips a trailing "undefined" token before calling the service', async () => {
+			MessageService.syncEnvelopes.mockResolvedValue({
+				newMessages: [],
+				changedMessages: [],
+				vanishedMessages: [],
+				stats: { unread: 0 },
+			})
+
+			await store.syncEnvelopes({ mailboxId: 33, query: 'to:ramantas from:ramantas subject:ramantas mentions:false match:anyof undefined' })
+
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(1)
+			const calledQuery = MessageService.syncEnvelopes.mock.calls[0][4]
+			expect(calledQuery).toBe('to:ramantas from:ramantas subject:ramantas mentions:false match:anyof')
+		})
+
+		it('leaves a well-formed query completely untouched', async () => {
+			MessageService.fetchEnvelopes.mockResolvedValue([])
+
+			await store.fetchEnvelopes({ mailboxId: 33, query: 'not:starred is:pi-important' })
+
+			const calledQuery = MessageService.fetchEnvelopes.mock.calls[0][2]
+			expect(calledQuery).toBe('not:starred is:pi-important')
+		})
+
+		it('leaves an actually-undefined query (no filter at all) untouched', async () => {
+			MessageService.fetchEnvelopes.mockResolvedValue([])
+
+			await store.fetchEnvelopes({ mailboxId: 33 })
+
+			const calledQuery = MessageService.fetchEnvelopes.mock.calls[0][2]
+			expect(calledQuery).toBeUndefined()
+		})
+	})
+
 	describe('reclassifyFlagBucketsMutation (wave 1b: bucket coalescing)', () => {
 		// is:starred/not:starred and is:pi-important/is:pi-other are pure
 		// predicates over flags.flagged/flags.important -- coalescing their

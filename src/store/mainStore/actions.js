@@ -337,6 +337,55 @@ const recentFlagChanges = new Map()
 const IMPORTANT_TAG_LABEL = '$label1'
 
 /**
+ * A query string containing a literal "undefined" token is never
+ * legitimate -- every token this app's search syntax actually produces
+ * is either a fixed keyword or a real value the user typed, never the
+ * literal word "undefined". Its presence is the signature of an
+ * undefined value stringified into a compound query somewhere upstream
+ * (appendToSearch()'s own comment in MailboxThread.vue documents one
+ * specific, already-fixed instance of exactly this class of bug -- this
+ * is a second, not yet located occurrence, or a once-created
+ * envelopeLists key left over from before that fix, that nothing else
+ * ever prunes). The backend's filter parser treats an unrecognized
+ * token as a free-text search term, firing the heaviest query the app
+ * has (threaded self-join + two recipients JOINs + a correlated ILIKE)
+ * -- confirmed live as an 87s/502 and repeated 20s/504 timeouts,
+ * specifically hammering every Sent-role mailbox during an active
+ * search, once the priority-inbox refresh (see
+ * maybeStartPriorityInboxRefresh()) started actually running on every
+ * tick instead of rarely at all.
+ *
+ * Stripping just the bad token, rather than refusing the whole
+ * fetch/sync, turns a catastrophically slow malformed query back into
+ * the query that should have been sent in the first place -- for a
+ * Sent-role mailbox specifically, that's normally the search terms
+ * alone with no priority-inbox-style filter at all, since importance/
+ * starred classification was never a meaningful concept for a Sent
+ * folder to begin with.
+ *
+ * Applied once, at the two lowest-level entry points
+ * (fetchEnvelopes()/syncEnvelopes() below) that every call path --
+ * component-level sync, the watched-mailbox poller, the priority-inbox
+ * refresh -- ultimately goes through, so nothing upstream needs its own
+ * copy of this check to be protected.
+ *
+ * @param {string|undefined} query
+ * @return {string|undefined}
+ */
+function stripMalformedUndefinedToken(query) {
+	if (typeof query !== 'string') {
+		return query
+	}
+	const tokens = query.split(' ')
+	const cleaned = tokens.filter((token) => token !== 'undefined')
+	if (cleaned.length === tokens.length) {
+		return query
+	}
+	logger.error(`stripped a malformed "undefined" token from a query: "${query}"`, { query })
+	return cleaned.join(' ')
+}
+
+/**
  * A flag this client changed moments ago (see flagEnvelopeMutation())
  * wins over whatever a sync/listing response says, since that response
  * may have been generated before the server-side change actually
@@ -1091,6 +1140,7 @@ export default function mainStoreActions() {
 			includeCacheBuster = false,
 			signal,
 		}) {
+			query = stripMalformedUndefinedToken(query)
 			this.envelopeFetchStartedMutation({ mailboxId, query })
 			return handleHttpAuthErrors(async () => {
 				const mailbox = this.getMailbox(mailboxId)
@@ -1415,6 +1465,7 @@ export default function mainStoreActions() {
 			// may have caused it in the first place.
 			malformedResponseRetried = false,
 		}) {
+			query = stripMalformedUndefinedToken(query)
 			return handleHttpAuthErrors(async () => {
 				logger.debug(`starting mailbox sync of ${mailboxId} (${query})`)
 
