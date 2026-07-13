@@ -502,6 +502,27 @@ class MessageMapper extends QBMapper {
 	}
 
 	/**
+	 * Memoized per uid within one updateBulk() call: whichever caller
+	 * (the flag write below, or updateTags() for the important tag) asks
+	 * first computes it via shouldTrustFlagImportantReading(), and every
+	 * later caller for the SAME message this same call reuses that exact
+	 * answer instead of asking again -- see updateBulk()'s own
+	 * $trustedImportant comment for why sharing the computed value,
+	 * rather than sharing only the check, is what actually matters here.
+	 */
+	private function trustedImportantReading(array &$trustedImportant, Message $message): bool {
+		$uid = $message->getUid();
+		if (!array_key_exists($uid, $trustedImportant)) {
+			$trustedImportant[$uid] = $this->shouldTrustFlagImportantReading(
+				$message->getMailboxId(),
+				$uid,
+				$message->getFlagImportant(),
+			);
+		}
+		return $trustedImportant[$uid];
+	}
+
+	/**
 	 * @param Account $account
 	 * @param bool $permflagsEnabled
 	 * @param Message[] $messages
@@ -535,6 +556,19 @@ class MessageMapper extends QBMapper {
 			$updateData[$flag . '_true'] = [];
 			$updateData[$flag . '_false'] = [];
 		}
+
+		// Whether THIS message's fresh flag_important reading should be
+		// trusted, keyed by uid -- computed at most once per message
+		// across this whole updateBulk() call (see
+		// trustedImportantReading() below) and consulted by BOTH the flag
+		// write below and updateTags() further down, instead of each
+		// independently asking shouldTrustFlagImportantReading() the same
+		// question. flag_important and the important TAG are historically
+		// the same fact stored twice (see updateTags()'s own comment) --
+		// sharing one computed decision, rather than two call sites that
+		// merely happen to agree, is what makes them structurally
+		// incapable of disagreeing, not just incidentally consistent.
+		$trustedImportant = [];
 
 		foreach ($messages as $message) {
 			if (empty($message->getUpdatedFields()) === false) {
@@ -613,7 +647,7 @@ class MessageMapper extends QBMapper {
 				// so there is no special-cased "upgrade" vs "downgrade"
 				// branch here, just the one check. See
 				// shouldTrustFlagImportantReading() for the actual logic.
-				if ($this->shouldTrustFlagImportantReading($message->getMailboxId(), $message->getUid(), $message->getFlagImportant())) {
+				if ($this->trustedImportantReading($trustedImportant, $message)) {
 					if ($message->getFlagImportant()) {
 						$updateData['flag_important_true'][] = $message->getUid();
 					} else {
@@ -669,7 +703,7 @@ class MessageMapper extends QBMapper {
 			foreach ($messages as $message) {
 				// check permflags and only go through the tagging logic if they're enabled
 				if ($permflagsEnabled) {
-					$this->updateTags($account, $message, $tags, $perf);
+					$this->updateTags($account, $message, $tags, $perf, $trustedImportant);
 				}
 			}
 
@@ -686,12 +720,6 @@ class MessageMapper extends QBMapper {
 		return $messages;
 	}
 
-	/**
-	 * @param Account $account
-	 * @param Message $message
-	 * @param Tag[][] $tags
-	 * @param PerformanceLoggerTask $perf
-	 */
 	private static function tagListIncludesImportant(array $tags): bool {
 		foreach ($tags as $tag) {
 			if ($tag->getImapLabel() === Tag::LABEL_IMPORTANT) {
@@ -701,7 +729,16 @@ class MessageMapper extends QBMapper {
 		return false;
 	}
 
-	private function updateTags(Account $account, Message $message, array $tags, PerformanceLoggerTask $perf): void {
+	/**
+	 * @param Account $account
+	 * @param Message $message
+	 * @param Tag[][] $tags
+	 * @param PerformanceLoggerTask $perf
+	 * @param bool[] $trustedImportant per-uid memoized shouldTrustFlagImportantReading()
+	 *                                 decisions shared with updateBulk()'s own flag write --
+	 *                                 see trustedImportantReading().
+	 */
+	private function updateTags(Account $account, Message $message, array $tags, PerformanceLoggerTask $perf, array &$trustedImportant): void {
 		$imapTags = $message->getTags();
 		$messageId = $message->getMessageId();
 		$dbTags = $messageId !== null ? ($tags[$messageId] ?? []) : [];
@@ -724,20 +761,19 @@ class MessageMapper extends QBMapper {
 		// that fresh fetch -- confirmed live as the important badge
 		// (Envelope.vue's isImportant(), which reads this tag, not
 		// flag_important) disappearing right after appearing, only
-		// returning once a later poll caught up. Reusing the identical
-		// confirmation flag_important already computes, rather than a
-		// second independent grace window, is what keeps the flag and its
-		// tag twin from ever disagreeing. Only computed when the important
-		// tag is actually in play at all, to skip the extra cache
-		// round-trip for the common case of a message with no importance
-		// history whatsoever.
+		// returning once a later poll caught up. Reading the SAME per-uid
+		// decision updateBulk()'s own flag write already computed (see
+		// trustedImportantReading()), rather than each independently
+		// asking shouldTrustFlagImportantReading() the same question, is
+		// what makes the flag and its tag twin structurally incapable of
+		// disagreeing -- not just incidentally consistent because two
+		// separate calls happen to agree. Only looked up when the
+		// important tag is actually in play at all, to skip the
+		// (memoized, but still a lookup) cost for the common case of a
+		// message with no importance history whatsoever.
 		$trustImportantReading = true;
 		if (self::tagListIncludesImportant($imapTags) || self::tagListIncludesImportant($dbTags)) {
-			$trustImportantReading = $this->shouldTrustFlagImportantReading(
-				$message->getMailboxId(),
-				$message->getUid(),
-				$message->getFlagImportant(),
-			);
+			$trustImportantReading = $this->trustedImportantReading($trustedImportant, $message);
 		}
 
 		$toAdd = array_udiff($imapTags, $dbTags, static fn (Tag $a, Tag $b) => strcmp($a->getImapLabel(), $b->getImapLabel()));
