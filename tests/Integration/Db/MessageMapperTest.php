@@ -324,7 +324,7 @@ class MessageMapperTest extends TestCase {
 	 * decision back to false. The Priority Inbox's "Important" section
 	 * visibly lost and regained messages with no user action involved.
 	 */
-	public function testUpdateBulkNeverDowngradesFlagImportantWithinTheGracePeriod(): void {
+	public function testUpdateBulkProtectsARecentTrueConfirmationFromAContradictingFalseReading(): void {
 		$mailboxId = 1;
 		$uid = 42;
 		$this->insertMessage($uid, $mailboxId);
@@ -332,8 +332,8 @@ class MessageMapperTest extends TestCase {
 		$account->method('getId')->willReturn(13);
 		$account->method('getName')->willReturn('test account');
 
-		// An upgrade -- confirms flag_important true and starts the
-		// grace window (see markFlagImportantConfirmed()).
+		// Confirms flag_important true and starts the grace window (see
+		// shouldTrustFlagImportantReading()).
 		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessage($uid, $mailboxId, true));
 		self::assertTrue($this->selectFlagImportant($uid, $mailboxId));
 
@@ -347,14 +347,46 @@ class MessageMapperTest extends TestCase {
 	}
 
 	/**
-	 * The flip side of the test above: once the grace window has
+	 * The exact symmetric counterpart of the test above -- deliberately,
+	 * since shouldTrustFlagImportantReading() has no separate "upgrade"
+	 * or "downgrade" branch, only one check applied to both directions.
+	 * Without this direction also being protected, a user's own
+	 * markEnvelopeImportantOrUnimportant() (removing importance) could be
+	 * silently reverted by a stale/concurrent sync still reporting
+	 * Gmail's pre-removal state -- caught on review, since an earlier
+	 * version of this fix only ever protected the true -> false direction.
+	 */
+	public function testUpdateBulkProtectsARecentFalseConfirmationFromAContradictingTrueReading(): void {
+		$mailboxId = 1;
+		$uid = 46;
+		$this->insertMessage($uid, $mailboxId);
+		$account = $this->createMock(Account::class);
+		$account->method('getId')->willReturn(13);
+		$account->method('getName')->willReturn('test account');
+
+		// Confirms flag_important false -- e.g. the user just removed
+		// importance via markEnvelopeImportantOrUnimportant() and that
+		// propagated to IMAP, and this is the sync that first observes it.
+		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessage($uid, $mailboxId, false));
+		self::assertFalse($this->selectFlagImportant($uid, $mailboxId));
+
+		// A different, concurrent sync that happened to read IMAP just
+		// before the removal took effect there, still reporting the old
+		// "important" state.
+		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessage($uid, $mailboxId, true));
+
+		self::assertFalse($this->selectFlagImportant($uid, $mailboxId));
+	}
+
+	/**
+	 * The flip side of the first test: once the grace window has
 	 * genuinely elapsed, a contradicting reading is trusted rather than
 	 * dismissed forever -- otherwise a message whose importance was
 	 * deliberately removed directly in Gmail would stay stuck important
 	 * in this app permanently, which is exactly the concern that
 	 * motivated a time-bounded grace period over a flat "never downgrade".
 	 */
-	public function testUpdateBulkAllowsTheDowngradeOnceTheGracePeriodHasElapsed(): void {
+	public function testUpdateBulkTrustsAContradictingFalseReadingOnceTheGracePeriodHasElapsed(): void {
 		$mailboxId = 1;
 		$uid = 44;
 		$this->insertMessage($uid, $mailboxId);
@@ -365,8 +397,8 @@ class MessageMapperTest extends TestCase {
 		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessage($uid, $mailboxId, true));
 		self::assertTrue($this->selectFlagImportant($uid, $mailboxId));
 
-		// Past FLAG_IMPORTANT_DOWNGRADE_GRACE_SECONDS (120s, the same
-		// scale as RECENT_FLAG_CHANGE_GRACE_MS client-side).
+		// Past FLAG_IMPORTANT_GRACE_SECONDS (120s, the same scale as
+		// RECENT_FLAG_CHANGE_GRACE_MS client-side).
 		$this->timestamp += 130;
 
 		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessage($uid, $mailboxId, false));
@@ -374,7 +406,7 @@ class MessageMapperTest extends TestCase {
 		self::assertFalse($this->selectFlagImportant($uid, $mailboxId));
 	}
 
-	public function testUpdateBulkStillUpgradesFlagImportant(): void {
+	public function testUpdateBulkAppliesAMatchingReadingNormally(): void {
 		$mailboxId = 1;
 		$uid = 43;
 		$this->insertMessage($uid, $mailboxId);
@@ -387,7 +419,8 @@ class MessageMapperTest extends TestCase {
 		// Gmail's own IMAP keyword state genuinely reports this message
 		// as important now (e.g. the user starred it as important
 		// directly in Gmail, or Gmail's own classifier flagged it) --
-		// still a legitimate signal to accept.
+		// nothing was previously confirmed for this message, so this is
+		// trusted immediately.
 		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessage($uid, $mailboxId, true));
 
 		self::assertTrue($this->selectFlagImportant($uid, $mailboxId));
@@ -397,7 +430,7 @@ class MessageMapperTest extends TestCase {
 	 * insertBulk() (a message's very first sync) seeds flag_important
 	 * from Gmail's own state at that point -- correct and unchanged by
 	 * this fix. It must also start the SAME grace window an updateBulk()
-	 * upgrade does, or a routine resync landing moments after the
+	 * confirmation does, or a routine resync landing moments after the
 	 * initial sync could immediately undo a message that arrived
 	 * already marked important.
 	 */
