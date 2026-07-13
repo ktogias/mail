@@ -742,6 +742,38 @@ class MessageMapperTest extends TestCase {
 	}
 
 	/**
+	 * Same regression as testFindAllIdsBreaksSentAtTiesDeterministically(),
+	 * for the other LIMIT-bound path: findIdsByQuery() backs both the
+	 * message-list endpoint and (via SyncService's cold-start branch,
+	 * findAllIds()) a bucket's first sync -- either way, a plain
+	 * ORDER BY sent_at with a LIMIT smaller than a tied group is free to
+	 * return a different subset of that group on each call.
+	 */
+	public function testFindIdsByQueryBreaksSentAtTiesDeterministically(): void {
+		$mailbox = new Mailbox();
+		$mailbox->setId(21);
+		$searchQuery = new SearchQuery();
+		$qb = $this->db->getQueryBuilder();
+
+		foreach (range(1, 10) as $i) {
+			$qb->insert($this->mapper->getTableName())->values([
+				'id' => $i,
+				'uid' => $qb->createNamedParameter(1000 + $i, IQueryBuilder::PARAM_INT),
+				'message_id' => $qb->createNamedParameter("<tie{$i}@123.com>"),
+				'mailbox_id' => $qb->createNamedParameter($mailbox->getId(), IQueryBuilder::PARAM_INT),
+				'subject' => $qb->createNamedParameter("TEST $i"),
+				'sent_at' => $qb->createNamedParameter(1641216000, IQueryBuilder::PARAM_INT),
+			])->executeStatement();
+		}
+
+		$first = $this->mapper->findIdsByQuery($mailbox, $searchQuery, 'DESC', 3, null);
+		for ($i = 0; $i < 5; $i++) {
+			$this->assertEquals($first, $this->mapper->findIdsByQuery($mailbox, $searchQuery, 'DESC', 3, null), 'the same tied rows should be returned on every repeated call');
+		}
+		$this->assertEquals([10, 9, 8], $first);
+	}
+
+	/**
 	 * A thread's newest message represents the whole thread in threaded
 	 * view (see the m2 self-join in findIdsByQuery()). An unread filter
 	 * must match that representative if ANY message in its thread is
@@ -1251,6 +1283,41 @@ class MessageMapperTest extends TestCase {
 		// everything, not an error or a padded/truncated result.
 		$all = $this->mapper->findAllIds($mailbox, IMailSearch::ORDER_NEWEST_FIRST, 100);
 		$this->assertCount(10, $all);
+	}
+
+	/**
+	 * Regression: ORDER BY sent_at alone, with no secondary/tiebreaker
+	 * column, combined with a LIMIT smaller than the number of tied
+	 * rows, is free under Postgres/MySQL to return a DIFFERENT subset of
+	 * those tied rows on each otherwise-identical call -- since nothing
+	 * about the query changed between calls, only the database's own
+	 * arbitrary tie-resolution did. Confirmed live: Priority Inbox
+	 * sections (Important, Favorites, and the unbounded-display "Other"
+	 * section alike) visibly cycling between different message sets on
+	 * every sync tick, completely unrelated to any new mail arriving and
+	 * unrelated to threading -- exactly the signature of this bug, once
+	 * these sections started actually syncing on every tick instead of
+	 * rarely at all.
+	 */
+	public function testFindAllIdsBreaksSentAtTiesDeterministically(): void {
+		$mailbox = new Mailbox();
+		$mailbox->setId(7);
+		// All ten messages share the exact same sent_at -- a plausible,
+		// ordinary occurrence (a mailing-list digest, several recipients
+		// on one send), not a contrived edge case.
+		$this->timestamp = 1234567890;
+		foreach (range(1, 10) as $i) {
+			$this->insertMessageWithId($i, $mailbox->getId());
+		}
+
+		$first = $this->mapper->findAllIds($mailbox, IMailSearch::ORDER_NEWEST_FIRST, 3);
+		for ($i = 0; $i < 5; $i++) {
+			$this->assertEquals($first, $this->mapper->findAllIds($mailbox, IMailSearch::ORDER_NEWEST_FIRST, 3), 'the same tied rows should be returned on every repeated call');
+		}
+		// The tiebreaker (id, same direction as sent_at) makes "newest
+		// first" among same-second messages mean "highest id first" --
+		// deterministic, not merely stable.
+		$this->assertEquals([10, 9, 8], $first);
 	}
 
 	public function testFindAllIdsOnAnEmptyMailboxReturnsNothing(): void {

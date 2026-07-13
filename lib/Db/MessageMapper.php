@@ -209,11 +209,30 @@ class MessageMapper extends QBMapper {
 	 */
 	public function findAllIds(Mailbox $mailbox, string $sortOrder, int $limit): array {
 		$query = $this->db->getQueryBuilder();
+		$direction = $sortOrder === IMailSearch::ORDER_OLDEST_FIRST ? 'ASC' : 'DESC';
 
 		$query->select('id')
 			->from($this->getTableName())
 			->where($query->expr()->eq('mailbox_id', $query->createNamedParameter($mailbox->getId(), IQueryBuilder::PARAM_INT), IQueryBuilder::PARAM_INT))
-			->orderBy('sent_at', $sortOrder === IMailSearch::ORDER_OLDEST_FIRST ? 'ASC' : 'DESC')
+			// sent_at alone is not a unique key -- messages arriving in the
+			// same second (a mailing-list burst, several recipients on one
+			// send) tie on it, and a plain ORDER BY + LIMIT combination is
+			// free to return a DIFFERENT subset of the tied rows on each
+			// otherwise-identical call. This is the "cold start" path
+			// SyncService::getDatabaseSyncChanges() falls back to whenever
+			// a bucket's known-ids set is empty -- confirmed live as
+			// Priority Inbox sections (Important, Favorites, and the
+			// unbounded-display "Other" section alike) visibly cycling
+			// between different message sets on every tick, unrelated to
+			// any new mail arriving and unrelated to threading. `id` is
+			// the one column here that's both unique and, being an
+			// auto-increment primary key, already correlates with arrival
+			// order -- an ordering the codebase already establishes as the
+			// intended tiebreaker (see the thread-root self-join a few
+			// lines below findIdsByQuery(), which breaks a sent_at tie the
+			// same way).
+			->orderBy('sent_at', $direction)
+			->addOrderBy('id', $direction)
 			->setMaxResults($limit);
 
 		return $this->findIds($query);
@@ -1227,10 +1246,17 @@ class MessageMapper extends QBMapper {
 			$select->andWhere($qb->expr()->isNull('m2.id'));
 		}
 
+		// See findAllIds()'s own comment: sent_at alone ties whenever
+		// several messages land in the same second, and combined with
+		// the LIMIT below that makes the specific subset returned
+		// non-deterministic across otherwise-identical calls. `m.id` is
+		// unique and already correlates with arrival order.
 		if ($sortOrder === 'ASC') {
 			$select->orderBy('m.sent_at', $sortOrder);
+			$select->addOrderBy('m.id', $sortOrder);
 		} else {
 			$select->orderBy('m.sent_at', 'DESC');
+			$select->addOrderBy('m.id', 'DESC');
 		}
 
 		if ($limit !== null) {
@@ -1382,7 +1408,11 @@ class MessageMapper extends QBMapper {
 
 		$select->andWhere($qb->expr()->isNull('m2.id'));
 
+		// See findAllIds()'s own comment: sent_at alone ties across
+		// mailboxes even more readily than within one, and this method
+		// always applies a LIMIT below -- same non-determinism risk.
 		$select->orderBy('m.sent_at', 'desc');
+		$select->addOrderBy('m.id', 'desc');
 
 		if ($limit !== null) {
 			$select->setMaxResults($limit);
