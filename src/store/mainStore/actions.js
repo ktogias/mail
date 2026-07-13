@@ -330,6 +330,12 @@ const MAX_CONCURRENT_SPECULATIVE_MESSAGE_FETCHES = 2
 const RECENT_FLAG_CHANGE_GRACE_MS = 120 * 1000
 const recentFlagChanges = new Map()
 
+// The IMAP keyword backing the important TAG (read by Envelope.vue's
+// isImportant() for the badge) -- see setEnvelopeImportant() below for
+// why toggling importance needs to touch this AND flag_important
+// together, not just one of the two.
+const IMPORTANT_TAG_LABEL = '$label1'
+
 /**
  * A flag this client changed moments ago (see flagEnvelopeMutation())
  * wins over whatever a sync/listing response says, since that response
@@ -1953,22 +1959,74 @@ export default function mainStoreActions() {
 		async toggleEnvelopeImportant(envelope) {
 			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
-				const importantLabel = '$label1'
 				const hasTag = this
 					.getEnvelopeTags(envelope.databaseId)
-					.some((tag) => tag.imapLabel === importantLabel)
-				if (hasTag) {
-					await this.removeEnvelopeTag({
-						envelope,
-						imapLabel: importantLabel,
-					})
-				} else {
-					await this.addEnvelopeTag({
-						envelope,
-						imapLabel: importantLabel,
-					})
-				}
+					.some((tag) => tag.imapLabel === IMPORTANT_TAG_LABEL)
+				await this.setEnvelopeImportant(envelope, !hasTag)
 			})
+		},
+		/**
+		 * Sets a message's importance to an explicit boolean value,
+		 * updating BOTH flag_important (via setEnvelopeFlags() -- the same
+		 * path toggleEnvelopeFlagged() uses for starring, optimistic
+		 * client-side and protected by the same recentFlagChanges window)
+		 * and the important tag (via addEnvelopeTag()/removeEnvelopeTag(),
+		 * which is what actually drives the important badge -- see
+		 * Envelope.vue's isImportant()) TOGETHER, in the one user action --
+		 * mirroring what NewMessagesClassifier already does server-side
+		 * (flagMessage() + tagMessage() in the same request).
+		 *
+		 * Before this, toggleEnvelopeImportant()/
+		 * markEnvelopeImportantOrUnimportant() only ever called
+		 * addEnvelopeTag()/removeEnvelopeTag(): the badge updated
+		 * instantly, but flag_important -- and therefore Priority Inbox
+		 * list membership -- didn't catch up until the next routine sync
+		 * read the IMAP keyword back, sometimes tens of seconds later.
+		 * markEnvelopeImportantOrUnimportant()'s tag-endpoint write
+		 * already sets that same IMAP keyword directly, so even if the
+		 * setEnvelopeFlags() call below fails independently, the next
+		 * sync still converges correctly from IMAP -- this only removes
+		 * the unnecessary wait for that to happen.
+		 *
+		 * Shared by both existing entry points for this action so neither
+		 * can regress to touching only one of the two independently again.
+		 *
+		 * @param {object} envelope the envelope to mark, from the store
+		 * @param {boolean} important the desired importance state
+		 */
+		async setEnvelopeImportant(envelope, important) {
+			const hasTag = this
+				.getEnvelopeTags(envelope.databaseId)
+				.some((tag) => tag.imapLabel === IMPORTANT_TAG_LABEL)
+			if (hasTag === important) {
+				return
+			}
+
+			const oldState = envelope.flags.important
+			this.flagEnvelopeMutation({
+				envelope,
+				flag: 'important',
+				value: important,
+			})
+
+			try {
+				await Promise.all([
+					setEnvelopeFlags(envelope.databaseId, {
+						[IMPORTANT_TAG_LABEL]: important,
+					}),
+					important
+						? this.addEnvelopeTag({ envelope, imapLabel: IMPORTANT_TAG_LABEL })
+						: this.removeEnvelopeTag({ envelope, imapLabel: IMPORTANT_TAG_LABEL }),
+				])
+			} catch (error) {
+				logger.error('Could not toggle message importance', { error })
+				this.flagEnvelopeMutation({
+					envelope,
+					flag: 'important',
+					value: oldState,
+				})
+				throw error
+			}
 		},
 		async toggleEnvelopeSeen({
 			envelope,
@@ -2134,21 +2192,7 @@ export default function mainStoreActions() {
 		}) {
 			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
-				const importantLabel = '$label1'
-				const hasTag = this
-					.getEnvelopeTags(envelope.databaseId)
-					.some((tag) => tag.imapLabel === importantLabel)
-				if (hasTag && !addTag) {
-					await this.removeEnvelopeTag({
-						envelope,
-						imapLabel: importantLabel,
-					})
-				} else if (!hasTag && addTag) {
-					await this.addEnvelopeTag({
-						envelope,
-						imapLabel: importantLabel,
-					})
-				}
+				await this.setEnvelopeImportant(envelope, addTag)
 			})
 		},
 		async fetchThread(id, { speculative = false } = {}) {

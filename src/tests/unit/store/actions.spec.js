@@ -2424,6 +2424,84 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	describe('setEnvelopeImportant: toggleEnvelopeImportant/markEnvelopeImportantOrUnimportant update flag_important AND the tag together', () => {
+		// Regression: both entry points used to call ONLY
+		// addEnvelopeTag()/removeEnvelopeTag() -- the important badge
+		// (Envelope.vue's isImportant(), which reads the tag) updated
+		// instantly, but flag_important -- and therefore Priority Inbox
+		// list membership -- didn't catch up until the next routine sync
+		// read the IMAP keyword back, sometimes tens of seconds later.
+		// NewMessagesClassifier already updates both together server-side
+		// (flagMessage() + tagMessage()); these client entry points now do
+		// too, via the shared setEnvelopeImportant().
+		const importantTag = { id: 909, imapLabel: '$label1', displayName: 'Important', color: '#FF7A66' }
+
+		function seedEnvelope(important, tagIds = []) {
+			const envelope = { databaseId: 42, flags: { important }, tags: tagIds }
+			store.envelopes[42] = envelope
+			return envelope
+		}
+
+		it('toggleEnvelopeImportant on a not-yet-important message sets flag_important and adds the tag', async () => {
+			const envelope = seedEnvelope(false, [])
+			MessageService.setEnvelopeFlags.mockResolvedValue({})
+			MessageService.setEnvelopeTag.mockResolvedValue(importantTag)
+
+			await store.toggleEnvelopeImportant(envelope)
+
+			expect(envelope.flags.important).toBe(true)
+			expect(MessageService.setEnvelopeFlags).toHaveBeenCalledWith(42, { $label1: true })
+			expect(MessageService.setEnvelopeTag).toHaveBeenCalledWith(42, '$label1')
+			expect(envelope.tags).toContain(importantTag.id)
+		})
+
+		it('toggleEnvelopeImportant on an already-important message clears flag_important and removes the tag', async () => {
+			store.tags[importantTag.id] = importantTag
+			const envelope = seedEnvelope(true, [importantTag.id])
+			MessageService.setEnvelopeFlags.mockResolvedValue({})
+			MessageService.removeEnvelopeTag.mockResolvedValue(importantTag)
+
+			await store.toggleEnvelopeImportant(envelope)
+
+			expect(envelope.flags.important).toBe(false)
+			expect(MessageService.setEnvelopeFlags).toHaveBeenCalledWith(42, { $label1: false })
+			expect(MessageService.removeEnvelopeTag).toHaveBeenCalledWith(42, '$label1')
+			expect(envelope.tags).not.toContain(importantTag.id)
+		})
+
+		it('markEnvelopeImportantOrUnimportant is a no-op when the message already matches the requested state', async () => {
+			const envelope = seedEnvelope(false, [])
+
+			await store.markEnvelopeImportantOrUnimportant({ envelope, addTag: false })
+
+			expect(MessageService.setEnvelopeFlags).not.toHaveBeenCalled()
+			expect(MessageService.setEnvelopeTag).not.toHaveBeenCalled()
+			expect(MessageService.removeEnvelopeTag).not.toHaveBeenCalled()
+		})
+
+		it('markEnvelopeImportantOrUnimportant({ addTag: true }) sets flag_important and adds the tag together', async () => {
+			const envelope = seedEnvelope(false, [])
+			MessageService.setEnvelopeFlags.mockResolvedValue({})
+			MessageService.setEnvelopeTag.mockResolvedValue(importantTag)
+
+			await store.markEnvelopeImportantOrUnimportant({ envelope, addTag: true })
+
+			expect(envelope.flags.important).toBe(true)
+			expect(MessageService.setEnvelopeFlags).toHaveBeenCalledWith(42, { $label1: true })
+			expect(MessageService.setEnvelopeTag).toHaveBeenCalledWith(42, '$label1')
+		})
+
+		it('reverts the optimistic flag_important change if setEnvelopeFlags fails', async () => {
+			const envelope = seedEnvelope(false, [])
+			MessageService.setEnvelopeFlags.mockRejectedValue(new Error('network error'))
+			MessageService.setEnvelopeTag.mockResolvedValue(importantTag)
+
+			await expect(store.toggleEnvelopeImportant(envelope)).rejects.toThrow('network error')
+
+			expect(envelope.flags.important).toBe(false)
+		})
+	})
+
 	describe('interaction priority: user actions over background sync', () => {
 		// A direct user action (opening a message, switching folders,
 		// starring/deleting/flagging, ...) arms a short priority window
