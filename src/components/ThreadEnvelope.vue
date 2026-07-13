@@ -781,8 +781,32 @@ export default {
 		},
 
 		loading(loading) {
-			if (loading === Loading.Done) {
-				this.$emit('loaded')
+			if (loading !== Loading.Done) {
+				return
+			}
+			this.$emit('loaded')
+
+			// Anchor "mark as read" to the moment the content is actually
+			// visible (this.loading reaching Done -- either Message.vue's
+			// own @load, or here synchronously for a body-less message),
+			// not to when fetchMessage()'s underlying data arrived. Those
+			// used to be close enough together not to matter, since a
+			// live IMAP fetch dominated the whole open regardless -- but
+			// confirmed live after today's message-body caching landed:
+			// a cache hit can resolve near-instantly while the actual
+			// rendered content still takes its normal time, so the
+			// unread marker was clearing while the loading skeleton was
+			// still showing, before the user could have possibly seen
+			// anything. Guarded on `expanded`: collapsing an
+			// already-open, still-unread message also sets loading to
+			// Done (just to reset local state, see the expanded watcher
+			// above), and must not start this timer too.
+			if (this.expanded && !this.envelope.flags.seen && this.hasSeenAcl && this.seenTimer === undefined) {
+				logger.info('Starting timer to mark message as seen/read')
+				this.seenTimer = setTimeout(() => {
+					this.mainStore.toggleEnvelopeSeen({ envelope: this.envelope })
+					this.seenTimer = undefined
+				}, 2000)
 			}
 		},
 	},
@@ -891,14 +915,6 @@ export default {
 
 				if (loadingTimeout) {
 					clearTimeout(loadingTimeout)
-				}
-
-				if (!this.envelope.flags.seen && this.hasSeenAcl) {
-					logger.info('Starting timer to mark message as seen/read')
-					this.seenTimer = setTimeout(() => {
-						this.mainStore.toggleEnvelopeSeen({ envelope: this.envelope })
-						this.seenTimer = undefined
-					}, 2000)
 				}
 
 				if (this.message.hasHtmlBody) {

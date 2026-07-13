@@ -434,6 +434,112 @@ describe('ThreadEnvelope', () => {
 		expect(view.vm.hasWriteAcl).toBe(true)
 	})
 
+	describe('marking as read is anchored to content actually rendering, not the data fetch resolving', () => {
+		// Confirmed live: after today's message-body caching landed, a
+		// cache hit can resolve fetchMessage()'s data near-instantly
+		// while the actual rendered content (Message.vue's own @load
+		// event) still takes its normal time to display -- the unread
+		// marker was clearing while the loading skeleton was still
+		// showing, before the user could have possibly seen anything.
+		let store
+
+		beforeEach(() => {
+			vi.useFakeTimers()
+			store = useMainStore()
+			store.toggleEnvelopeSeen = vi.fn()
+			store.getAccount = vi.fn().mockReturnValue({ name: 'Test', emailAddress: 'test@test.com' })
+		})
+
+		afterEach(() => {
+			vi.useRealTimers()
+		})
+
+		function mountThreadEnvelope(expanded, hasHtmlBody) {
+			store.fetchMessage = vi.fn().mockResolvedValue({
+				databaseId: 999,
+				hasHtmlBody,
+				attachments: [],
+				dkimValid: true,
+				itineraries: [],
+			})
+			return shallowMount(ThreadEnvelope, {
+				propsData: {
+					account: {},
+					mailbox: { specialRole: '' },
+					envelope: {
+						accountId: 123,
+						databaseId: 999,
+						from: [{ email: 'info@test.com' }],
+						to: [],
+						cc: [],
+						flags: { seen: false, flagged: false, $junk: false, answered: false, hasAttachments: false, draft: false },
+						subject: '',
+						dateInt: 1692200926180,
+					},
+					threadSubject: '',
+					threadIndex: 0,
+					expanded,
+				},
+				computed: {
+					mailbox() {
+						return { myAcls: undefined }
+					},
+					archiveMailbox() {
+						return { myAcls: undefined }
+					},
+				},
+				localVue,
+			})
+		}
+
+		it('does not mark as read merely because the data fetch resolved -- rendering is still pending', async () => {
+			mountThreadEnvelope(true, true) // hasHtmlBody: true -> waits on Message.vue's own @load
+			await vi.advanceTimersByTimeAsync(0)
+
+			// The data is in hand, but nothing has told us the content
+			// actually rendered yet -- advancing well past the 2s
+			// mark-as-read delay must not fire it.
+			await vi.advanceTimersByTimeAsync(5000)
+
+			expect(store.toggleEnvelopeSeen).not.toHaveBeenCalled()
+		})
+
+		it('marks as read 2s after the content actually finishes rendering', async () => {
+			const view = mountThreadEnvelope(true, true)
+			await vi.advanceTimersByTimeAsync(0)
+
+			view.vm.onMessageLoaded()
+			await vi.advanceTimersByTimeAsync(1999)
+			expect(store.toggleEnvelopeSeen).not.toHaveBeenCalled()
+
+			await vi.advanceTimersByTimeAsync(1)
+			expect(store.toggleEnvelopeSeen).toHaveBeenCalledWith({
+				envelope: expect.objectContaining({ databaseId: 999 }),
+			})
+		})
+
+		it('still marks as read for a body-less message, which reaches Done synchronously with no @load to wait for', async () => {
+			mountThreadEnvelope(true, false) // hasHtmlBody: false -> Done immediately
+			await vi.advanceTimersByTimeAsync(2000)
+
+			expect(store.toggleEnvelopeSeen).toHaveBeenCalled()
+		})
+
+		it('does not start the timer when collapsing before the content ever finished rendering', async () => {
+			const view = mountThreadEnvelope(true, true)
+			await vi.advanceTimersByTimeAsync(0)
+
+			// Collapse before Message.vue's own @load (onMessageLoaded)
+			// ever fires -- the expanded watcher's own else-branch also
+			// sets loading to Done (just to reset local state), which
+			// must not be mistaken for "the content was actually seen".
+			await view.setProps({ expanded: false })
+			await vi.advanceTimersByTimeAsync(5000)
+
+			expect(store.toggleEnvelopeSeen).not.toHaveBeenCalled()
+		})
+	})
+
 	describe('hover prefetch', () => {
 		// Same idea as Envelope.vue's row-level prefetch, for a collapsed
 		// message within an already-open thread: start fetching its body
