@@ -496,10 +496,30 @@ class MessageMapper extends QBMapper {
 					$updateData['flag_mdnsent_false'][] = $message->getUid();
 				}
 
+				// Deliberately upgrade-only, unlike every other flag in this
+				// loop: flag_important represents THIS APP's own importance
+				// classification (see ImportanceClassifier.php), not a
+				// genuine externally-synced IMAP flag with shared,
+				// multi-client meaning the way \Seen/\Flagged/\Answered are.
+				// toDbMessage() recomputes it fresh from whatever Gmail's
+				// own IMAP keyword state happens to say on THIS fetch --
+				// if NewMessagesClassifier's own propagation of that
+				// keyword back to IMAP hasn't landed yet (or never
+				// reliably does, e.g. under the slow/unreliable IMAP
+				// conditions documented elsewhere in this account's
+				// history), a routine resync landing in between silently
+				// overwrote the classifier's local decision back to false
+				// -- confirmed live as the Priority Inbox's "Important"
+				// section visibly losing and re-gaining messages with no
+				// user action involved. The classifier itself never sets
+				// this false (only true, for a newly-classified message);
+				// the only place false is a deliberate action is the
+				// user's own markEnvelopeImportantOrUnimportant(), a
+				// completely separate code path from this bulk resync.
+				// Never downgrading here closes that race outright,
+				// rather than just narrowing its window.
 				if ($message->getFlagImportant()) {
 					$updateData['flag_important_true'][] = $message->getUid();
-				} else {
-					$updateData['flag_important_false'][] = $message->getUid();
 				}
 			}
 		}

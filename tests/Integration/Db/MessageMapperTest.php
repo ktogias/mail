@@ -14,14 +14,17 @@ use ChristophWurst\Nextcloud\Testing\TestCase;
 use OCA\Mail\Account;
 use OCA\Mail\Contracts\IMailSearch;
 use OCA\Mail\Db\Mailbox;
+use OCA\Mail\Db\Message;
 use OCA\Mail\Db\MessageMapper;
 use OCA\Mail\Db\TagMapper;
 use OCA\Mail\Service\Search\Flag;
 use OCA\Mail\Service\Search\SearchQuery;
 use OCA\Mail\Support\PerformanceLogger;
+use OCA\Mail\Support\PerformanceLoggerTask;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\DB\QueryBuilder\IQueryBuilder;
 use OCP\IDBConnection;
+use Psr\Log\LoggerInterface;
 use function array_map;
 use function range;
 use function time;
@@ -48,6 +51,14 @@ class MessageMapperTest extends TestCase {
 		$this->time->method('getTime')->willReturnCallback(fn () => $this->timestamp);
 		$tagMapper = $this->createMock(TagMapper::class);
 		$performanceLogger = $this->createMock(PerformanceLogger::class);
+		// start() has a non-nullable PerformanceLoggerTask return type --
+		// updateBulk() (used by the tests below) calls ->step() on
+		// whatever it gets back, so an unconfigured mock's default null
+		// return would fatal. A real instance is cheap and side-effect
+		// free enough (it only logs, via the also-mocked logger below).
+		$performanceLogger->method('start')->willReturn(
+			new PerformanceLoggerTask('test', $this->time, $this->createMock(LoggerInterface::class))
+		);
 		$this->mapper = new MessageMapper(
 			$this->db,
 			$this->time,
@@ -164,6 +175,100 @@ class MessageMapperTest extends TestCase {
 		$cnt = $result->fetchOne();
 		$result->closeCursor();
 		self::assertEquals(0, $cnt);
+	}
+
+	/**
+	 * @param bool $flagImportant the fresh value a live IMAP fetch reported for
+	 *                            this fetch cycle -- what toDbMessage() would
+	 *                            have produced
+	 */
+	private function freshlyFetchedMessage(int $uid, int $mailboxId, bool $flagImportant): Message {
+		$message = new Message();
+		$message->setUid($uid);
+		$message->setMailboxId($mailboxId);
+		$message->setFlagAnswered(false);
+		$message->setFlagDeleted(false);
+		$message->setFlagDraft(false);
+		$message->setFlagFlagged(false);
+		$message->setFlagSeen(false);
+		$message->setFlagForwarded(false);
+		$message->setFlagJunk(false);
+		$message->setFlagNotjunk(false);
+		$message->setFlagMdnsent(false);
+		$message->setFlagImportant($flagImportant);
+		return $message;
+	}
+
+	private function selectFlagImportant(int $uid, int $mailboxId): bool {
+		$qb = $this->db->getQueryBuilder();
+		$result = $qb->select('flag_important')
+			->from($this->mapper->getTableName())
+			->where(
+				$qb->expr()->eq('uid', $qb->createNamedParameter($uid, IQueryBuilder::PARAM_INT), IQueryBuilder::PARAM_INT),
+				$qb->expr()->eq('mailbox_id', $qb->createNamedParameter($mailboxId, IQueryBuilder::PARAM_INT), IQueryBuilder::PARAM_INT)
+			)
+			->executeQuery();
+		$value = $result->fetchOne();
+		$result->closeCursor();
+		return (bool)$value;
+	}
+
+	/**
+	 * flag_important represents this app's own importance classification
+	 * (see ImportanceClassifier.php), not a genuine externally-synced IMAP
+	 * flag with shared, multi-client meaning the way \Seen/\Flagged/
+	 * \Answered are. Confirmed live: NewMessagesClassifier locally decides
+	 * a message is important and tries to propagate that back to Gmail
+	 * via IMAP, but if that propagation hasn't landed yet (or fails, e.g.
+	 * under the slow/unreliable IMAP conditions documented elsewhere for
+	 * this account) by the time the next routine resync re-fetches the
+	 * message, toDbMessage() recomputes flag_important fresh from
+	 * whatever Gmail's own keyword state says right now -- still false --
+	 * and updateBulk() used to blindly overwrite the classifier's local
+	 * decision back to false. The Priority Inbox's "Important" section
+	 * visibly lost and regained messages with no user action involved.
+	 */
+	public function testUpdateBulkNeverDowngradesFlagImportant(): void {
+		$mailboxId = 1;
+		$uid = 42;
+		$this->insertMessage($uid, $mailboxId);
+		$qb = $this->db->getQueryBuilder();
+		$qb->update($this->mapper->getTableName())
+			->set('flag_important', $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL))
+			->where($qb->expr()->eq('uid', $qb->createNamedParameter($uid, IQueryBuilder::PARAM_INT), IQueryBuilder::PARAM_INT))
+			->executeStatement();
+		self::assertTrue($this->selectFlagImportant($uid, $mailboxId));
+
+		$account = $this->createMock(Account::class);
+		$account->method('getId')->willReturn(13);
+		$account->method('getName')->willReturn('test account');
+
+		// A routine resync re-fetching this same message, with Gmail's
+		// own IMAP keyword state (still) not reporting it as important --
+		// exactly what happens while the classifier's own propagation is
+		// still in flight.
+		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessage($uid, $mailboxId, false));
+
+		self::assertTrue($this->selectFlagImportant($uid, $mailboxId));
+	}
+
+	public function testUpdateBulkStillUpgradesFlagImportant(): void {
+		$mailboxId = 1;
+		$uid = 43;
+		$this->insertMessage($uid, $mailboxId);
+		self::assertFalse($this->selectFlagImportant($uid, $mailboxId));
+
+		$account = $this->createMock(Account::class);
+		$account->method('getId')->willReturn(13);
+		$account->method('getName')->willReturn('test account');
+
+		// Gmail's own IMAP keyword state genuinely reports this message
+		// as important now (e.g. the user starred it as important
+		// directly in Gmail, or Gmail's own classifier flagged it) --
+		// still a legitimate signal to accept.
+		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessage($uid, $mailboxId, true));
+
+		self::assertTrue($this->selectFlagImportant($uid, $mailboxId));
 	}
 
 	public function testFindIdsByQuery(): void {
