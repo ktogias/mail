@@ -1858,6 +1858,41 @@ describe('Vuex store actions', () => {
 			expect(store.syncEnvelopes).not.toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-other' })
 		})
 
+		it("also refreshes the priority inbox's Favorites section (is:starred), not just Important/Other", async () => {
+			// Regression: the fix above only matched tokens for
+			// priorityImportantQuery/priorityOtherQuery -- the Favorites
+			// section (MailboxThread.vue's favoriteQuery, 'is:starred',
+			// substituted in for 'not:starred' by its own appendToSearch())
+			// was left with exactly the same never-independently-resynced
+			// gap the Important section had, just for a third bucket.
+			// Confirmed live: the Favorites list showed messages with no
+			// star at all, the same class of symptom already fixed for
+			// Important.
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+
+			const account = { id: 13 }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+			})
+			store.mailboxes[11].envelopeLists[''] = []
+
+			store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:starred'] = []
+
+			store.fetchEnvelopes = vi.fn(async () => {})
+			store.syncEnvelopes = vi.fn(async ({ mailboxId }) => {
+				if (mailboxId === 11) {
+					return [{ databaseId: 781, flags: { seen: false } }]
+				}
+				return []
+			})
+
+			await store.syncWatchedMailboxes()
+
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:starred' })
+		})
+
 		it('falls back to the bare priority queries when neither the bare nor compound keys are loaded yet', async () => {
 			// First-ever load of this session: nothing loaded on the
 			// unified mailbox yet, so there is nothing to distinguish bare

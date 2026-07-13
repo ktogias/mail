@@ -1694,30 +1694,35 @@ export default function mainStoreActions() {
 						const mailbox = this.getMailbox(UNIFIED_INBOX_ID)
 
 						// Refresh whichever query keys are ACTUALLY loaded for
-						// the important/other sections, not just the bare
-						// priorityImportantQuery/priorityOtherQuery tokens.
-						// "Sort favorites separately" makes MailboxThread.vue
-						// load COMPOUND keys instead (e.g. "not:starred
-						// is:pi-important", see its appendToSearch()/
-						// created()) -- syncing only the bare keys left the
-						// actually-displayed compound-keyed list with no
-						// dedicated resync of its own: it could only ever be
-						// corrected as an incidental side effect of some
-						// unrelated mailbox's own bucket sync touching the
-						// same envelope id via reclassifyFlagBucketsMutation,
-						// which never happens for a message the user isn't
-						// otherwise viewing. Confirmed live: a message the
-						// classifier downgraded stayed listed as important
-						// for 19+ hours after flag_important had already
-						// flipped to false in the database, only ever
-						// flickering back out when something unrelated
-						// happened to touch it. Falls back to the bare keys
-						// when neither is loaded yet (nothing to refresh, or
-						// the priority inbox hasn't been opened this session).
+						// the favorites/important/other sections, not just
+						// the bare priorityImportantQuery/priorityOtherQuery
+						// tokens. "Sort favorites separately" makes
+						// MailboxThread.vue load COMPOUND keys instead (e.g.
+						// "not:starred is:pi-important" for Important, or
+						// plain "is:starred" -- via appendToSearch()
+						// substituting it in for 'not:starred' -- for
+						// Favorites) -- syncing only the bare
+						// important/other keys left the actually-displayed
+						// compound-keyed lists (Favorites included) with no
+						// dedicated resync of their own: they could only
+						// ever be corrected as an incidental side effect of
+						// some unrelated mailbox's own bucket sync touching
+						// the same envelope id via
+						// reclassifyFlagBucketsMutation, which never happens
+						// for a message the user isn't otherwise viewing.
+						// Confirmed live: a message the classifier
+						// downgraded stayed listed as important for 19+
+						// hours after flag_important had already flipped to
+						// false in the database; the exact same pattern was
+						// then seen in the Favorites section for is:starred.
+						// Falls back to the bare important/other keys when
+						// none of the three is loaded yet (nothing to
+						// refresh, or the priority inbox hasn't been opened
+						// this session).
 						const loadedPriorityQueries = Object.keys(mailbox.envelopeLists)
 							.filter((listId) => {
 								const tokens = listId.split(' ')
-								return tokens.includes(priorityImportantQuery) || tokens.includes(priorityOtherQuery)
+								return tokens.includes(priorityImportantQuery) || tokens.includes(priorityOtherQuery) || tokens.includes('is:starred')
 							})
 						const queriesToRefresh = loadedPriorityQueries.length > 0
 							? loadedPriorityQueries
