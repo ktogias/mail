@@ -365,8 +365,9 @@ class MessageMapperTest extends TestCase {
 		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessage($uid, $mailboxId, true));
 		self::assertTrue($this->selectFlagImportant($uid, $mailboxId));
 
-		// Long past FLAG_IMPORTANT_DOWNGRADE_GRACE_SECONDS (15 min).
-		$this->timestamp += 16 * 60;
+		// Past FLAG_IMPORTANT_DOWNGRADE_GRACE_SECONDS (120s, the same
+		// scale as RECENT_FLAG_CHANGE_GRACE_MS client-side).
+		$this->timestamp += 130;
 
 		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessage($uid, $mailboxId, false));
 

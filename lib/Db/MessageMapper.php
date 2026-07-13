@@ -56,16 +56,24 @@ class MessageMapper extends QBMapper {
 	private $timeFactory;
 
 	// How long a message that was just confirmed important (flag_important
-	// written true, whether from this app's own classifier eventually
-	// reaching IMAP or Gmail's own state) stays protected from being
-	// downgraded by a routine resync reading a contradicting "false". Long
-	// enough to cover this account's own measured worst-case sync latency
-	// and IMAP's own eventual-consistency lag for a still-settling write
-	// (a fresh write is not always immediately visible to every
-	// subsequent read); short enough that a genuine, deliberate removal
-	// of importance directly in Gmail is still reflected within one
-	// BackfillJob cycle (15 minutes) rather than staying stuck forever.
-	private const FLAG_IMPORTANT_DOWNGRADE_GRACE_SECONDS = 15 * 60;
+	// written true, whether from this app's own classifier or Gmail's own
+	// state) stays protected from being downgraded by a routine resync
+	// reading a contradicting "false".
+	//
+	// This is architecturally the exact same race starring/seen already
+	// have: flagMessage() only ever writes to IMAP, never straight to
+	// this app's own DB -- the local flag_flagged/flag_seen/flag_important
+	// column only catches up once a later sync reads the write back. For
+	// starring/seen, that race is invisible: it's always a user-initiated
+	// click, protected client-side by recentFlagChanges/
+	// RECENT_FLAG_CHANGE_GRACE_MS (actions.js, also 120s, also raised
+	// today for the same underlying reason). flag_important set by
+	// NewMessagesClassifier has no click to hang that same protection
+	// off of -- it happens entirely in the background -- so the identical
+	// race becomes directly visible instead of silently masked. Same
+	// race, same magnitude, same fix -- just enforced server-side here
+	// since there is no client action to anchor it to.
+	private const FLAG_IMPORTANT_DOWNGRADE_GRACE_SECONDS = 120;
 
 	public function __construct(
 		IDBConnection $db,
