@@ -1685,9 +1685,40 @@ export default function mainStoreActions() {
 					// the primary delivery path anymore.
 					priorityRefreshPromise = (async () => {
 						logger.info('updating priority inbox')
-						for (const query of [priorityImportantQuery, priorityOtherQuery]) {
+						const mailbox = this.getMailbox(UNIFIED_INBOX_ID)
+
+						// Refresh whichever query keys are ACTUALLY loaded for
+						// the important/other sections, not just the bare
+						// priorityImportantQuery/priorityOtherQuery tokens.
+						// "Sort favorites separately" makes MailboxThread.vue
+						// load COMPOUND keys instead (e.g. "not:starred
+						// is:pi-important", see its appendToSearch()/
+						// created()) -- syncing only the bare keys left the
+						// actually-displayed compound-keyed list with no
+						// dedicated resync of its own: it could only ever be
+						// corrected as an incidental side effect of some
+						// unrelated mailbox's own bucket sync touching the
+						// same envelope id via reclassifyFlagBucketsMutation,
+						// which never happens for a message the user isn't
+						// otherwise viewing. Confirmed live: a message the
+						// classifier downgraded stayed listed as important
+						// for 19+ hours after flag_important had already
+						// flipped to false in the database, only ever
+						// flickering back out when something unrelated
+						// happened to touch it. Falls back to the bare keys
+						// when neither is loaded yet (nothing to refresh, or
+						// the priority inbox hasn't been opened this session).
+						const loadedPriorityQueries = Object.keys(mailbox.envelopeLists)
+							.filter((listId) => {
+								const tokens = listId.split(' ')
+								return tokens.includes(priorityImportantQuery) || tokens.includes(priorityOtherQuery)
+							})
+						const queriesToRefresh = loadedPriorityQueries.length > 0
+							? loadedPriorityQueries
+							: [priorityImportantQuery, priorityOtherQuery]
+
+						for (const query of queriesToRefresh) {
 							logger.info("sync'ing priority inbox section", { query })
-							const mailbox = this.getMailbox(UNIFIED_INBOX_ID)
 							const list = mailbox.envelopeLists[normalizedEnvelopeListId(query)]
 							if (list === undefined) {
 								await this.fetchEnvelopes({

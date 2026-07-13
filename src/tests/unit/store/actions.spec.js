@@ -1815,6 +1815,77 @@ describe('Vuex store actions', () => {
 			await tick
 		})
 
+		it("refreshes the actually-displayed COMPOUND priority queries when 'sort favorites separately' is on, not just the bare ones", async () => {
+			// Regression: "sort favorites separately" makes
+			// MailboxThread.vue load compound keys for the priority inbox
+			// sections (e.g. "not:starred is:pi-important", see its
+			// appendToSearch()/created()), but the priority-inbox refresh
+			// only ever synced the bare is:pi-important/is:pi-other keys on
+			// the unified mailbox. The compound-keyed list actually shown
+			// on screen never got its own resync at all -- it could only
+			// ever be corrected as an incidental side effect of some
+			// unrelated mailbox's own bucket sync touching the same
+			// envelope id via reclassifyFlagBucketsMutation. Confirmed
+			// live: a message the classifier had already downgraded
+			// (flag_important flipped to false hours earlier) kept
+			// showing as important indefinitely.
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+
+			const account = { id: 13 }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+			})
+			store.mailboxes[11].envelopeLists[''] = []
+
+			store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['not:starred is:pi-important'] = []
+			store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['not:starred is:pi-other'] = []
+
+			store.fetchEnvelopes = vi.fn(async () => {})
+			store.syncEnvelopes = vi.fn(async ({ mailboxId }) => {
+				if (mailboxId === 11) {
+					return [{ databaseId: 779, flags: { seen: false } }]
+				}
+				return []
+			})
+
+			await store.syncWatchedMailboxes()
+
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'not:starred is:pi-important' })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'not:starred is:pi-other' })
+			expect(store.syncEnvelopes).not.toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-important' })
+			expect(store.syncEnvelopes).not.toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-other' })
+		})
+
+		it('falls back to the bare priority queries when neither the bare nor compound keys are loaded yet', async () => {
+			// First-ever load of this session: nothing loaded on the
+			// unified mailbox yet, so there is nothing to distinguish bare
+			// from compound -- same behavior as before this fix.
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+
+			const account = { id: 13 }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+			})
+			store.mailboxes[11].envelopeLists[''] = []
+
+			store.fetchEnvelopes = vi.fn(async () => {})
+			store.syncEnvelopes = vi.fn(async ({ mailboxId }) => {
+				if (mailboxId === 11) {
+					return [{ databaseId: 780, flags: { seen: false } }]
+				}
+				return []
+			})
+
+			await store.syncWatchedMailboxes()
+
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-important' })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-other' })
+		})
+
 		it('keeps refreshing an OPEN priority inbox when interaction priority activates mid-tick', async () => {
 			// Interaction priority pauses background work, but the open
 			// priority inbox is what the user is looking at -- and the
