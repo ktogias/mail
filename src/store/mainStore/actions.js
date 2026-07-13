@@ -1895,6 +1895,47 @@ export default function mainStoreActions() {
 						queriesToSync = queriesToSync.filter((query) => !coalescedQueries.has(query))
 					}
 
+					// is:pi-important/is:pi-other (bare, or compound with
+					// not:starred from "sort favorites separately", see
+					// appendToSearch()) end up loaded on THIS real mailbox's
+					// own envelopeLists as a side effect of
+					// maybeStartPriorityInboxRefresh()'s own fan-out
+					// (fetchEnvelopes()'s isUnified branch writes to each
+					// constituent real mailbox via replace:true), not
+					// because this mailbox's own view ever asked for it --
+					// unlike is:starred/not:starred, which a REAL folder's
+					// own "Favorites" section can legitimately load too
+					// (same appendToSearch() output, no way to tell the two
+					// origins apart from the query string alone -- see the
+					// "does NOT coalesce" test above, which deliberately
+					// keeps that case syncing independently). is:pi-
+					// important/is:pi-other have no such second origin:
+					// this app's importance/other classification only ever
+					// exists inside Priority Inbox. maybeStartPriorityInboxRefresh()
+					// already owns keeping these two in sync, uniformly,
+					// across every inbox-specialRole real mailbox -- having
+					// this completely separate, uncoordinated loop ALSO
+					// sync the exact same bucket independently every tick
+					// means two callers race to read "known ids" from the
+					// same envelopeLists array and each apply their own,
+					// separately-timed response to it. Confirmed live: the
+					// same message reported as "new" by BOTH syncs, over
+					// and over, tick after tick, for a thread whose star
+					// lives on an older message -- visibly redrawing the
+					// Priority Inbox and re-fetching its thread data with
+					// no new mail and no user interaction at all. Excluded
+					// unconditionally (not just when '' is also loaded,
+					// unlike the coalescing above): maybeStartPriorityInboxRefresh()
+					// reaches every inbox-specialRole mailbox regardless of
+					// what else happens to be loaded on this one specifically.
+					const importanceOnlyTokens = new Set([priorityImportantQuery, priorityOtherQuery])
+					queriesToSync = queriesToSync.filter((query) => {
+						if (typeof query !== 'string') {
+							return true
+						}
+						return !query.split(' ').some((token) => importanceOnlyTokens.has(token))
+					})
+
 					if (lightweight) {
 						// One representative bucket is enough to pull new
 						// messages into the store and fire the notification:

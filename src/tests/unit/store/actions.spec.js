@@ -1793,6 +1793,43 @@ describe('Vuex store actions', () => {
 			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 921, query: 'not:starred' })
 		})
 
+		it('never independently syncs is:pi-important/is:pi-other on a real mailbox -- maybeStartPriorityInboxRefresh() already owns them', async () => {
+			// Regression: these two buckets end up loaded on a real
+			// mailbox's own envelopeLists purely as a side effect of
+			// maybeStartPriorityInboxRefresh()'s own fan-out (bare or
+			// compound with not:starred, see appendToSearch()) -- having
+			// this separate, uncoordinated loop ALSO sync them
+			// independently every tick raced two callers reading/writing
+			// the same envelopeLists array, confirmed live as the same
+			// message reported as "new" by both syncs over and over, tick
+			// after tick, with no new mail and no user interaction.
+			// is:starred/not:starred are deliberately left out of this
+			// exclusion (see the "does NOT coalesce" test above) -- a real
+			// folder's own Favorites section can legitimately load those
+			// same bare keys too, with no way to tell the two origins
+			// apart from the query string alone.
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+
+			const account = { id: 915 }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: { name: 'INBOX', databaseId: 922, specialRole: 'inbox' },
+			})
+
+			store.mailboxes[922].envelopeLists['is:pi-important'] = []
+			store.mailboxes[922].envelopeLists['not:starred is:pi-other'] = []
+			store.mailboxes[922].envelopeLists['is:starred'] = []
+
+			store.fetchEnvelopes = vi.fn(async () => {})
+			store.syncEnvelopes = vi.fn(async () => [])
+
+			await store.syncWatchedMailboxes()
+
+			expect(store.syncEnvelopes).toHaveBeenCalledTimes(1)
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 922, query: 'is:starred' })
+		})
+
 		it('lightweight tick: syncs only the unfiltered bucket and skips the priority refresh', async () => {
 			// Hidden tabs poll in lightweight mode (see App.vue): one
 			// representative bucket per watched mailbox is enough for a
