@@ -150,6 +150,26 @@ export default {
 					|| iframeDoc.querySelectorAll('[data-original-style]').length > 0
 					|| iframeDoc.querySelectorAll('style[data-original-content]').length > 0
 
+			// Some newsletter templates carry their own `html, body {
+			// height: 100% !important; }` reset (common email-builder
+			// output, e.g. Odoo's `o_layout` templates -- confirmed live
+			// on a real EUseful newsletter). Left alone, that ties the
+			// message's own height to the SAME iframe element the
+			// ResizeObserver below is about to resize to fit it: a
+			// circular reference where growing the iframe grows what
+			// "100%" means inside it, which grows the next measured
+			// scrollHeight, forever -- confirmed live as an iframe that
+			// never stops growing no matter how far the page is
+			// scrolled. An inline `!important` style always outranks a
+			// stylesheet rule of equal importance regardless of DOM
+			// order, so forcing both root elements back to their
+			// natural, content-driven height here -- before the observer
+			// ever takes its first measurement -- breaks the cycle
+			// without having to fight the message's own stylesheet for
+			// cascade precedence.
+			iframeDoc.documentElement.style.setProperty('height', 'auto', 'important')
+			iframeDoc.body.style.setProperty('height', 'auto', 'important')
+
 			// Message HTML is same-origin (served from this app's own API,
 			// not a genuinely cross-origin iframe), so there's no need for
 			// iframe-resizer's whole postMessage-based child/parent

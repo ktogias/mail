@@ -55,11 +55,13 @@ describe('MessageHTMLBody', () => {
 	}
 
 	function stubIframeDoc(view, extra = {}) {
+		const { body: bodyOverrides, ...rest } = extra
 		Object.defineProperty(view.vm.$refs.iframe, 'contentDocument', {
 			value: {
-				body: {},
+				documentElement: { style: { setProperty: vi.fn() } },
+				body: { style: { setProperty: vi.fn() }, ...bodyOverrides },
 				querySelectorAll: vi.fn().mockReturnValue([]),
-				...extra,
+				...rest,
 			},
 			configurable: true,
 		})
@@ -125,6 +127,28 @@ describe('MessageHTMLBody', () => {
 		view.destroy()
 
 		expect(observer.disconnected).toBe(true)
+	})
+
+	it('neutralizes the message document\'s own height:100% reset before measuring it', () => {
+		// Some newsletter templates (e.g. Odoo's `o_layout` output, used
+		// by a real EUseful newsletter) ship their own `html, body {
+		// height: 100% !important; }` reset. Left alone, that ties the
+		// message's own height to the iframe element the ResizeObserver
+		// is about to resize to fit it, so every resize makes "100%"
+		// mean something bigger, which grows the next scrollHeight
+		// measurement, forever -- confirmed live as an iframe that never
+		// stopped growing. Forcing both root elements to an inline
+		// `!important` height:auto here -- which outranks a stylesheet
+		// rule of equal importance regardless of DOM order -- breaks the
+		// cycle before the observer takes its first measurement.
+		const view = mountMessageHTMLBody()
+		stubIframeDoc(view)
+
+		view.vm.onMessageFrameLoad()
+
+		const { documentElement, body } = view.vm.$refs.iframe.contentDocument
+		expect(documentElement.style.setProperty).toHaveBeenCalledWith('height', 'auto', 'important')
+		expect(body.style.setProperty).toHaveBeenCalledWith('height', 'auto', 'important')
 	})
 
 	it('detects blocked content and displayIframe() unblocks it without crashing', () => {
