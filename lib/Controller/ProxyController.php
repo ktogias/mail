@@ -96,14 +96,26 @@ class ProxyController extends Controller {
 			$response = $client->get($src);
 			$content = $response->getBody();
 		} catch (ClientExceptionInterface $e) {
+			// Confirmed live on a real newsletter: the sender's own server
+			// had a broken TLS certificate chain (a missing intermediate,
+			// tolerated by browsers' more lenient chain-building but
+			// correctly rejected by strict verification here) -- a
+			// genuine fetch failure, not a deliberate block. Falling back
+			// to the same invisible 1x1 placeholder used for images a
+			// user hasn't chosen to reveal yet made the two
+			// indistinguishable: an image already unblocked (a trusted
+			// sender, or after "Show images") that then silently fails to
+			// load looked identical to nothing having been blocked at
+			// all. A distinct, actually-visible icon here at least tells
+			// the user something was attempted and didn't work.
 			$this->logger->notice('Unable to proxy image', ['exception' => $e]);
-			$content = file_get_contents(__DIR__ . '/../../img/blocked-image.png');
+			$content = file_get_contents(__DIR__ . '/../../img/proxy-fetch-failed.png');
 		} catch (LocalServerException $e) {
 			$this->logger->warning('Prevented image proxy access to forbidden URL', [
 				'blockedUrl' => $src,
 				'exception' => $e,
 			]);
-			$content = file_get_contents(__DIR__ . '/../../img/blocked-image.png');
+			$content = file_get_contents(__DIR__ . '/../../img/proxy-fetch-failed.png');
 		}
 
 		return new ProxyDownloadResponse($content, $src, 'application/octet-stream');

@@ -21,12 +21,20 @@ use OCP\AppFramework\Http\Response;
 use OCP\Http\Client\IClient;
 use OCP\Http\Client\IClientService;
 use OCP\Http\Client\IResponse;
+use OCP\Http\Client\LocalServerException;
 use OCP\IRequest;
 use OCP\ISession;
 use OCP\IURLGenerator;
 use PHPUnit\Framework\MockObject\MockObject;
+use Psr\Http\Client\ClientExceptionInterface;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
+
+// ClientExceptionInterface only extends \Throwable, which userland code
+// can't implement directly (only \Exception/\Error may) -- a minimal
+// concrete stand-in to actually throw one in a test.
+class TestClientException extends \Exception implements ClientExceptionInterface {
+}
 
 class ProxyControllerTest extends TestCase {
 	/** @var string */
@@ -142,6 +150,107 @@ class ProxyControllerTest extends TestCase {
 		$response = $this->controller->proxy($src, $id, $validHmac);
 
 		$this->assertInstanceOf(ProxyDownloadResponse::class, $response);
+	}
+
+	// Confirmed live on a real newsletter: the sender's own server had a
+	// broken TLS certificate chain, causing every fetch attempt to fail
+	// with a ClientExceptionInterface. Falling back to the same
+	// invisible 1x1 blocked-image.png used for images a user hasn't
+	// chosen to reveal yet made a genuinely failed fetch indistinguishable
+	// from nothing having been blocked at all -- these two tests pin the
+	// fallback to a different, actually-visible icon instead.
+	public function testProxyFallsBackToAVisibleBrokenIconOnAClientException(): void {
+		$src = 'http://example.com';
+		$id = 1;
+		$validHmac = 'valid-hmac-hash';
+		$this->request->expects(self::once())
+			->method('passesStrictCookieCheck')
+			->willReturn(true);
+		$this->session->expects($this->once())
+			->method('close');
+		$this->hmacGenerator->expects($this->once())
+			->method('generate')
+			->with($id, $src)
+			->willReturn($validHmac);
+		$this->mailManager->expects($this->once())
+			->method('getMessage')
+			->with($this->userId, $id);
+		$client = $this->getMockBuilder(IClient::class)->getMock();
+		$this->clientService->expects($this->once())
+			->method('newClient')
+			->willReturn($client);
+		$client->expects($this->once())
+			->method('get')
+			->with($src)
+			->willThrowException(new TestClientException('boom'));
+		$this->controller = new ProxyController(
+			$this->appName,
+			$this->request,
+			$this->urlGenerator,
+			$this->session,
+			$this->clientService,
+			$this->hmacGenerator,
+			$this->logger,
+			$this->mailManager,
+			$this->userId,
+		);
+
+		$response = $this->controller->proxy($src, $id, $validHmac);
+
+		$this->assertInstanceOf(ProxyDownloadResponse::class, $response);
+		$this->assertSame(
+			file_get_contents(__DIR__ . '/../../../img/proxy-fetch-failed.png'),
+			$response->render(),
+		);
+		$this->assertNotSame(
+			file_get_contents(__DIR__ . '/../../../img/blocked-image.png'),
+			$response->render(),
+		);
+	}
+
+	public function testProxyFallsBackToAVisibleBrokenIconOnALocalServerException(): void {
+		$src = 'http://example.com';
+		$id = 1;
+		$validHmac = 'valid-hmac-hash';
+		$this->request->expects(self::once())
+			->method('passesStrictCookieCheck')
+			->willReturn(true);
+		$this->session->expects($this->once())
+			->method('close');
+		$this->hmacGenerator->expects($this->once())
+			->method('generate')
+			->with($id, $src)
+			->willReturn($validHmac);
+		$this->mailManager->expects($this->once())
+			->method('getMessage')
+			->with($this->userId, $id);
+		$client = $this->getMockBuilder(IClient::class)->getMock();
+		$this->clientService->expects($this->once())
+			->method('newClient')
+			->willReturn($client);
+		$client->expects($this->once())
+			->method('get')
+			->with($src)
+			->willThrowException(new LocalServerException('blocked'));
+		$this->controller = new ProxyController(
+			$this->appName,
+			$this->request,
+			$this->urlGenerator,
+			$this->session,
+			$this->clientService,
+			$this->hmacGenerator,
+			$this->logger,
+			$this->mailManager,
+			$this->userId,
+		);
+
+		$response = $this->controller->proxy($src, $id, $validHmac);
+
+		$this->assertInstanceOf(ProxyDownloadResponse::class, $response);
+		$this->assertSame(
+			file_get_contents(__DIR__ . '/../../../img/proxy-fetch-failed.png'),
+			$response->render(),
+		);
 	}
 
 	public function testProxyWithInvalidHmac(): void {
