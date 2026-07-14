@@ -9,6 +9,7 @@ declare(strict_types=1);
 
 namespace OCA\Mail\IMAP\Search;
 
+use Horde_Imap_Client_Data_Format_Exception;
 use Horde_Imap_Client_Exception;
 use Horde_Imap_Client_Search_Query;
 use OCA\Mail\Account;
@@ -68,7 +69,15 @@ class Provider {
 				$mailbox->getName(),
 				$this->convertMailQueryToHordeQuery($searchQuery)
 			);
-		} catch (Horde_Imap_Client_Exception $e) {
+		} catch (Horde_Imap_Client_Exception|Horde_Imap_Client_Data_Format_Exception $e) {
+			// Data_Format_Exception (thrown by build(), called inside
+			// search() -- see convertMailQueryToHordeQuery()'s own
+			// comment for when this used to happen) is a sibling of
+			// Horde_Imap_Client_Exception, not a subclass of it, so the
+			// original single-type catch here let it propagate
+			// uncaught: a raw, unclean error instead of the same
+			// ServiceException every other IMAP failure in this method
+			// produces.
 			throw new ServiceException('Could not get message IDs: ' . $e->getMessage(), 0, $e);
 		} finally {
 			$client->logout();
@@ -93,13 +102,32 @@ class Provider {
 	 * @return Horde_Imap_Client_Search_Query
 	 */
 	private function convertMailQueryToHordeQuery(SearchQuery $searchQuery): Horde_Imap_Client_Search_Query {
+		$query = new Horde_Imap_Client_Search_Query();
+
+		// IMAP SEARCH defaults to US-ASCII (RFC 3501 6.4.4) unless the
+		// query explicitly declares a different charset -- and without
+		// one, Horde_Imap_Client_Search_Query::build() constructs every
+		// TEXT/BODY criterion as a Horde_Imap_Client_Data_Format_Astring,
+		// which rejects any non-ASCII byte outright, entirely
+		// client-side, before the request ever reaches the network.
+		// Confirmed live: a Greek search term ("Ισηοπ") failed in under
+		// a second with "String contains non-ASCII characters." -- this
+		// app never told Horde what charset the search text was in, so
+		// every non-Latin-script term (Greek here, but the same gap
+		// applies to Cyrillic, CJK, or accented Latin) was rejected
+		// before ever attempting to search anything. UTF-8 is a
+		// universally supported SEARCH charset on real-world IMAP
+		// servers (Gmail, Dovecot, Exchange, ...); declaring it makes
+		// build() choose the *_Nonascii string format variants instead.
+		$query->charset('UTF-8', false);
+
 		return array_reduce(
 			$searchQuery->getBodies(),
 			static function (Horde_Imap_Client_Search_Query $query, string $textToken) {
 				$query->text($textToken, true);
 				return $query;
 			},
-			new Horde_Imap_Client_Search_Query()
+			$query
 		);
 	}
 }

@@ -11,8 +11,8 @@ namespace OCA\Mail\Tests\Unit\IMAP\Search;
 
 use Horde_Imap_Client_Socket;
 use OCA\Mail\Account;
-use OCA\Mail\Db\Mailbox;
 use OCA\Mail\Db\MailAccount;
+use OCA\Mail\Db\Mailbox;
 use OCA\Mail\IMAP\IMAPClientFactory;
 use OCA\Mail\IMAP\Search\Provider;
 use OCA\Mail\Service\Search\SearchQuery;
@@ -145,5 +145,35 @@ class ProviderTest extends TestCase {
 
 		self::assertCount(2, $capturedKeys);
 		self::assertSame($capturedKeys[0], $capturedKeys[1]);
+	}
+
+	/**
+	 * Confirmed live: a Greek search term ("Ισηοπ") failed instantly
+	 * (well under a second, no network I/O at all) with
+	 * "String contains non-ASCII characters." IMAP SEARCH defaults to
+	 * US-ASCII (RFC 3501) unless the query explicitly declares a
+	 * different charset; without that declaration,
+	 * Horde_Imap_Client_Search_Query::build() constructs every TEXT
+	 * criterion as a Horde_Imap_Client_Data_Format_Astring, which
+	 * rejects any non-ASCII byte outright. build() -- called here
+	 * exactly as Horde's own Horde_Imap_Client_Base::search() calls it
+	 * -- must not throw for a non-ASCII term, and must report having
+	 * actually used UTF-8.
+	 */
+	public function testFindMatchesDeclaresUtf8CharsetSoNonAsciiSearchTermsDontThrow(): void {
+		$account = $this->account(13);
+		$mailbox = $this->mailbox(149, 'INBOX');
+		$imapClient = $this->createMock(Horde_Imap_Client_Socket::class);
+		$this->clientFactory->method('getClient')->willReturn($imapClient);
+
+		$builtQuery = null;
+		$imapClient->method('search')->willReturnCallback(function ($mailboxName, $query) use (&$builtQuery) {
+			$builtQuery = $query->build();
+			return ['match' => (object)['ids' => []]];
+		});
+
+		$this->provider->findMatches($account, $mailbox, $this->searchQuery('Ισηοπ'));
+
+		self::assertSame('UTF-8', $builtQuery['charset']);
 	}
 }
