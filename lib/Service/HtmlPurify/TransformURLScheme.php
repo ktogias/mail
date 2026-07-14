@@ -92,13 +92,19 @@ class TransformURLScheme extends HTMLPurifier_URIFilter {
 			'src' => $originalURL
 		]);
 		$parsedProxyUrl = parse_url($proxyUrl);
-		/** @var array{path: string, query: string} $parsedProxyUrl */
+		/** @var array{path: string, query?: string} $parsedProxyUrl */
 		return new \HTMLPurifier_URI(
 			$this->request->getServerProtocol(),
 			null, $this->request->getServerHost(),
 			null,
 			$parsedProxyUrl['path'],
-			$parsedProxyUrl['query'],
+			// parse_url() only includes 'query' at all when the URL
+			// actually has one -- in normal use mail.proxy.proxy always
+			// gets id/hmac/src as query params, so this never mattered in
+			// practice, but assuming the key unconditionally exists is
+			// still one query-string-shape assumption too many for a
+			// value we don't control the construction of ourselves.
+			$parsedProxyUrl['query'] ?? null,
 			null
 		);
 	}

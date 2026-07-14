@@ -18,6 +18,7 @@ use HTMLPurifier_URISchemeRegistry;
 use OCA\Mail\Html\ProxyHmacGenerator;
 use OCA\Mail\Model\IMAPMessage;
 use OCA\Mail\Service\HtmlPurify\CidURIScheme;
+use OCA\Mail\Service\HtmlPurify\TransformBackgroundAttr;
 use OCA\Mail\Service\HtmlPurify\TransformCidDataAttr;
 use OCA\Mail\Service\HtmlPurify\TransformHTMLLinks;
 use OCA\Mail\Service\HtmlPurify\TransformImageSrc;
@@ -212,6 +213,12 @@ class Html {
 		// Rewrite URL for redirection and proxying of content
 		/** @var HTMLPurifier_HTMLDefinition $def */
 		$def = $config->getHTMLDefinition(true);
+		// Runs pre-validation, converting the legacy background="..."
+		// attribute into an equivalent style="background-image:url(...)"
+		// declaration -- so that by the time cssbackground (below) runs,
+		// it sees a normal style attribute either way, regardless of
+		// which of the two forms the original message actually used.
+		$def->info_attr_transform_pre['backgroundattr'] = new TransformBackgroundAttr();
 		$def->info_attr_transform_post['imagesrc'] = new TransformImageSrc($this->urlGenerator);
 		$def->info_attr_transform_post['cssbackground'] = new TransformStyleURLs($this->urlGenerator);
 		$def->info_attr_transform_post['htmllinks'] = new TransformHTMLLinks();

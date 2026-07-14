@@ -315,6 +315,36 @@ class TransformURLSchemeTest extends TestCase {
 		$this->assertStringContainsString('%23section', $uri->query);
 	}
 
+	/**
+	 * Found while adding background-attribute support elsewhere: the
+	 * proxy URL parse_url()'s result was assumed to always include a
+	 * 'query' key, but PHP's parse_url() only includes it when the URL
+	 * actually has a query string at all. Never observed in real usage
+	 * (mail.proxy.proxy always gets id/hmac/src as query params), but
+	 * this is a genuine crash waiting to happen for any URL generator
+	 * response shaped without one -- confirmed directly by making
+	 * linkToRoute() return exactly that here.
+	 */
+	public function testProxyUrlWithNoQueryStringDoesNotCrash(): void {
+		$uri = new HTMLPurifier_URI('https', null, 'example.com', null, '/image.png', null, null);
+		$config = HTMLPurifier_Config::createDefault();
+		$context = new HTMLPurifier_Context();
+		$attr = 'src';
+		$context->register('CurrentAttr', $attr);
+
+		$this->hmacGenerator->method('generate')->willReturn('abc123');
+		$this->request->method('getServerProtocol')->willReturn('https');
+		$this->request->method('getServerHost')->willReturn('mail.example.com');
+		$this->urlGenerator->method('linkToRoute')
+			->willReturn('/apps/mail/proxy');
+
+		$result = $this->filter->filter($uri, $config, $context);
+
+		$this->assertTrue($result);
+		$this->assertSame('/apps/mail/proxy', $uri->path);
+		$this->assertNull($uri->query);
+	}
+
 	public function testCidSchemeRewritesUriFromUrl(): void {
 		$uri = new HTMLPurifier_URI('cid', null, null, null, 'valid-cid', null, null);
 		$config = HTMLPurifier_Config::createDefault();

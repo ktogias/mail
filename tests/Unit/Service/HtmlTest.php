@@ -118,6 +118,61 @@ class HtmlTest extends TestCase {
 		$this->assertStringContainsString('data-cid="image001@example.com"', $result);
 	}
 
+	/**
+	 * Backlog item: some commercial newsletter templates (confirmed with a
+	 * real EUseful newsletter) use the legacy, presentational
+	 * `background="..."` HTML attribute directly on <table>/<td> instead
+	 * of a plain <img> or a CSS background-image style declaration --
+	 * neither TransformImageSrc (only ever looks at <img>) nor
+	 * TransformStyleURLs (only ever looks at an EXISTING style attribute)
+	 * ever saw this form at all, so the external image sailed straight
+	 * through unblocked and the "Show images" privacy gate never applied
+	 * to it.
+	 */
+	public function testSanitizeHtmlMailBodyBlocksLegacyBackgroundAttribute(): void {
+		$urlGenerator = $this->createMock(IURLGenerator::class);
+		$urlGenerator->method('imagePath')
+			->with('mail', 'blocked-image.png')
+			->willReturn('/apps/mail/img/blocked-image.png');
+		// A real linkToRoute() call always produces a URL with query
+		// parameters for this route (id/hmac/src) -- an unconfigured mock
+		// returning null surfaced a real, independent, pre-existing bug
+		// in TransformURLScheme::filterHttpFtp() while writing this test
+		// (see its own fix in the same commit): parse_url() doesn't
+		// always include a 'query' key, only when the URL actually has
+		// one, and that code assumed it always would.
+		$urlGenerator->method('linkToRoute')
+			->with('mail.proxy.proxy', self::isType('array'))
+			->willReturn('https://mail.example.com/index.php/apps/mail/proxy?id=42&hmac=abc&src=http%3A%2F%2Ftracker.example.com%2Ftrack.png');
+		$request = $this->createStub(IRequest::class);
+		// Also needed for TransformURLScheme::filterHttpFtp() to
+		// reconstruct a genuinely http(s)-scheme URI -- otherwise it
+		// defaults to null/empty, producing a scheme-less "://..." value
+		// that TransformStyleURLs' own http-prefix regex correctly does
+		// NOT recognize as blockable, masking whether blocking actually
+		// happens as it would with a real request.
+		$request->method('getServerProtocol')->willReturn('https');
+		$request->method('getServerHost')->willReturn('mail.example.com');
+		$hmacGenerator = $this->createStub(ProxyHmacGenerator::class);
+
+		$html = new Html($urlGenerator, $request, $hmacGenerator);
+
+		$result = $html->sanitizeHtmlMailBody(42, '<table background="http://tracker.example.com/track.png"><tr><td>Hi</td></tr></table>', []);
+
+		// The attribute itself is gone, and the browser never loads
+		// anything directly from the tracking domain: the src actually
+		// rendered is the blocked-image placeholder...
+		$this->assertStringNotContainsString('background=', $result);
+		$this->assertStringContainsString('style="background-image:url(/apps/mail/img/blocked-image.png);"', $result);
+		// ...and the ORIGINAL (proxy-rewritten, same as a plain <img>
+		// would get -- never the raw external URL directly, even once
+		// "Show images" is clicked) reference is preserved in
+		// data-original-style, restorable later.
+		$this->assertStringContainsString('data-original-style="background-image:url(', $result);
+		$this->assertStringContainsString('apps/mail/proxy', $result);
+		$this->assertStringContainsString('tracker.example.com', $result);
+	}
+
 	public function testSanitizeHtmlMailBodyKeepsContentOfConcatenatedHtmlDocuments(): void {
 		// Some senders (confirmed live: TechTarget newsletters) prepend a
 		// minimal tracking document to the real message. HTMLPurifier's
