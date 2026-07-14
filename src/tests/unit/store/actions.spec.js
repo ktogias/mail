@@ -5,6 +5,7 @@
 
 import { createPinia, setActivePinia } from 'pinia'
 import { curry, range, reverse } from 'ramda'
+import Vue from 'vue'
 import MailboxLockedError from '../../../errors/MailboxLockedError.js'
 import MalformedSyncResponseError from '../../../errors/MalformedSyncResponseError.js'
 import * as AccountService from '../../../service/AccountService.js'
@@ -238,6 +239,42 @@ describe('Vuex store actions', () => {
 			addToUnifiedMailboxes: false,
 		})
 		expect(store.mailboxes[11].envelopeLists['']).toContain(3)
+	})
+
+	it('addEnvelopesMutation() writes each touched list through Vue.set only once per batch, not once per envelope', () => {
+		// Confirmed live: Firefox's own "unresponsive script" warning fired
+		// mid a sort comparator inside this exact mutation. Re-reading,
+		// sorting, deduplicating, and Vue.set-ing a list once PER ENVELOPE
+		// in a large batch was O(n * L log L) for no reason -- an envelope
+		// only needs the list to already reflect its predecessors in the
+		// same batch, not to be fully sorted/deduped/reactive after every
+		// single one. This pins the fix: one Vue.set per list actually
+		// touched, however many envelopes land in it.
+		normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+		const account13 = { id: 13 }
+		store.addAccountMutation(account13)
+		store.addMailboxMutation({
+			account: account13,
+			mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+		})
+		store.preferences['sort-order'] = 'newest'
+
+		const setSpy = vi.spyOn(Vue, 'set')
+		store.addEnvelopesMutation({
+			envelopes: [
+				{ databaseId: 10, mailboxId: 11, uid: 1, dateInt: 300, threadRootId: 'a', flags: {}, tags: {} },
+				{ databaseId: 11, mailboxId: 11, uid: 2, dateInt: 100, threadRootId: 'b', flags: {}, tags: {} },
+				{ databaseId: 12, mailboxId: 11, uid: 3, dateInt: 200, threadRootId: 'c', flags: {}, tags: {} },
+			],
+			addToUnifiedMailboxes: false,
+		})
+
+		const envelopeListWrites = setSpy.mock.calls.filter((call) => call[0] === store.mailboxes[11].envelopeLists)
+		expect(envelopeListWrites).toHaveLength(1)
+		// Still correctly sorted (newest first, the default) and complete --
+		// batching the write must not change the observable result.
+		expect(store.mailboxes[11].envelopeLists['']).toEqual([10, 12, 11])
+		setSpy.mockRestore()
 	})
 
 	it('fetchEnvelopes() drops entries that no longer match a filtered query', async () => {

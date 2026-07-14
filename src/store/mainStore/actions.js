@@ -3321,25 +3321,42 @@ export default function mainStoreActions() {
 				return
 			}
 
+			// Reading a list back out of Vue, sorting it, deduplicating it,
+			// and writing it back through Vue.set is not free -- every id
+			// touched along the way is a reactive property read (confirmed
+			// live: Firefox's own "unresponsive script" warning fired mid
+			// this exact call chain, paused inside the sort's comparator).
+			// The loop below used to do that full read-sort-dedupe-write
+			// cycle once PER ENVELOPE in the batch, for lists that can hold
+			// thousands of ids -- O(n * L log L) for no reason, since an
+			// envelope only needs the list to already reflect whatever
+			// came before it in the SAME batch, not to be fully sorted,
+			// deduplicated, and pushed through Vue's reactivity on every
+			// single step. Instead, accumulate each touched list as a
+			// plain (non-reactive) working array across the whole batch,
+			// and only sort + dedupe + Vue.set it once per list actually
+			// touched, after the loop.
+			const workingLists = new Map() // mailbox -> working array of ids
+			const workingListFor = (targetMailbox) => {
+				if (!workingLists.has(targetMailbox)) {
+					workingLists.set(targetMailbox, dropStaleIds(targetMailbox.envelopeLists[listId] || [], targetMailbox.databaseId))
+				}
+				return workingLists.get(targetMailbox)
+			}
+
 			envelopes.forEach((envelope) => {
 				const mailbox = this.mailboxes[envelope.mailboxId]
-				const existing = dropStaleIds(mailbox.envelopeLists[listId] || [], mailbox.databaseId)
 				this.normalizeTags(envelope)
 				Vue.set(this.envelopes, envelope.databaseId, { ...this.envelopes[envelope.databaseId] || {}, ...envelope, flags: withRecentFlagOverrides(envelope.databaseId, envelope.flags) })
 				Vue.set(envelope, 'accountId', mailbox.accountId)
-				Vue.set(mailbox.envelopeLists, listId, uniq(orderByDateInt(this.appendOrReplaceEnvelopeId(existing, envelope))))
+				this.appendOrReplaceEnvelopeId(workingListFor(mailbox), envelope)
 				if (addToUnifiedMailboxes) {
 					const unifiedAccount = this.accountsUnmapped[UNIFIED_ACCOUNT_ID]
 					unifiedAccount.mailboxes
 						.map((mbId) => this.mailboxes[mbId])
 						.filter((mb) => mb.specialRole && mb.specialRole === mailbox.specialRole)
-						.forEach((mailbox) => {
-							const existing = dropStaleIds(mailbox.envelopeLists[listId] || [], mailbox.databaseId)
-							Vue.set(
-								mailbox.envelopeLists,
-								listId,
-								uniq(orderByDateInt(existing.concat([envelope.databaseId]))),
-							)
+						.forEach((unifiedMailbox) => {
+							workingListFor(unifiedMailbox).push(envelope.databaseId)
 						})
 				}
 
@@ -3358,6 +3375,10 @@ export default function mainStoreActions() {
 				// reclassification here is only for the OTHER, sibling
 				// buckets a coalesced '' sync didn't separately ask about).
 				this.reclassifyFlagBucketsMutation({ envelope, sourceMailbox: mailbox, includeUnified: addToUnifiedMailboxes, excludeListId: listId })
+			})
+
+			workingLists.forEach((working, targetMailbox) => {
+				Vue.set(targetMailbox.envelopeLists, listId, uniq(orderByDateInt(working)))
 			})
 		},
 		// Several search buckets are really just a boolean predicate over a
