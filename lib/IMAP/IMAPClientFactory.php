@@ -14,8 +14,11 @@ use Horde_Imap_Client_Password_Xoauth2;
 use Horde_Imap_Client_Socket;
 use OCA\Mail\Account;
 use OCA\Mail\Cache\HordeCacheFactory;
+use OCA\Mail\Db\MailAccountMapper;
 use OCA\Mail\Events\BeforeImapClientCreated;
 use OCA\Mail\Exception\ServiceException;
+use OCA\Mail\Integration\GoogleIntegration;
+use OCA\Mail\Integration\MicrosoftIntegration;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\EventDispatcher\IEventDispatcher;
 use OCP\ICacheFactory;
@@ -51,6 +54,9 @@ class IMAPClientFactory {
 		IEventDispatcher $eventDispatcher,
 		ITimeFactory $timeFactory,
 		private HordeCacheFactory $hordeCacheFactory,
+		private GoogleIntegration $googleIntegration,
+		private MicrosoftIntegration $microsoftIntegration,
+		private MailAccountMapper $mailAccountMapper,
 	) {
 		$this->crypto = $crypto;
 		$this->config = $config;
@@ -143,6 +149,12 @@ class IMAPClientFactory {
 		if ($rateLimitingCache instanceof IMemcache) {
 			$client->enableRateLimiter($rateLimitingCache, $paramHash, $this->timeFactory);
 		}
+
+		// Lets _login() force a real token refresh and retry once, itself,
+		// the moment a login is denied -- see HordeImapClient::
+		// enableAuthRetry()'s own comment. Wired unconditionally: the
+		// underlying logic already no-ops cleanly for a non-OAuth account.
+		$client->enableAuthRetry($account, $this->googleIntegration, $this->microsoftIntegration, $this->mailAccountMapper, $this->crypto);
 
 		return $client;
 	}

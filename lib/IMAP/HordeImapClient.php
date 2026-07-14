@@ -11,9 +11,15 @@ namespace OCA\Mail\IMAP;
 
 use Horde_Imap_Client_Exception;
 use Horde_Imap_Client_Exception_NoSupportExtension;
+use Horde_Imap_Client_Password_Xoauth2;
 use Horde_Imap_Client_Socket;
+use OCA\Mail\Account;
+use OCA\Mail\Db\MailAccountMapper;
+use OCA\Mail\Integration\GoogleIntegration;
+use OCA\Mail\Integration\MicrosoftIntegration;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\IMemcache;
+use OCP\Security\ICrypto;
 use function min;
 use function random_int;
 
@@ -28,6 +34,11 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 	private ?IMemcache $rateLimiterCache = null;
 	private ?ITimeFactory $timeFactory = null;
 	private ?string $hash = null;
+	private ?Account $account = null;
+	private ?GoogleIntegration $googleIntegration = null;
+	private ?MicrosoftIntegration $microsoftIntegration = null;
+	private ?MailAccountMapper $mailAccountMapper = null;
+	private ?ICrypto $crypto = null;
 
 	public function __construct(
 		array $params,
@@ -44,6 +55,29 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 		$this->rateLimiterCache = $cache;
 		$this->timeFactory = $timeFactory;
 		$this->hash = $hash;
+	}
+
+	/**
+	 * Wires in what's needed to force a real OAuth token refresh and
+	 * retry a denied login once, transparently, inside _login() itself --
+	 * see _login()'s own comment for why this lives here rather than in
+	 * each individual caller. A client this was never called for (e.g. a
+	 * plain, non-xoauth2 account, or any client predating this feature)
+	 * simply never retries, falling straight through to the existing
+	 * rate-limiter failure handling below, unchanged.
+	 */
+	public function enableAuthRetry(
+		Account $account,
+		GoogleIntegration $googleIntegration,
+		MicrosoftIntegration $microsoftIntegration,
+		MailAccountMapper $mailAccountMapper,
+		ICrypto $crypto,
+	): void {
+		$this->account = $account;
+		$this->googleIntegration = $googleIntegration;
+		$this->microsoftIntegration = $microsoftIntegration;
+		$this->mailAccountMapper = $mailAccountMapper;
+		$this->crypto = $crypto;
 	}
 
 	#[\Override]
@@ -94,8 +128,8 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 	// uniformly to xoauth2 accounts too, though, it conflates that case
 	// with a completely different failure shape: an OAuth login denial
 	// is usually transient (a token mid-refresh, exactly the race
-	// ImapToDbSynchronizer::sync()'s forced-refresh retry exists to
-	// catch) and only rarely sustained (e.g. a temporary provider-side
+	// forceRefreshTokenAndUpdateClient() below exists to catch) and
+	// only rarely sustained (e.g. a temporary provider-side
 	// block) -- and unlike a wrong static password, DOES recover on its
 	// own once whatever's actually wrong clears up. A flat "block for up
 	// to 3 hours regardless" both waited far longer than necessary for a
@@ -166,6 +200,17 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 
 	#[\Override]
 	protected function _login() {
+		return $this->attemptLoginWithRateLimiting(true);
+	}
+
+	/**
+	 * @param bool $allowAuthRetry whether a denied login may still force
+	 *                             a token refresh and retry once -- true for the very first
+	 *                             attempt, false for the recursive retry call itself, so a
+	 *                             rejection that survives the retry can only ever cost ONE
+	 *                             rate-limiter failure, not two.
+	 */
+	private function attemptLoginWithRateLimiting(bool $allowAuthRetry) {
 		if ($this->rateLimiterCache === null) {
 			return $this->imapLogin();
 		}
@@ -193,16 +238,101 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 			$this->rateLimiterCache->remove($blockedUntilKey);
 			return $result;
 		} catch (Horde_Imap_Client_Exception $e) {
-			if ($e->getCode() === Horde_Imap_Client_Exception::LOGIN_AUTHENTICATIONFAILED
-				&& in_array($e->getMessage(), ['Authentication failed.', 'Mail server denied authentication.'], true)) {
-				$failures = ((int)$this->rateLimiterCache->get($failureCountKey)) + 1;
-				$this->rateLimiterCache->set($failureCountKey, $failures, self::FAILURE_STREAK_TTL);
-				$delay = self::computeBackoffSeconds($failures);
-				if ($delay > 0) {
-					$this->rateLimiterCache->set($blockedUntilKey, $this->timeFactory->getTime() + $delay, $delay);
-				}
+			if (!$this->isRetryableAuthFailure($e)) {
+				throw $e;
+			}
+
+			if ($allowAuthRetry && $this->forceRefreshTokenAndUpdateClient()) {
+				// Confirmed live, repeatedly, across several different
+				// IMAP call sites (routine background sync, but also a
+				// plain message-flag/tag write -- see
+				// nextcloud-mail-oauth-integration.md): a Google account
+				// well within its stored token's declared validity
+				// window still occasionally gets "Mail server denied
+				// authentication". We already know right now that the
+				// token we had was rejected; a forced refresh (bypassing
+				// REFRESH_BUFFER_SECONDS entirely) just put a genuinely
+				// new one in place on this same client, so retry exactly
+				// once with it before treating this as a real failure.
+				// Living here, in the one place every IMAP call
+				// ultimately converges through, means every caller gets
+				// this protection automatically -- not just whichever
+				// call site happened to have its own retry wrapper
+				// bolted on. A retry that succeeds is a plain success as
+				// far as the rate limiter above is concerned (it re-enters
+				// the same try block); a retry that also fails falls
+				// through to the failure bookkeeping below exactly once,
+				// not twice, since allowAuthRetry is false this time.
+				return $this->attemptLoginWithRateLimiting(false);
+			}
+
+			$failures = ((int)$this->rateLimiterCache->get($failureCountKey)) + 1;
+			$this->rateLimiterCache->set($failureCountKey, $failures, self::FAILURE_STREAK_TTL);
+			$delay = self::computeBackoffSeconds($failures);
+			if ($delay > 0) {
+				$this->rateLimiterCache->set($blockedUntilKey, $this->timeFactory->getTime() + $delay, $delay);
 			}
 			throw $e;
 		}
+	}
+
+	private function isRetryableAuthFailure(Horde_Imap_Client_Exception $e): bool {
+		// The two messages Horde reports for a rejected login, as
+		// opposed to a connection/network-level failure a token refresh
+		// can't do anything about anyway.
+		return $e->getCode() === Horde_Imap_Client_Exception::LOGIN_AUTHENTICATIONFAILED
+			&& in_array($e->getMessage(), ['Authentication failed.', 'Mail server denied authentication.'], true);
+	}
+
+	/**
+	 * Forces a real OAuth token refresh (bypassing REFRESH_BUFFER_SECONDS
+	 * entirely -- see GoogleIntegration::refresh()'s $force doc comment)
+	 * and, if it actually produced a new token, applies it to this same
+	 * client so the very next login attempt uses it. Persists the
+	 * refreshed token directly via MailAccountMapper rather than
+	 * AccountService: AccountService itself depends on
+	 * IMAPClientFactory (which constructs and wires up every
+	 * HordeImapClient instance, this one included), so taking a direct
+	 * AccountService dependency here would be a real circular
+	 * dependency, not just a diamond -- the mapper is the same
+	 * lower-level persistence AccountService::update() itself calls
+	 * into, just without that layer's additional per-request account
+	 * cache invalidation, which nothing in this retry path needs.
+	 *
+	 * @return bool whether a new token was obtained and applied
+	 */
+	private function forceRefreshTokenAndUpdateClient(): bool {
+		if ($this->account === null) {
+			// enableAuthRetry() was never called for this client -- no
+			// account context to refresh against.
+			return false;
+		}
+		if ($this->googleIntegration->isGoogleOauthAccount($this->account)) {
+			$integration = $this->googleIntegration;
+		} elseif ($this->microsoftIntegration->isMicrosoftOauthAccount($this->account)) {
+			$integration = $this->microsoftIntegration;
+		} else {
+			// Not an OAuth account (e.g. a plain IMAP password that's
+			// wrong, or was just changed) -- no token to refresh.
+			return false;
+		}
+
+		$oldAccessToken = $this->account->getMailAccount()->getOauthAccessToken();
+		$updated = $integration->refresh($this->account, true);
+		$newAccessToken = $updated->getMailAccount()->getOauthAccessToken();
+		if ($newAccessToken === null || $newAccessToken === $oldAccessToken) {
+			// The forced refresh itself didn't produce a new token (the
+			// network call to the provider failed, or the account
+			// genuinely isn't authorized) -- retrying login would just
+			// fail the exact same way again.
+			return false;
+		}
+
+		$this->mailAccountMapper->update($updated->getMailAccount());
+		$this->setParam(
+			'xoauth2_token',
+			new Horde_Imap_Client_Password_Xoauth2($this->account->getEmail(), $this->crypto->decrypt($newAccessToken)),
+		);
+		return true;
 	}
 }

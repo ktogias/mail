@@ -11,15 +11,23 @@ namespace Unit\IMAP;
 
 use ChristophWurst\Nextcloud\Testing\TestCase;
 use Horde_Imap_Client_Exception;
+use OCA\Mail\Account;
+use OCA\Mail\Db\MailAccount;
+use OCA\Mail\Db\MailAccountMapper;
 use OCA\Mail\IMAP\HordeImapClient;
+use OCA\Mail\Integration\GoogleIntegration;
+use OCA\Mail\Integration\MicrosoftIntegration;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\IMemcache;
+use OCP\Security\ICrypto;
 use PHPUnit\Framework\MockObject\MockObject;
 
 /**
  * Testable subclass that stubs out the real IMAP connection. $succeeds
  * controls whether the next imapLogin() call succeeds or throws the same
- * exception a real denied/rejected login would.
+ * exception a real denied/rejected login would; $imapLoginOverride, when
+ * set, takes priority over $succeeds and lets a test vary the outcome
+ * per call (e.g. fail once, then succeed on the retry).
  *
  * Exercises _login() directly via attemptLogin() rather than through the
  * inherited login() -- that goes through Horde_Imap_Client_Base's own
@@ -32,10 +40,20 @@ use PHPUnit\Framework\MockObject\MockObject;
  * could get away with calling login() -- but a SUCCEEDING login does
  * reach it, and crashes on Horde internal state this test deliberately
  * never initializes.
+ *
+ * setParam() is also overridden and merely recorded: the real
+ * Horde_Imap_Client_Base::setParam() would work fine even without a real
+ * constructor (it just writes into $_params, which has a class-level
+ * default), but recording calls directly is a more direct assertion
+ * than reaching into that internal array.
  */
 class TestableHordeImapClient extends HordeImapClient {
 	public bool $succeeds = false;
 	public int $imapLoginCalls = 0;
+	/** @var callable|null */
+	public $imapLoginOverride = null;
+	/** @var list<array{0: string, 1: mixed}> */
+	public array $setParamCalls = [];
 
 	public function __construct() {
 		// Skip Horde constructor — we only test rate limiter logic.
@@ -47,6 +65,9 @@ class TestableHordeImapClient extends HordeImapClient {
 
 	protected function imapLogin() {
 		$this->imapLoginCalls++;
+		if ($this->imapLoginOverride !== null) {
+			return ($this->imapLoginOverride)($this->imapLoginCalls);
+		}
 		if ($this->succeeds) {
 			return 'ok';
 		}
@@ -54,6 +75,11 @@ class TestableHordeImapClient extends HordeImapClient {
 			'Mail server denied authentication.',
 			Horde_Imap_Client_Exception::LOGIN_AUTHENTICATIONFAILED,
 		);
+	}
+
+	#[\Override]
+	public function setParam($key, $val) {
+		$this->setParamCalls[] = [$key, $val];
 	}
 }
 
@@ -287,5 +313,177 @@ class HordeImapClientTest extends TestCase {
 		$other->succeeds = true;
 		$other->attemptLogin();
 		self::assertSame(1, $other->imapLoginCalls);
+	}
+
+	private function googleAccount(): Account {
+		$mailAccount = new MailAccount();
+		$mailAccount->setId(13);
+		$mailAccount->setUserId('user');
+		$mailAccount->setEmail('ktogias@gmail.com');
+		$mailAccount->setInboundHost('imap.gmail.com');
+		$mailAccount->setAuthMethod('xoauth2');
+		$mailAccount->setOauthAccessToken('encrypted-old-access-token');
+		return new Account($mailAccount);
+	}
+
+	/**
+	 * Moved here from ImapToDbSynchronizerTest (formerly
+	 * testSyncForcesATokenRefreshAndRetriesLoginOnceAfterAnAuthRejection
+	 * and its three siblings): the forced-refresh-and-retry-once
+	 * protection now lives in _login() itself, not in a wrapper around
+	 * one specific caller's own login() call -- see
+	 * HordeImapClient::enableAuthRetry()'s own comment for why. Confirmed
+	 * live for a Google account well within its stored token's declared
+	 * validity window (so not simply caught by REFRESH_BUFFER_SECONDS):
+	 * "Mail server denied authentication" still happens occasionally,
+	 * across more than one IMAP call site.
+	 */
+	public function testLoginForcesATokenRefreshAndRetriesOnceAfterAnAuthRejection(): void {
+		$account = $this->googleAccount();
+		$googleIntegration = $this->createMock(GoogleIntegration::class);
+		$microsoftIntegration = $this->createMock(MicrosoftIntegration::class);
+		$mailAccountMapper = $this->createMock(MailAccountMapper::class);
+		$crypto = $this->createMock(ICrypto::class);
+		$this->client->enableAuthRetry($account, $googleIntegration, $microsoftIntegration, $mailAccountMapper, $crypto);
+
+		$this->client->imapLoginOverride = function (int $callNumber) {
+			if ($callNumber === 1) {
+				throw new Horde_Imap_Client_Exception('Mail server denied authentication.', Horde_Imap_Client_Exception::LOGIN_AUTHENTICATIONFAILED);
+			}
+			return 'ok';
+		};
+
+		$googleIntegration->method('isGoogleOauthAccount')->with($account)->willReturn(true);
+		$refreshedMailAccount = new MailAccount();
+		$refreshedMailAccount->setId(13);
+		$refreshedMailAccount->setEmail('ktogias@gmail.com');
+		$refreshedMailAccount->setOauthAccessToken('encrypted-new-access-token');
+		$googleIntegration->expects(self::once())
+			->method('refresh')
+			->with($account, true)
+			->willReturn(new Account($refreshedMailAccount));
+		$mailAccountMapper->expects(self::once())
+			->method('update')
+			->with($refreshedMailAccount);
+		$crypto->method('decrypt')->with('encrypted-new-access-token')->willReturn('plaintext-new-access-token');
+
+		$this->client->attemptLogin();
+
+		self::assertSame(2, $this->client->imapLoginCalls);
+		self::assertCount(1, $this->client->setParamCalls);
+		self::assertSame('xoauth2_token', $this->client->setParamCalls[0][0]);
+		self::assertInstanceOf(\Horde_Imap_Client_Password_Xoauth2::class, $this->client->setParamCalls[0][1]);
+		// A retry that succeeds is a plain success as far as the rate
+		// limiter is concerned -- the original rejection must not cost
+		// this now-healthy account any part of a backoff window.
+		self::assertNull($this->cache->get('testhash_failures'));
+		self::assertNull($this->cache->get('testhash_blocked_until'));
+	}
+
+	public function testLoginGivesUpAfterASecondAuthRejectionEvenAfterARefreshButOnlyCountsOneFailure(): void {
+		$account = $this->googleAccount();
+		$googleIntegration = $this->createMock(GoogleIntegration::class);
+		$microsoftIntegration = $this->createMock(MicrosoftIntegration::class);
+		$mailAccountMapper = $this->createMock(MailAccountMapper::class);
+		$crypto = $this->createMock(ICrypto::class);
+		$this->client->enableAuthRetry($account, $googleIntegration, $microsoftIntegration, $mailAccountMapper, $crypto);
+		$this->client->succeeds = false;
+
+		$googleIntegration->method('isGoogleOauthAccount')->with($account)->willReturn(true);
+		$refreshedMailAccount = new MailAccount();
+		$refreshedMailAccount->setId(13);
+		$refreshedMailAccount->setEmail('ktogias@gmail.com');
+		$refreshedMailAccount->setOauthAccessToken('encrypted-new-access-token');
+		$googleIntegration->method('refresh')->willReturn(new Account($refreshedMailAccount));
+		$crypto->method('decrypt')->willReturn('plaintext-new-access-token');
+
+		try {
+			$this->client->attemptLogin();
+			self::fail('expected the second, post-retry rejection to throw');
+		} catch (Horde_Imap_Client_Exception $e) {
+			self::assertSame('Mail server denied authentication.', $e->getMessage());
+		}
+
+		self::assertSame(2, $this->client->imapLoginCalls);
+		// Exactly ONE failure recorded, not two -- the retry happening
+		// inside _login() itself, not as two independent outer calls
+		// each separately triggering the rate limiter, is what makes
+		// this correct (the previous, wrapper-based design would have
+		// recorded two failures for this exact sequence).
+		self::assertSame(1, $this->cache->get('testhash_failures'));
+	}
+
+	public function testLoginDoesNotRetryWhenTheForcedRefreshProducesNoNewToken(): void {
+		$account = $this->googleAccount();
+		$googleIntegration = $this->createMock(GoogleIntegration::class);
+		$microsoftIntegration = $this->createMock(MicrosoftIntegration::class);
+		$mailAccountMapper = $this->createMock(MailAccountMapper::class);
+		$crypto = $this->createMock(ICrypto::class);
+		$this->client->enableAuthRetry($account, $googleIntegration, $microsoftIntegration, $mailAccountMapper, $crypto);
+		$this->client->succeeds = false;
+
+		$googleIntegration->method('isGoogleOauthAccount')->with($account)->willReturn(true);
+		// The forced refresh() call itself failed (e.g. Google's token
+		// endpoint was unreachable) -- the account comes back unchanged,
+		// still holding the exact same (already known-bad) access token.
+		$googleIntegration->method('refresh')->willReturn($account);
+		$mailAccountMapper->expects(self::never())->method('update');
+
+		try {
+			$this->client->attemptLogin();
+			self::fail('expected the rejection to throw without a retry');
+		} catch (Horde_Imap_Client_Exception $e) {
+			self::assertSame('Mail server denied authentication.', $e->getMessage());
+		}
+
+		self::assertSame(1, $this->client->imapLoginCalls, 'no retry should have been attempted at all');
+		self::assertCount(0, $this->client->setParamCalls);
+	}
+
+	public function testLoginDoesNotRetryForANonOauthAccount(): void {
+		$mailAccount = new MailAccount();
+		$mailAccount->setId(1);
+		$mailAccount->setUserId('user');
+		$mailAccount->setInboundHost('imap.example.com');
+		$mailAccount->setAuthMethod('password');
+		$account = new Account($mailAccount);
+		$googleIntegration = $this->createMock(GoogleIntegration::class);
+		$microsoftIntegration = $this->createMock(MicrosoftIntegration::class);
+		$mailAccountMapper = $this->createMock(MailAccountMapper::class);
+		$crypto = $this->createMock(ICrypto::class);
+		$this->client->enableAuthRetry($account, $googleIntegration, $microsoftIntegration, $mailAccountMapper, $crypto);
+		$this->client->succeeds = false;
+
+		$googleIntegration->method('isGoogleOauthAccount')->willReturn(false);
+		$microsoftIntegration->method('isMicrosoftOauthAccount')->willReturn(false);
+		$googleIntegration->expects(self::never())->method('refresh');
+		$microsoftIntegration->expects(self::never())->method('refresh');
+
+		try {
+			$this->client->attemptLogin();
+			self::fail('expected the rejection to throw without a retry');
+		} catch (Horde_Imap_Client_Exception $e) {
+			self::assertSame('Mail server denied authentication.', $e->getMessage());
+		}
+
+		self::assertSame(1, $this->client->imapLoginCalls);
+	}
+
+	public function testLoginNeverRetriesWithoutEnableAuthRetryHavingBeenCalled(): void {
+		// $this->client (from setUp()) never had enableAuthRetry() called
+		// on it -- exactly a plain, non-xoauth2 password account, or any
+		// client predating this feature. Must behave exactly as before:
+		// a single failed attempt, no retry, normal rate-limiter
+		// bookkeeping.
+		$this->client->succeeds = false;
+
+		try {
+			$this->client->attemptLogin();
+			self::fail('expected the rejection to throw without a retry');
+		} catch (Horde_Imap_Client_Exception $e) {
+			self::assertSame('Mail server denied authentication.', $e->getMessage());
+		}
+
+		self::assertSame(1, $this->client->imapLoginCalls);
 	}
 }

@@ -12,7 +12,6 @@ namespace OCA\Mail\Tests\Unit\Service\Sync;
 use ChristophWurst\Nextcloud\Testing\TestCase;
 use Horde_Imap_Client;
 use Horde_Imap_Client_Data_Capability_Imap;
-use Horde_Imap_Client_Exception;
 use Horde_Imap_Client_Socket;
 use OCA\Mail\Account;
 use OCA\Mail\Cache\HordeSyncTokenParser;
@@ -28,16 +27,12 @@ use OCA\Mail\Exception\MailboxLockedException;
 use OCA\Mail\IMAP\IMAPClientFactory;
 use OCA\Mail\IMAP\MessageMapper as ImapMessageMapper;
 use OCA\Mail\IMAP\Sync\Synchronizer;
-use OCA\Mail\Integration\GoogleIntegration;
-use OCA\Mail\Integration\MicrosoftIntegration;
-use OCA\Mail\Service\AccountService;
 use OCA\Mail\Service\Classification\NewMessagesClassifier;
 use OCA\Mail\Service\Sync\ImapToDbSynchronizer;
 use OCA\Mail\Service\Sync\SyncFastPathStats;
 use OCA\Mail\Support\PerformanceLogger;
 use OCA\Mail\Support\PerformanceLoggerTask;
 use OCP\EventDispatcher\IEventDispatcher;
-use OCP\Security\ICrypto;
 use PHPUnit\Framework\MockObject\MockObject;
 use Psr\Log\LoggerInterface;
 
@@ -49,10 +44,6 @@ class ImapToDbSynchronizerTest extends TestCase {
 	private IEventDispatcher&MockObject $dispatcher;
 	private PerformanceLogger&MockObject $performanceLogger;
 	private SyncFastPathStats&MockObject $fastPathStats;
-	private GoogleIntegration&MockObject $googleIntegration;
-	private MicrosoftIntegration&MockObject $microsoftIntegration;
-	private AccountService&MockObject $accountService;
-	private ICrypto&MockObject $crypto;
 	private ImapToDbSynchronizer $synchronizer;
 
 	protected function setUp(): void {
@@ -66,10 +57,6 @@ class ImapToDbSynchronizerTest extends TestCase {
 		$this->performanceLogger->method('startWithLogger')
 			->willReturn($this->createStub(PerformanceLoggerTask::class));
 		$this->fastPathStats = $this->createMock(SyncFastPathStats::class);
-		$this->googleIntegration = $this->createMock(GoogleIntegration::class);
-		$this->microsoftIntegration = $this->createMock(MicrosoftIntegration::class);
-		$this->accountService = $this->createMock(AccountService::class);
-		$this->crypto = $this->createMock(ICrypto::class);
 		$this->synchronizer = new ImapToDbSynchronizer(
 			$this->dbMapper,
 			$this->clientFactory,
@@ -85,10 +72,6 @@ class ImapToDbSynchronizerTest extends TestCase {
 			$this->createStub(NewMessagesClassifier::class),
 			new HordeSyncTokenParser(),
 			$this->fastPathStats,
-			$this->googleIntegration,
-			$this->microsoftIntegration,
-			$this->accountService,
-			$this->crypto,
 		);
 	}
 
@@ -132,177 +115,6 @@ class ImapToDbSynchronizerTest extends TestCase {
 		$this->synchronizer->sync(
 			$account,
 			$initialClient,
-			$mailbox,
-			$this->createStub(LoggerInterface::class),
-		);
-	}
-
-	private function googleAccount(): Account {
-		$mailAccount = new MailAccount();
-		$mailAccount->setId(13);
-		$mailAccount->setUserId('user');
-		$mailAccount->setEmail('ktogias@gmail.com');
-		$mailAccount->setInboundHost('imap.gmail.com');
-		$mailAccount->setAuthMethod('xoauth2');
-		$mailAccount->setOauthAccessToken('encrypted-old-access-token');
-		return new Account($mailAccount);
-	}
-
-	private function initialClientForRetryTests(): Horde_Imap_Client_Socket&MockObject {
-		$capability = $this->createMock(Horde_Imap_Client_Data_Capability_Imap::class);
-		$capability->method('isEnabled')->with('QRESYNC')->willReturn(false);
-		$client = $this->createMock(Horde_Imap_Client_Socket::class);
-		$client->method('__get')->with('capability')->willReturn($capability);
-		$client->method('getSyncToken')->willReturn('dG9rZW5XaXRoSA==');
-		return $client;
-	}
-
-	/**
-	 * Confirmed live for a Google account well within its stored token's
-	 * declared validity window (so not simply a case REFRESH_BUFFER_SECONDS
-	 * should have caught): "Mail server denied authentication" still
-	 * happens occasionally. sync() must force a real token refresh and
-	 * retry login() once before giving up.
-	 */
-	public function testSyncForcesATokenRefreshAndRetriesLoginOnceAfterAnAuthRejection(): void {
-		$account = $this->googleAccount();
-		$mailbox = new Mailbox();
-		$mailbox->setId(149);
-		$mailbox->setName('INBOX');
-		$mailbox->setAccountId(13);
-		$mailbox->setSelectable(true);
-
-		$client = $this->initialClientForRetryTests();
-		$loginAttempts = 0;
-		$client->expects($this->exactly(2))
-			->method('login')
-			->willReturnCallback(function () use (&$loginAttempts) {
-				$loginAttempts++;
-				if ($loginAttempts === 1) {
-					throw new Horde_Imap_Client_Exception('Mail server denied authentication.', Horde_Imap_Client_Exception::LOGIN_AUTHENTICATIONFAILED);
-				}
-				return null;
-			});
-
-		$this->googleIntegration->method('isGoogleOauthAccount')->with($account)->willReturn(true);
-		$refreshedMailAccount = new MailAccount();
-		$refreshedMailAccount->setId(13);
-		$refreshedMailAccount->setEmail('ktogias@gmail.com');
-		$refreshedMailAccount->setOauthAccessToken('encrypted-new-access-token');
-		$this->googleIntegration->expects($this->once())
-			->method('refresh')
-			->with($account, true)
-			->willReturn(new Account($refreshedMailAccount));
-		$this->accountService->expects($this->once())
-			->method('update')
-			->with($refreshedMailAccount);
-		$this->crypto->method('decrypt')->with('encrypted-new-access-token')->willReturn('plaintext-new-access-token');
-		$client->expects($this->once())
-			->method('setParam')
-			->with('xoauth2_token', $this->isInstanceOf(\Horde_Imap_Client_Password_Xoauth2::class));
-
-		$this->dbMapper->method('findHighestUid')->willReturn(null);
-		$this->imapMapper->method('findAll')->willReturn([
-			'messages' => [],
-			'all' => true,
-			'total' => 0,
-		]);
-
-		$this->synchronizer->sync(
-			$account,
-			$client,
-			$mailbox,
-			$this->createStub(LoggerInterface::class),
-		);
-	}
-
-	public function testSyncGivesUpAfterASecondAuthRejectionEvenAfterARefresh(): void {
-		$account = $this->googleAccount();
-		$mailbox = new Mailbox();
-		$mailbox->setId(149);
-		$mailbox->setName('INBOX');
-		$mailbox->setAccountId(13);
-		$mailbox->setSelectable(true);
-
-		$client = $this->initialClientForRetryTests();
-		$client->expects($this->exactly(2))
-			->method('login')
-			->willThrowException(new Horde_Imap_Client_Exception('Mail server denied authentication.', Horde_Imap_Client_Exception::LOGIN_AUTHENTICATIONFAILED));
-
-		$this->googleIntegration->method('isGoogleOauthAccount')->with($account)->willReturn(true);
-		$refreshedMailAccount = new MailAccount();
-		$refreshedMailAccount->setId(13);
-		$refreshedMailAccount->setEmail('ktogias@gmail.com');
-		$refreshedMailAccount->setOauthAccessToken('encrypted-new-access-token');
-		$this->googleIntegration->method('refresh')->willReturn(new Account($refreshedMailAccount));
-		$this->crypto->method('decrypt')->willReturn('plaintext-new-access-token');
-
-		$this->expectException(Horde_Imap_Client_Exception::class);
-		$this->synchronizer->sync(
-			$account,
-			$client,
-			$mailbox,
-			$this->createStub(LoggerInterface::class),
-		);
-	}
-
-	public function testSyncDoesNotRetryWhenTheForcedRefreshProducesNoNewToken(): void {
-		$account = $this->googleAccount();
-		$mailbox = new Mailbox();
-		$mailbox->setId(149);
-		$mailbox->setName('INBOX');
-		$mailbox->setAccountId(13);
-		$mailbox->setSelectable(true);
-
-		$client = $this->initialClientForRetryTests();
-		$client->expects($this->once())
-			->method('login')
-			->willThrowException(new Horde_Imap_Client_Exception('Mail server denied authentication.', Horde_Imap_Client_Exception::LOGIN_AUTHENTICATIONFAILED));
-		$client->expects($this->never())->method('setParam');
-
-		$this->googleIntegration->method('isGoogleOauthAccount')->with($account)->willReturn(true);
-		// The forced refresh() call itself failed (e.g. Google's token
-		// endpoint was unreachable) -- the account comes back unchanged,
-		// still holding the exact same (already known-bad) access token.
-		$this->googleIntegration->method('refresh')->willReturn($account);
-		$this->accountService->expects($this->never())->method('update');
-
-		$this->expectException(Horde_Imap_Client_Exception::class);
-		$this->synchronizer->sync(
-			$account,
-			$client,
-			$mailbox,
-			$this->createStub(LoggerInterface::class),
-		);
-	}
-
-	public function testSyncDoesNotRetryForANonOauthAccount(): void {
-		$mailAccount = new MailAccount();
-		$mailAccount->setId(1);
-		$mailAccount->setUserId('user');
-		$mailAccount->setInboundHost('imap.example.com');
-		$mailAccount->setAuthMethod('password');
-		$account = new Account($mailAccount);
-		$mailbox = new Mailbox();
-		$mailbox->setId(100);
-		$mailbox->setName('INBOX');
-		$mailbox->setAccountId(1);
-		$mailbox->setSelectable(true);
-
-		$client = $this->initialClientForRetryTests();
-		$client->expects($this->once())
-			->method('login')
-			->willThrowException(new Horde_Imap_Client_Exception('Mail server denied authentication.', Horde_Imap_Client_Exception::LOGIN_AUTHENTICATIONFAILED));
-
-		$this->googleIntegration->method('isGoogleOauthAccount')->willReturn(false);
-		$this->microsoftIntegration->method('isMicrosoftOauthAccount')->willReturn(false);
-		$this->googleIntegration->expects($this->never())->method('refresh');
-		$this->microsoftIntegration->expects($this->never())->method('refresh');
-
-		$this->expectException(Horde_Imap_Client_Exception::class);
-		$this->synchronizer->sync(
-			$account,
-			$client,
 			$mailbox,
 			$this->createStub(LoggerInterface::class),
 		);
@@ -359,10 +171,6 @@ class ImapToDbSynchronizerTest extends TestCase {
 				$this->createStub(NewMessagesClassifier::class),
 				new HordeSyncTokenParser(),
 				$this->fastPathStats,
-				$this->googleIntegration,
-				$this->microsoftIntegration,
-				$this->accountService,
-				$this->crypto,
 			])
 			->onlyMethods(['sync'])
 			->getMock();
@@ -438,10 +246,6 @@ class ImapToDbSynchronizerTest extends TestCase {
 				$this->createStub(NewMessagesClassifier::class),
 				new HordeSyncTokenParser(),
 				$this->fastPathStats,
-				$this->googleIntegration,
-				$this->microsoftIntegration,
-				$this->accountService,
-				$this->crypto,
 			])
 			->onlyMethods(['sync'])
 			->getMock();
@@ -481,10 +285,6 @@ class ImapToDbSynchronizerTest extends TestCase {
 			$this->createStub(NewMessagesClassifier::class),
 			new HordeSyncTokenParser(),
 			$this->fastPathStats,
-			$this->googleIntegration,
-			$this->microsoftIntegration,
-			$this->accountService,
-			$this->crypto,
 		);
 	}
 

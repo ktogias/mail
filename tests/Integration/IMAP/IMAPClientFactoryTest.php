@@ -17,8 +17,11 @@ use OC\Memcache\Redis;
 use OCA\Mail\Account;
 use OCA\Mail\Cache\HordeCacheFactory;
 use OCA\Mail\Db\MailAccount;
+use OCA\Mail\Db\MailAccountMapper;
 use OCA\Mail\IMAP\HordeImapClient;
 use OCA\Mail\IMAP\IMAPClientFactory;
+use OCA\Mail\Integration\GoogleIntegration;
+use OCA\Mail\Integration\MicrosoftIntegration;
 use OCA\Mail\Tests\Integration\Framework\Caching;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\EventDispatcher\IEventDispatcher;
@@ -44,6 +47,9 @@ class IMAPClientFactoryTest extends TestCase {
 	private IEventDispatcher|MockObject $eventDispatcher;
 	private ITimeFactory|MockObject $timeFactory;
 	private HordeCacheFactory|MockObject $hordeCacheFactory;
+	private GoogleIntegration|MockObject $googleIntegration;
+	private MicrosoftIntegration|MockObject $microsoftIntegration;
+	private MailAccountMapper|MockObject $mailAccountMapper;
 
 	protected function setUp(): void {
 		parent::setUp();
@@ -54,6 +60,9 @@ class IMAPClientFactoryTest extends TestCase {
 		$this->eventDispatcher = $this->createMock(IEventDispatcher::class);
 		$this->timeFactory = $this->createMock(ITimeFactory::class);
 		$this->hordeCacheFactory = $this->createMock(HordeCacheFactory::class);
+		$this->googleIntegration = $this->createMock(GoogleIntegration::class);
+		$this->microsoftIntegration = $this->createMock(MicrosoftIntegration::class);
+		$this->mailAccountMapper = $this->createMock(MailAccountMapper::class);
 
 		$this->factory = new IMAPClientFactory(
 			$this->crypto,
@@ -62,6 +71,9 @@ class IMAPClientFactoryTest extends TestCase {
 			$this->eventDispatcher,
 			$this->timeFactory,
 			$this->hordeCacheFactory,
+			$this->googleIntegration,
+			$this->microsoftIntegration,
+			$this->mailAccountMapper,
 		);
 	}
 
