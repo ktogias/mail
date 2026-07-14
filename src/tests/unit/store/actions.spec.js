@@ -4487,6 +4487,83 @@ describe('Vuex store actions', () => {
 
 			expect(envelope.flags.hasUnseenInThread).toBe(true)
 		})
+
+		// Reported live: opening a thread correctly marked its oldest
+		// unread reply as read on the server (moving on to the
+		// next-oldest unread reply on the next open, eventually reaching
+		// a fully-read thread), but every list kept showing the thread as
+		// unread throughout -- the corrected hasUnseenInThread value was
+		// only ever applied to whichever reply had just been toggled,
+		// never to the thread's newest message, which is what a list
+		// actually renders as that thread's representative row.
+		it('propagates the server-corrected hasUnseenInThread to every other locally-known message in the same thread', async () => {
+			const olderReply = {
+				databaseId: 100,
+				accountId: 13,
+				mailboxId: 11,
+				threadRootId: 'thread-abc',
+				dateInt: 1,
+				flags: { seen: false, hasUnseenInThread: true },
+			}
+			const representative = {
+				databaseId: 102,
+				accountId: 13,
+				mailboxId: 11,
+				threadRootId: 'thread-abc',
+				dateInt: 3,
+				flags: { seen: true, hasUnseenInThread: true },
+			}
+			store.envelopes[olderReply.databaseId] = olderReply
+			store.envelopes[representative.databaseId] = representative
+			// A message from a completely different thread must be left
+			// alone.
+			const unrelated = {
+				databaseId: 200,
+				accountId: 13,
+				mailboxId: 11,
+				threadRootId: 'thread-xyz',
+				dateInt: 1,
+				flags: { seen: false, hasUnseenInThread: true },
+			}
+			store.envelopes[unrelated.databaseId] = unrelated
+
+			// The thread has no other unread message left once this one is
+			// marked read.
+			MessageService.setEnvelopeFlags.mockResolvedValue({ hasUnseenInThread: false })
+
+			await store.toggleEnvelopeSeen({ envelope: olderReply, seen: true })
+
+			expect(olderReply.flags.hasUnseenInThread).toBe(false)
+			expect(representative.flags.hasUnseenInThread).toBe(false)
+			expect(unrelated.flags.hasUnseenInThread).toBe(true)
+		})
+
+		it('marking a message unread immediately marks every other message in the same thread unread too, optimistically', () => {
+			const olderReply = {
+				databaseId: 100,
+				accountId: 13,
+				mailboxId: 11,
+				threadRootId: 'thread-abc',
+				dateInt: 1,
+				flags: { seen: true, hasUnseenInThread: false },
+			}
+			const representative = {
+				databaseId: 102,
+				accountId: 13,
+				mailboxId: 11,
+				threadRootId: 'thread-abc',
+				dateInt: 3,
+				flags: { seen: true, hasUnseenInThread: false },
+			}
+			store.envelopes[olderReply.databaseId] = olderReply
+			store.envelopes[representative.databaseId] = representative
+			MessageService.setEnvelopeFlags.mockReturnValue(new Promise(() => {})) // never resolves in this test
+
+			store.toggleEnvelopeSeen({ envelope: olderReply, seen: false })
+
+			expect(olderReply.flags.hasUnseenInThread).toBe(true)
+			expect(representative.flags.hasUnseenInThread).toBe(true)
+		})
 	})
 
 	describe('startComposerSession reply-to resolution', () => {

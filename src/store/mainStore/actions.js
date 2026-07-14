@@ -2272,11 +2272,7 @@ export default function mainStoreActions() {
 					// Marking unread definitely means this thread has an
 					// unseen message now (this one) -- no need to wait for
 					// the server to know that much.
-					this.flagEnvelopeMutation({
-						envelope,
-						flag: 'hasUnseenInThread',
-						value: true,
-					})
+					this.setHasUnseenInThreadForThreadMutation(envelope, true)
 				}
 
 				try {
@@ -2289,11 +2285,7 @@ export default function mainStoreActions() {
 					// back, instead of leaving it stale until the next full
 					// listing fetch.
 					if (response?.hasUnseenInThread !== undefined) {
-						this.flagEnvelopeMutation({
-							envelope,
-							flag: 'hasUnseenInThread',
-							value: response.hasUnseenInThread,
-						})
+						this.setHasUnseenInThreadForThreadMutation(envelope, response.hasUnseenInThread)
 					}
 				} catch (error) {
 					logger.error('could not toggle message seen state', { error })
@@ -3837,6 +3829,36 @@ export default function mainStoreActions() {
 				recentFlagChanges.set(envelope.databaseId, perEnvelope)
 			}
 			perEnvelope.set(flag, { value, expiresAt: Date.now() + RECENT_FLAG_CHANGE_GRACE_MS })
+		},
+		/**
+		 * hasUnseenInThread is a thread-WIDE property (see Envelope.vue's
+		 * own isThreadUnread computed and Message::jsonSerialize()
+		 * server-side, which is where this value actually comes from) --
+		 * not a per-message one. Setting it only on the specific envelope
+		 * that was just toggled leaves every OTHER locally-known envelope
+		 * sharing the same thread with a stale value -- most importantly
+		 * whichever one a given list actually renders as that thread's
+		 * representative row, which is very often NOT the one just
+		 * toggled (e.g. Thread.vue auto-expanding and marking an older,
+		 * still-unread reply, while every list shows the thread's newest
+		 * message). Confirmed live: opening a thread correctly marked its
+		 * oldest unread reply as read on the server (and correctly moved
+		 * on to the next-oldest unread reply on the following open,
+		 * eventually reaching a fully-read thread), but the thread kept
+		 * showing as unread in every list throughout, because the
+		 * corrected hasUnseenInThread value from the server was only ever
+		 * applied to whichever reply had just been toggled -- never to
+		 * the newest sibling every list actually reads from.
+		 */
+		setHasUnseenInThreadForThreadMutation(envelope, value) {
+			if (!envelope.threadRootId) {
+				this.flagEnvelopeMutation({ envelope, flag: 'hasUnseenInThread', value })
+				return
+			}
+			this.getEnvelopesByThreadRootId(envelope.accountId, envelope.threadRootId)
+				.forEach((sibling) => {
+					this.flagEnvelopeMutation({ envelope: sibling, flag: 'hasUnseenInThread', value })
+				})
 		},
 		addTagMutation({ tag }) {
 			Vue.set(this.tags, tag.id, tag)
