@@ -252,6 +252,23 @@ const pendingMessageFetches = new Map()
 // first's in-flight request instead of firing its own.
 const pendingThreadFetches = new Map()
 
+// Same reasoning, same fix, for syncEnvelopes()'s virtual-mailbox
+// (unified/priority-inbox) fan-out: Priority Inbox's three section
+// components (Important/Favorites/Other) each independently call
+// sync() on mount, and maybeStartPriorityInboxRefresh()'s own
+// background loop can ask for the exact same (mailboxId, query) around
+// the same moment too. Without dedup, two independent callers for the
+// same virtual mailbox + query each kick off their own full fan-out --
+// a concurrent sync of every constituent real mailbox, repeated.
+// Confirmed live: three near-identical waves of the same 5 real
+// mailboxes firing within under a second of a hard reload (see
+// nextcloud-mail-oauth-integration.md). Keyed on mailboxId+query (not
+// just mailboxId) since Important/Favorites/Other are legitimately
+// different requests that must NOT collapse into each other -- only
+// two callers asking for the literal same bucket should share one
+// in-flight request.
+const pendingUnifiedSyncs = new Map()
+
 // Upper bound for a single message/thread fetch -- see fetchMessage()
 // for the reasoning. Well above the slowest legitimate fetch observed
 // (~25-60s cache-miss body via a slow provider), well below forever.
@@ -1537,26 +1554,52 @@ export default function mainStoreActions() {
 			malformedResponseRetried = false,
 		}) {
 			query = stripMalformedUndefinedToken(query)
-			return handleHttpAuthErrors(async () => {
+
+			// Dedup only ever applies to the virtual-mailbox (unified/
+			// priority-inbox) fan-out entry point below, never to a real
+			// mailbox's own sync -- the retry chains further down
+			// (SyncIncompleteError/MalformedSyncResponseError/
+			// MailboxLockedError) recursively call syncEnvelopes() on
+			// THEMSELVES for a real mailboxId, and deduping those too
+			// would have a retry await its own still-pending promise.
+			// See pendingUnifiedSyncs above for why this needs to exist
+			// at all.
+			const mailboxForFanOut = this.getMailbox(mailboxId)
+			const dedupKey = (mailboxForFanOut?.isUnified || mailboxForFanOut?.isPriorityInbox)
+				? `${mailboxId}:${query ?? ''}`
+				: null
+			if (dedupKey !== null && pendingUnifiedSyncs.has(dedupKey)) {
+				return pendingUnifiedSyncs.get(dedupKey)
+			}
+
+			const promise = handleHttpAuthErrors(async () => {
 				logger.debug(`starting mailbox sync of ${mailboxId} (${query})`)
 
-				const mailbox = this.getMailbox(mailboxId)
+				const mailbox = mailboxForFanOut
 
 				// Skip superfluous requests if using passwordless authentication. They will fail anyway.
 				const passwordIsUnavailable = this.getPreference('password-is-unavailable', false)
 				const isDisabled = (account) => passwordIsUnavailable && !!account.provisioningId
 
 				if (mailbox.isUnified) {
-					return Promise.all(this.getAccounts
+					// Bounded like fetchEnvelopes()'s own unified/priority
+					// fan-out (ENVELOPE_FETCH_CONCURRENCY, and via that the
+					// shared cross-mechanism limiter -- see
+					// SHARED_NETWORK_CONCURRENCY): this used to be a bare
+					// Promise.all with no concurrency limit at all, a
+					// completely separate, uncapped fan-out path that the
+					// shared-limiter fix never reached because it only
+					// wraps mapWithConcurrencyLimit() callers. Confirmed
+					// live: every constituent mailbox's sync fired within
+					// milliseconds of every other one.
+					const targetMailboxes = this.getAccounts
 						.filter((account) => !account.isUnified && !isDisabled(account))
-						.map((account) => Promise.all(this
-							.getMailboxes(account.id)
-							.filter((mb) => mb.specialRole === mailbox.specialRole)
-							.map((mailbox) => this.syncEnvelopes({
-								mailboxId: mailbox.databaseId,
-								query,
-								init,
-							})))))
+						.flatMap((account) => this.getMailboxes(account.id).filter((mb) => mb.specialRole === mailbox.specialRole))
+					return mapWithConcurrencyLimit(targetMailboxes, ENVELOPE_FETCH_CONCURRENCY, (mb) => this.syncEnvelopes({
+						mailboxId: mb.databaseId,
+						query,
+						init,
+					}))
 				} else if (mailbox.isPriorityInbox) {
 					// "priority" is a virtual id with no real mailbox behind
 					// it and must never reach the actual sync endpoint. With
@@ -1572,17 +1615,17 @@ export default function mainStoreActions() {
 					// time the priority inbox's own refresh cycle ran with a
 					// favorites-split filter active.
 					const queriesToFanOut = query === undefined ? getPrioritySearchQueries() : [query]
-					return Promise.all(queriesToFanOut.map((query) => {
-						return Promise.all(this.getAccounts
+					return Promise.all(queriesToFanOut.map((oneQuery) => {
+						// Same bounded-fan-out reasoning as the isUnified
+						// branch above.
+						const targetMailboxes = this.getAccounts
 							.filter((account) => !account.isUnified && !isDisabled(account))
-							.map((account) => Promise.all(this
-								.getMailboxes(account.id)
-								.filter((mb) => mb.specialRole === mailbox.specialRole)
-								.map((mailbox) => this.syncEnvelopes({
-									mailboxId: mailbox.databaseId,
-									query,
-									init,
-								})))))
+							.flatMap((account) => this.getMailboxes(account.id).filter((mb) => mb.specialRole === mailbox.specialRole))
+						return mapWithConcurrencyLimit(targetMailboxes, ENVELOPE_FETCH_CONCURRENCY, (mb) => this.syncEnvelopes({
+							mailboxId: mb.databaseId,
+							query: oneQuery,
+							init,
+						}))
 					}))
 				}
 
@@ -1716,6 +1759,13 @@ export default function mainStoreActions() {
 						})
 					})
 			})
+
+			if (dedupKey !== null) {
+				const tracked = promise.finally(() => pendingUnifiedSyncs.delete(dedupKey))
+				pendingUnifiedSyncs.set(dedupKey, tracked)
+				return tracked
+			}
+			return promise
 		},
 		/**
 		 * @param {object} options

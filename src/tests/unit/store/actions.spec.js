@@ -2603,6 +2603,144 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	describe('syncEnvelopes: virtual-mailbox fan-out is bounded and deduped', () => {
+		// Confirmed live: the isUnified/isPriorityInbox fan-out below used
+		// to be a bare Promise.all with no concurrency limit at all -- a
+		// completely separate path from fetchEnvelopes()'s own bounded
+		// fan-out, so the shared cross-mechanism limiter (see
+		// mapWithConcurrencyLimit's own tests) never reached it. On top of
+		// that, Priority Inbox's three section components each
+		// independently call sync() on mount, so the exact same
+		// (mailboxId, query) could be asked for multiple times within
+		// milliseconds -- each one kicking off its own full, redundant
+		// fan-out. Both fixed together: bounded via
+		// mapWithConcurrencyLimit(), and deduped via pendingUnifiedSyncs.
+		let accounts
+
+		beforeEach(() => {
+			accounts = [11, 12, 13, 14, 15].map((id) => ({ id }))
+			accounts.forEach((account, i) => {
+				store.addAccountMutation(account)
+				store.addMailboxMutation({
+					account,
+					mailbox: { name: 'INBOX', databaseId: 100 + i, specialRole: 'inbox' },
+				})
+			})
+		})
+
+		it('caps the priority-inbox fan-out so constituent syncs never all run at once', async () => {
+			let concurrent = 0
+			let maxConcurrent = 0
+			const pendingResolvers = []
+			MessageService.syncEnvelopes.mockImplementation(() => new Promise((resolve) => {
+				concurrent++
+				maxConcurrent = Math.max(maxConcurrent, concurrent)
+				pendingResolvers.push(() => {
+					concurrent--
+					resolve({ newMessages: [], changedMessages: [], vanishedMessages: [], stats: { unread: 0 } })
+				})
+			}))
+
+			const syncPromise = store.syncEnvelopes({ mailboxId: 'priority', query: 'not:starred' })
+
+			await vi.waitFor(() => {
+				if (pendingResolvers.length < 3) {
+					throw new Error(`only ${pendingResolvers.length} constituent syncs have started so far`)
+				}
+			})
+
+			// ENVELOPE_FETCH_CONCURRENCY: 3 of the 5 real mailboxes may be
+			// mid-sync at once, not all 5 like the old bare Promise.all.
+			expect(pendingResolvers.length).toBe(3)
+			expect(maxConcurrent).toBe(3)
+
+			while (pendingResolvers.length > 0) {
+				pendingResolvers.splice(0).forEach((resolve) => resolve())
+				await new Promise((resolve) => setTimeout(resolve, 0))
+			}
+			await syncPromise
+
+			expect(maxConcurrent).toBe(3)
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(5)
+		})
+
+		it('shares one in-flight fan-out between two concurrent callers asking for the exact same bucket', async () => {
+			MessageService.syncEnvelopes.mockResolvedValue({
+				newMessages: [],
+				changedMessages: [],
+				vanishedMessages: [],
+				stats: { unread: 0 },
+			})
+
+			const first = store.syncEnvelopes({ mailboxId: 'priority', query: 'not:starred' })
+			const second = store.syncEnvelopes({ mailboxId: 'priority', query: 'not:starred' })
+
+			await Promise.all([first, second])
+
+			// 5 real mailboxes, ONE fan-out -- not 10 from two independent
+			// fan-outs.
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(5)
+		})
+
+		it('does NOT collapse two different buckets for the same virtual mailbox into one', async () => {
+			MessageService.syncEnvelopes.mockResolvedValue({
+				newMessages: [],
+				changedMessages: [],
+				vanishedMessages: [],
+				stats: { unread: 0 },
+			})
+
+			const important = store.syncEnvelopes({ mailboxId: 'priority', query: 'is:pi-important' })
+			const other = store.syncEnvelopes({ mailboxId: 'priority', query: 'is:pi-other' })
+
+			await Promise.all([important, other])
+
+			// 5 real mailboxes x 2 genuinely different buckets = 10, not
+			// deduped down to 5.
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(10)
+		})
+
+		it('fires a fresh fan-out for a later call once the first has resolved', async () => {
+			MessageService.syncEnvelopes.mockResolvedValue({
+				newMessages: [],
+				changedMessages: [],
+				vanishedMessages: [],
+				stats: { unread: 0 },
+			})
+
+			await store.syncEnvelopes({ mailboxId: 'priority', query: 'not:starred' })
+			await store.syncEnvelopes({ mailboxId: 'priority', query: 'not:starred' })
+
+			// Unlike fetchMessage()'s cache, a sync has no "already done,
+			// never again" shortcut -- a genuinely later, separate call
+			// must still hit the network.
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(10)
+		})
+
+		it('never dedupes a REAL mailbox\'s own sync -- only the virtual-mailbox fan-out entry point', async () => {
+			// Two concurrent callers syncing the SAME real mailbox+query
+			// are NOT collapsed into one: that mailbox's own
+			// MailboxLockedException/pendingLockWaits coordination
+			// already handles concurrent real-mailbox syncs, and
+			// deduping here too would risk a retry chain awaiting its
+			// own still-pending promise (see pendingUnifiedSyncs' own
+			// comment).
+			MessageService.syncEnvelopes.mockResolvedValue({
+				newMessages: [],
+				changedMessages: [],
+				vanishedMessages: [],
+				stats: { unread: 0 },
+			})
+
+			const first = store.syncEnvelopes({ mailboxId: 100, query: 'not:starred' })
+			const second = store.syncEnvelopes({ mailboxId: 100, query: 'not:starred' })
+
+			await Promise.all([first, second])
+
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(2)
+		})
+	})
+
 	describe('setEnvelopeImportant: toggleEnvelopeImportant/markEnvelopeImportantOrUnimportant update flag_important AND the tag together', () => {
 		// Regression: both entry points used to call ONLY
 		// addEnvelopeTag()/removeEnvelopeTag() -- the important badge
