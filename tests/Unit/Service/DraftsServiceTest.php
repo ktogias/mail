@@ -185,7 +185,7 @@ class DraftsServiceTest extends TestCase {
 			->willReturn($client);
 		$this->attachmentService->expects(self::once())
 			->method('handleAttachments')
-			->with($account, $attachments, $client)
+			->with($account, $attachments, $client, 10)
 			->willReturn($attachmentIds);
 		$this->attachmentService->expects(self::once())
 			->method('saveLocalMessageAttachments')
@@ -289,7 +289,7 @@ class DraftsServiceTest extends TestCase {
 			->willReturn($client);
 		$this->attachmentService->expects(self::once())
 			->method('handleAttachments')
-			->with($account, $attachments, $client)
+			->with($account, $attachments, $client, 10)
 			->willReturn($attachmentIds);
 		$this->attachmentService->expects(self::once())
 			->method('updateLocalMessageAttachments')
@@ -347,7 +347,7 @@ class DraftsServiceTest extends TestCase {
 			->willReturn($client);
 		$this->attachmentService->expects(self::once())
 			->method('handleAttachments')
-			->with($account, $attachments, $client)
+			->with($account, $attachments, $client, 10)
 			->willReturn($attachmentIds);
 		$this->attachmentService->expects(self::once())
 			->method('updateLocalMessageAttachments')

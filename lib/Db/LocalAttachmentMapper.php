@@ -11,18 +11,20 @@ namespace OCA\Mail\Db;
 
 use OCP\AppFramework\Db\DoesNotExistException;
 use OCP\AppFramework\Db\QBMapper;
+use OCP\DB\Exception as DBException;
 use OCP\DB\QueryBuilder\IQueryBuilder;
 use OCP\IDBConnection;
+use Psr\Log\LoggerInterface;
 use Throwable;
 
 /**
  * @template-extends QBMapper<LocalAttachment>
  */
 class LocalAttachmentMapper extends QBMapper {
-	/**
-	 * @param IDBConnection $db
-	 */
-	public function __construct(IDBConnection $db) {
+	public function __construct(
+		IDBConnection $db,
+		private LoggerInterface $logger,
+	) {
 		parent::__construct($db, 'mail_attachments');
 	}
 
@@ -91,7 +93,7 @@ class LocalAttachmentMapper extends QBMapper {
 
 	/**
 	 * @throws Throwable
-	 * @throws \OCP\DB\Exception
+	 * @throws DBException
 	 */
 	public function saveLocalMessageAttachments(string $userId, int $localMessageId, array $attachmentIds): void {
 		$this->db->beginTransaction();
@@ -105,6 +107,34 @@ class LocalAttachmentMapper extends QBMapper {
 				);
 			$qb->executeStatement();
 			$this->db->commit();
+		} catch (DBException $e) {
+			$this->db->rollBack();
+			if ($e->getReason() === DBException::REASON_FOREIGN_KEY_VIOLATION) {
+				// The draft (the oc_mail_local_messages row $localMessageId
+				// points at) no longer exists: it was deleted concurrently
+				// by a competing request -- normally Send finishing (which
+				// deletes the draft once the message is transmitted) while
+				// this autosave was still in flight attaching the very same
+				// draft's forwarded/inline attachments. Confirmed live: a
+				// reply carrying 19 inline images from the original message
+				// took 28-64s per autosave (each one re-fetched every image
+				// over IMAP from scratch, see handleAttachments()'s own
+				// caching fix for that), giving a wide window for the user
+				// to hit Send before an older autosave finished. Even with
+				// that fixed, any sufficiently slow network condition can
+				// still open this same window, so this stays as a hard
+				// guarantee rather than relying on the window staying
+				// narrow. There is nothing left to attach to: this save
+				// lost the race and is simply stale, not a real failure --
+				// surfacing it to the user as a 500 would be misleading
+				// (confirmed live: the message had already sent
+				// successfully by the time this exception fired).
+				$this->logger->debug('Dropped a stale attachment-linking update for local message {id}: the message no longer exists (likely superseded by a concurrent send)', [
+					'id' => $localMessageId,
+				]);
+				return;
+			}
+			throw $e;
 		} catch (Throwable $e) {
 			$this->db->rollBack();
 			throw $e;

@@ -303,7 +303,7 @@ class AttachmentServiceTest extends TestCase {
 				'id' => 1
 			]
 		];
-		$result = $this->service->handleAttachments($account, $attachments, $client);
+		$result = $this->service->handleAttachments($account, $attachments, $client, 1);
 		$this->assertEquals([1], $result);
 	}
 
@@ -358,7 +358,92 @@ class AttachmentServiceTest extends TestCase {
 		$this->storage->expects($this->once())
 			->method('saveContent')
 			->with($this->equalTo($userId), $this->equalTo(123), $this->equalTo('Lorem ipsum dolor sit amet'));
-		$this->service->handleAttachments($account, [$attachments], $client);
+		$this->service->handleAttachments($account, [$attachments], $client, 1);
+	}
+
+	/**
+	 * Same redundant-refetch issue as handleForwardedAttachment(), applied
+	 * to forwarding a whole other message: a second autosave of the same
+	 * draft, forwarding the same message, must be a cache hit rather than a
+	 * second live IMAP getFullText() round-trip.
+	 */
+	public function testHandleAttachmentsForwardedMessageAttachmentReusesCachedLocalCopyOnSecondAutosave(): void {
+		$userId = 'linus';
+		$localMessageId = 42;
+		$attachment = LocalAttachment::fromParams([
+			'userId' => $userId,
+			'fileName' => 'cat.jpg',
+			'mimeType' => 'text/plain',
+			'createdAt' => 123456,
+			'disposition' => 'attachment'
+		]);
+		$persistedAttachment = LocalAttachment::fromParams([
+			'id' => 123,
+			'userId' => $userId,
+			'fileName' => 'cat.jpg',
+			'mimeType' => 'text/plain',
+		]);
+		$account = $this->createConfiguredMock(Account::class, [
+			'getUserId' => $userId
+		]);
+		$message = new Message();
+		$message->setUid(123);
+		$message->setMailboxId(1);
+		$mailbox = new Mailbox();
+		$mailbox->setName('INBOX');
+		$client = $this->createStub(Horde_Imap_Client_Socket::class);
+		$attachmentPayload = [
+			'type' => 'message',
+			'id' => 123,
+			'fileName' => 'cat.jpg',
+			'mimeType' => 'text/plain',
+		];
+
+		$store = [];
+		$this->cache->method('get')->willReturnCallback(function ($key) use (&$store) {
+			return $store[$key] ?? null;
+		});
+		$this->cache->method('set')->willReturnCallback(function ($key, $value) use (&$store) {
+			$store[$key] = $value;
+			return true;
+		});
+
+		$this->mailManager->expects(self::once())
+			->method('getMessage')
+			->with($account->getUserId(), 123)
+			->willReturn($message);
+		$this->mailManager->expects(self::once())
+			->method('getMailbox')
+			->with($account->getUserId())
+			->willReturn($mailbox);
+		$this->messageMapper->expects(self::once())
+			->method('getFullText')
+			->with($client, $mailbox->getName(), $message->getUid(), $userId)
+			->willReturn('Lorem ipsum dolor sit amet');
+		// insert() is mocked, so it can't reproduce QBMapper's real
+		// behavior of mutating the passed entity in place to assign its
+		// id -- addFileFromString() returns that same entity instance
+		// (not insert()'s return value), so the mock must mutate it too,
+		// or getId() would stay null here.
+		$this->mapper->expects(self::once())
+			->method('insert')
+			->with($this->equalTo($attachment))
+			->willReturnCallback(function (LocalAttachment $a) {
+				$a->setId(123);
+				return $a;
+			});
+		$this->storage->expects(self::once())
+			->method('saveContent')
+			->with($this->equalTo($userId), $this->equalTo(123), $this->equalTo('Lorem ipsum dolor sit amet'));
+		$this->mapper->method('find')
+			->with($userId, 123)
+			->willReturn($persistedAttachment);
+
+		$first = $this->service->handleAttachments($account, [$attachmentPayload], $client, $localMessageId);
+		$second = $this->service->handleAttachments($account, [$attachmentPayload], $client, $localMessageId);
+
+		$this->assertEquals([123], $first);
+		$this->assertEquals([123], $second);
 	}
 
 	public function testHandleAttachmentsForwardedAttachment(): void {
@@ -419,7 +504,267 @@ class AttachmentServiceTest extends TestCase {
 			->method('saveContent')
 			->with($this->equalTo($userId), $this->equalTo(123), $this->equalTo('Lorem ipsum dolor sit amet'));
 
-		$this->service->handleAttachments($account, [$attachments], $client);
+		$this->service->handleAttachments($account, [$attachments], $client, 1);
+	}
+
+	/**
+	 * Confirmed live: a reply carrying 19 forwarded/inline attachments made
+	 * every draft autosave re-fetch every single one of them over a fresh
+	 * IMAP round-trip, even though the previous autosave had already fetched
+	 * the exact same attachments moments earlier -- each autosave took
+	 * 28-64s as a result. The second (and every later) autosave of the same
+	 * draft, referencing the same original attachment, must be a cache hit:
+	 * no IMAP round-trip, no new local copy, the same id reused.
+	 */
+	public function testHandleAttachmentsForwardedAttachmentReusesCachedLocalCopyOnSecondAutosave(): void {
+		$userId = 'linus';
+		$localMessageId = 42;
+		$attachment = LocalAttachment::fromParams([
+			'userId' => $userId,
+			'fileName' => 'cat.jpg',
+			'mimeType' => 'text/plain',
+			'contentId' => null,
+			'disposition' => 'attachment',
+			'createdAt' => 123456,
+		]);
+		$persistedAttachment = LocalAttachment::fromParams([
+			'id' => 123,
+			'userId' => $userId,
+			'fileName' => 'cat.jpg',
+			'mimeType' => 'text/plain',
+		]);
+		$account = $this->createConfiguredMock(Account::class, [
+			'getUserId' => $userId
+		]);
+		$mailbox = new Mailbox();
+		$mailbox->setId(9);
+		$mailbox->setName('INBOX');
+		$client = $this->createStub(Horde_Imap_Client_Socket::class);
+		$attachmentPayload = [
+			'type' => 'message-attachment',
+			'mailboxId' => $mailbox->getId(),
+			'uid' => 999,
+			'id' => '2',
+			'fileName' => 'cat.jpg',
+			'mimeType' => 'text/plain',
+		];
+		$imapAttachment = new \OCA\Mail\Attachment(
+			'2',
+			'cat.jpg',
+			'text/plain',
+			'Lorem ipsum dolor sit amet',
+			strlen('Lorem ipsum dolor sit amet'),
+			null,
+			'attachment',
+		);
+
+		// A tiny fake backing store so the cache genuinely remembers what
+		// was set between the two handleAttachments() calls below -- an
+		// always-null mock cache would never exercise the reuse path this
+		// test exists to prove.
+		$store = [];
+		$this->cache->method('get')->willReturnCallback(function ($key) use (&$store) {
+			return $store[$key] ?? null;
+		});
+		$this->cache->method('set')->willReturnCallback(function ($key, $value) use (&$store) {
+			$store[$key] = $value;
+			return true;
+		});
+
+		$this->mailManager->expects(self::once())
+			->method('getMailbox')
+			->with($account->getUserId(), $mailbox->getId())
+			->willReturn($mailbox);
+		$this->messageMapper->expects(self::once())
+			->method('getAttachment')
+			->with($client, $mailbox->getName(), 999, '2', $userId)
+			->willReturn($imapAttachment);
+		// insert() is mocked, so it can't reproduce QBMapper's real
+		// behavior of mutating the passed entity in place to assign its
+		// id -- addFileFromString() returns that same entity instance
+		// (not insert()'s return value), so the mock must mutate it too,
+		// or getId() would stay null here.
+		$this->mapper->expects(self::once())
+			->method('insert')
+			->with($this->equalTo($attachment))
+			->willReturnCallback(function (LocalAttachment $a) {
+				$a->setId(123);
+				return $a;
+			});
+		$this->storage->expects(self::once())
+			->method('saveContent')
+			->with($this->equalTo($userId), $this->equalTo(123), $this->equalTo('Lorem ipsum dolor sit amet'));
+		$this->mapper->method('find')
+			->with($userId, 123)
+			->willReturn($persistedAttachment);
+
+		$first = $this->service->handleAttachments($account, [$attachmentPayload], $client, $localMessageId);
+		$second = $this->service->handleAttachments($account, [$attachmentPayload], $client, $localMessageId);
+
+		$this->assertEquals([123], $first);
+		$this->assertEquals([123], $second);
+	}
+
+	/**
+	 * oc_mail_attachments.local_message_id is single-owner: reusing the same
+	 * local copy across two different drafts would silently steal it from
+	 * whichever draft "loses". Two drafts referencing the same original
+	 * attachment must each get their own independent local copy.
+	 */
+	public function testHandleAttachmentsForwardedAttachmentDoesNotShareCacheAcrossDifferentDrafts(): void {
+		$userId = 'linus';
+		$attachment = LocalAttachment::fromParams([
+			'userId' => $userId,
+			'fileName' => 'cat.jpg',
+			'mimeType' => 'text/plain',
+			'contentId' => null,
+			'disposition' => 'attachment',
+			'createdAt' => 123456,
+		]);
+		$account = $this->createConfiguredMock(Account::class, [
+			'getUserId' => $userId
+		]);
+		$mailbox = new Mailbox();
+		$mailbox->setId(9);
+		$mailbox->setName('INBOX');
+		$client = $this->createStub(Horde_Imap_Client_Socket::class);
+		$attachmentPayload = [
+			'type' => 'message-attachment',
+			'mailboxId' => $mailbox->getId(),
+			'uid' => 999,
+			'id' => '2',
+			'fileName' => 'cat.jpg',
+			'mimeType' => 'text/plain',
+		];
+		$imapAttachment = new \OCA\Mail\Attachment(
+			'2',
+			'cat.jpg',
+			'text/plain',
+			'Lorem ipsum dolor sit amet',
+			strlen('Lorem ipsum dolor sit amet'),
+			null,
+			'attachment',
+		);
+
+		$store = [];
+		$this->cache->method('get')->willReturnCallback(function ($key) use (&$store) {
+			return $store[$key] ?? null;
+		});
+		$this->cache->method('set')->willReturnCallback(function ($key, $value) use (&$store) {
+			$store[$key] = $value;
+			return true;
+		});
+
+		$this->mailManager->method('getMailbox')->willReturn($mailbox);
+		$this->messageMapper->expects(self::exactly(2))
+			->method('getAttachment')
+			->willReturn($imapAttachment);
+		// insert() is mocked, so it can't reproduce QBMapper's real
+		// behavior of mutating the passed entity in place to assign its
+		// id -- addFileFromString() returns that same entity instance
+		// (not insert()'s return value), so the mock must mutate it too,
+		// assigning a different id per call the same way two independent
+		// real inserts would.
+		$idsToAssign = [123, 456];
+		$insertCallCount = 0;
+		$this->mapper->expects(self::exactly(2))
+			->method('insert')
+			->with($this->equalTo($attachment))
+			->willReturnCallback(function (LocalAttachment $a) use ($idsToAssign, &$insertCallCount) {
+				$a->setId($idsToAssign[$insertCallCount]);
+				$insertCallCount++;
+				return $a;
+			});
+		$this->storage->expects(self::exactly(2))->method('saveContent');
+
+		$forDraft42 = $this->service->handleAttachments($account, [$attachmentPayload], $client, 42);
+		$forDraft43 = $this->service->handleAttachments($account, [$attachmentPayload], $client, 43);
+
+		$this->assertEquals([123], $forDraft42);
+		$this->assertEquals([456], $forDraft43);
+	}
+
+	/**
+	 * A cache entry can outlive the row it points at (e.g. the referenced
+	 * local attachment got deleted independently between two autosaves). A
+	 * stale hit must fall back to a fresh IMAP fetch, not surface a broken
+	 * reference or skip attaching the file entirely.
+	 */
+	public function testHandleAttachmentsForwardedAttachmentRefetchesIfCachedLocalCopyWasDeleted(): void {
+		$userId = 'linus';
+		$localMessageId = 42;
+		$attachment = LocalAttachment::fromParams([
+			'userId' => $userId,
+			'fileName' => 'cat.jpg',
+			'mimeType' => 'text/plain',
+			'contentId' => null,
+			'disposition' => 'attachment',
+			'createdAt' => 123456,
+		]);
+		$account = $this->createConfiguredMock(Account::class, [
+			'getUserId' => $userId
+		]);
+		$mailbox = new Mailbox();
+		$mailbox->setId(9);
+		$mailbox->setName('INBOX');
+		$client = $this->createStub(Horde_Imap_Client_Socket::class);
+		$attachmentPayload = [
+			'type' => 'message-attachment',
+			'mailboxId' => $mailbox->getId(),
+			'uid' => 999,
+			'id' => '2',
+			'fileName' => 'cat.jpg',
+			'mimeType' => 'text/plain',
+		];
+		$imapAttachment = new \OCA\Mail\Attachment(
+			'2',
+			'cat.jpg',
+			'text/plain',
+			'Lorem ipsum dolor sit amet',
+			strlen('Lorem ipsum dolor sit amet'),
+			null,
+			'attachment',
+		);
+
+		$store = [];
+		$this->cache->method('get')->willReturnCallback(function ($key) use (&$store) {
+			return $store[$key] ?? null;
+		});
+		$this->cache->method('set')->willReturnCallback(function ($key, $value) use (&$store) {
+			$store[$key] = $value;
+			return true;
+		});
+
+		$this->mailManager->method('getMailbox')->willReturn($mailbox);
+		$this->messageMapper->expects(self::exactly(2))
+			->method('getAttachment')
+			->willReturn($imapAttachment);
+		// insert() is mocked, so it can't reproduce QBMapper's real
+		// behavior of mutating the passed entity in place to assign its
+		// id -- addFileFromString() returns that same entity instance
+		// (not insert()'s return value), so the mock must mutate it too.
+		$idsToAssign = [123, 456];
+		$insertCallCount = 0;
+		$this->mapper->expects(self::exactly(2))
+			->method('insert')
+			->with($this->equalTo($attachment))
+			->willReturnCallback(function (LocalAttachment $a) use ($idsToAssign, &$insertCallCount) {
+				$a->setId($idsToAssign[$insertCallCount]);
+				$insertCallCount++;
+				return $a;
+			});
+		$this->storage->expects(self::exactly(2))->method('saveContent');
+		// The cached copy (id 123) was deleted independently between the
+		// two autosaves -- looking it up must fail, forcing a fresh fetch.
+		$this->mapper->method('find')
+			->with($userId, 123)
+			->willThrowException(new DoesNotExistException('gone'));
+
+		$first = $this->service->handleAttachments($account, [$attachmentPayload], $client, $localMessageId);
+		$second = $this->service->handleAttachments($account, [$attachmentPayload], $client, $localMessageId);
+
+		$this->assertEquals([123], $first);
+		$this->assertEquals([456], $second);
 	}
 
 	public function testHandleAttachmentsForwardedInlineAttachmentPreservesContentId(): void {
@@ -480,7 +825,7 @@ class AttachmentServiceTest extends TestCase {
 			->method('saveContent')
 			->with($this->equalTo($userId), $this->equalTo(456), $this->equalTo('fake png content'));
 
-		$this->service->handleAttachments($account, [$attachments], $client);
+		$this->service->handleAttachments($account, [$attachments], $client, 1);
 	}
 
 	public function testHandleAttachmentsCloudAttachmentNoDownloadPermission(): void {
@@ -528,7 +873,7 @@ class AttachmentServiceTest extends TestCase {
 			->with('cat.jpg')
 			->willReturn($file);
 
-		$result = $this->service->handleAttachments($account, [$attachments], $client);
+		$result = $this->service->handleAttachments($account, [$attachments], $client, 1);
 		$this->assertEquals([], $result);
 
 	}
@@ -582,7 +927,7 @@ class AttachmentServiceTest extends TestCase {
 			->method('saveContent')
 			->with($this->equalTo($userId), $this->equalTo(123), $this->equalTo('Lorem ipsum dolor sit amet'));
 
-		$this->service->handleAttachments($account, [$attachments], $client);
+		$this->service->handleAttachments($account, [$attachments], $client, 1);
 	}
 
 	public function testUpdateLocalMessageAttachments(): void {

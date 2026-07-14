@@ -103,7 +103,7 @@ class DraftsService {
 
 		$client = $this->clientFactory->getClient($account);
 		try {
-			$attachmentIds = $this->attachmentService->handleAttachments($account, $attachments, $client);
+			$attachmentIds = $this->attachmentService->handleAttachments($account, $attachments, $client, $message->getId());
 		} finally {
 			$client->logout();
 		}
@@ -136,7 +136,7 @@ class DraftsService {
 
 		$client = $this->clientFactory->getClient($account);
 		try {
-			$attachmentIds = $this->attachmentService->handleAttachments($account, $attachments, $client);
+			$attachmentIds = $this->attachmentService->handleAttachments($account, $attachments, $client, $message->getId());
 		} finally {
 			$client->logout();
 		}

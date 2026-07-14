@@ -33,11 +33,23 @@ use OCP\Files\IMimeTypeDetector;
 use OCP\Files\NotFoundException;
 use OCP\Files\NotPermittedException;
 use OCP\Files\SimpleFS\ISimpleFile;
+use OCP\ICache;
 use OCP\ICacheFactory;
 use OCP\IURLGenerator;
 use Psr\Log\LoggerInterface;
 
 class AttachmentService implements IAttachmentService {
+	/**
+	 * How long a forwarded/inline attachment's materialized local copy stays
+	 * cross-referenced to its IMAP origin (see handleForwardedAttachment()/
+	 * handleForwardedMessageAttachment()). Long enough to cover a realistic
+	 * compose session (a draft can legitimately sit open, autosaving
+	 * repeatedly, for hours); purely a performance cache, not a correctness
+	 * one -- a miss just means one more live IMAP re-fetch, exactly today's
+	 * behavior, never a wrong result.
+	 */
+	private const FORWARDED_ATTACHMENT_CACHE_TTL_SECONDS = 86400;
+
 	/**
 	 * @var Folder
 	 */
@@ -216,9 +228,16 @@ class AttachmentService implements IAttachmentService {
 
 	/**
 	 * @param array $attachments
+	 * @param int $localMessageId the draft these attachments belong to --
+	 *                            needed only to scope the forwarded/inline dedup cache below
+	 *                            (see handleForwardedAttachment()); a materialized local copy
+	 *                            belongs to exactly one draft at a time (oc_mail_attachments'
+	 *                            local_message_id is single-owner), so two different drafts
+	 *                            referencing the same original message/attachment must still
+	 *                            each get their own independent local copy.
 	 * @return int[]
 	 */
-	public function handleAttachments(Account $account, array $attachments, \Horde_Imap_Client_Socket $client): array {
+	public function handleAttachments(Account $account, array $attachments, \Horde_Imap_Client_Socket $client, int $localMessageId): array {
 		$attachmentIds = [];
 
 		if ($attachments === []) {
@@ -237,12 +256,12 @@ class AttachmentService implements IAttachmentService {
 			}
 			if ($attachment['type'] === 'message' || $attachment['type'] === 'message/rfc822') {
 				// Adds another message as attachment
-				$attachmentIds[] = $this->handleForwardedMessageAttachment($account, $attachment, $client);
+				$attachmentIds[] = $this->handleForwardedMessageAttachment($account, $attachment, $client, $localMessageId);
 				continue;
 			}
 			if ($attachment['type'] === 'message-attachment' || $attachment['type'] === 'message-attachment-inline') {
 				// Adds an attachment from another email (use case is, eg., a mail forward)
-				$attachmentIds[] = $this->handleForwardedAttachment($account, $attachment, $client);
+				$attachmentIds[] = $this->handleForwardedAttachment($account, $attachment, $client, $localMessageId);
 				continue;
 			}
 
@@ -312,7 +331,18 @@ class AttachmentService implements IAttachmentService {
 	 * @param \Horde_Imap_Client_Socket $client
 	 * @return int|null
 	 */
-	private function handleForwardedMessageAttachment(Account $account, array $attachment, \Horde_Imap_Client_Socket $client): ?int {
+	private function handleForwardedMessageAttachment(Account $account, array $attachment, \Horde_Imap_Client_Socket $client, int $localMessageId): ?int {
+		$cache = $this->cacheFactory->createDistributed('mail_forwarded_attachment');
+		$cacheKey = hash('xxh128', implode('_', [
+			$account->getUserId(),
+			(string)$localMessageId,
+			(string)$attachment['id'],
+		]));
+		$cachedId = $this->findCachedForwardedAttachment($account->getUserId(), $cache, $cacheKey);
+		if ($cachedId !== null) {
+			return $cachedId;
+		}
+
 		$attachmentMessage = $this->mailManager->getMessage($account->getUserId(), (int)$attachment['id']);
 		$mailbox = $this->mailManager->getMailbox($account->getUserId(), $attachmentMessage->getMailboxId());
 		$fullText = $this->messageMapper->getFullText(
@@ -338,6 +368,7 @@ class AttachmentService implements IAttachmentService {
 			$this->logger->error('Could not create attachment', ['exception' => $e]);
 			return null;
 		}
+		$cache->set($cacheKey, $localAttachment->getId(), self::FORWARDED_ATTACHMENT_CACHE_TTL_SECONDS);
 		return $localAttachment->getId();
 	}
 
@@ -350,7 +381,36 @@ class AttachmentService implements IAttachmentService {
 	 * @return int
 	 * @throws DoesNotExistException
 	 */
-	private function handleForwardedAttachment(Account $account, array $attachment, \Horde_Imap_Client_Socket $client): ?int {
+	private function handleForwardedAttachment(Account $account, array $attachment, \Horde_Imap_Client_Socket $client, int $localMessageId): ?int {
+		// A reply/forward that carries N inline or attached images/files
+		// from the original message used to re-fetch every single one of
+		// them over a live IMAP round-trip on *every* draft autosave, not
+		// just once -- confirmed live: a reply with 19 inline images made
+		// each autosave take 28-64s (roughly N x a per-attachment IMAP
+		// fetch), and, because that made autosave so slow, opened a wide
+		// race window where clicking Send could delete the draft while an
+		// older autosave was still mid-flight trying to attach to it (see
+		// LocalAttachmentMapper::saveLocalMessageAttachments()'s own fix
+		// for that failure mode). Caching "this exact original attachment,
+		// for this exact draft, already has a local copy" turns every
+		// autosave after the first into a cache hit -- no IMAP round-trip
+		// at all -- while still giving two different drafts that reference
+		// the same original attachment their own independent local copies
+		// (oc_mail_attachments.local_message_id is single-owner; sharing an
+		// id across drafts would silently steal it from one of them).
+		$cache = $this->cacheFactory->createDistributed('mail_forwarded_attachment');
+		$cacheKey = hash('xxh128', implode('_', [
+			$account->getUserId(),
+			(string)$localMessageId,
+			(string)$attachment['mailboxId'],
+			(string)$attachment['uid'],
+			(string)$attachment['id'],
+		]));
+		$cachedId = $this->findCachedForwardedAttachment($account->getUserId(), $cache, $cacheKey);
+		if ($cachedId !== null) {
+			return $cachedId;
+		}
+
 		$mailbox = $this->mailManager->getMailbox($account->getUserId(), $attachment['mailboxId']);
 
 		$imapAttachment = $this->messageMapper->getAttachment(
@@ -374,7 +434,29 @@ class AttachmentService implements IAttachmentService {
 			$this->logger->error('Could not create attachment', ['exception' => $e]);
 			return null;
 		}
+		$cache->set($cacheKey, $localAttachment->getId(), self::FORWARDED_ATTACHMENT_CACHE_TTL_SECONDS);
 		return $localAttachment->getId();
+	}
+
+	/**
+	 * Looks up a previously-materialized forwarded/inline attachment's local
+	 * copy, guarding against the cache outliving the row it points at (e.g.
+	 * the user removed that one attachment from the compose window before
+	 * the next autosave) -- a stale hit here must fall back to a fresh IMAP
+	 * fetch, not surface a broken reference.
+	 */
+	private function findCachedForwardedAttachment(string $userId, ICache $cache, string $cacheKey): ?int {
+		$cachedId = $cache->get($cacheKey);
+		if ($cachedId === null) {
+			return null;
+		}
+		try {
+			$this->mapper->find($userId, (int)$cachedId);
+			return (int)$cachedId;
+		} catch (DoesNotExistException $e) {
+			$cache->remove($cacheKey);
+			return null;
+		}
 	}
 
 	private function hasDownloadPermissions(File $file, string $fileName): bool {

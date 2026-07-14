@@ -21,6 +21,7 @@ use OCP\AppFramework\Db\DoesNotExistException;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\IDBConnection;
 use PHPUnit\Framework\MockObject\MockObject;
+use Psr\Log\LoggerInterface;
 
 class LocalAttachmentMapperTest extends TestCase {
 	use DatabaseTransaction;
@@ -55,7 +56,8 @@ class LocalAttachmentMapperTest extends TestCase {
 
 		$this->db = \OCP\Server::get(\OCP\IDBConnection::class);
 		$this->mapper = new LocalAttachmentMapper(
-			$this->db
+			$this->db,
+			$this->createMock(LoggerInterface::class),
 		);
 		$this->localMessageMapper = new LocalMessageMapper(
 			$this->db,
@@ -154,5 +156,25 @@ class LocalAttachmentMapperTest extends TestCase {
 		$this->assertCount(2, $foundAttachments);
 		$this->assertEquals($this->localMessageIds[0], $foundAttachments[0]->getLocalMessageId());
 		$this->assertEquals($this->localMessageIds[1], $foundAttachments[1]->getLocalMessageId());
+	}
+
+	/**
+	 * Reproduces, against a real database, the race confirmed live in
+	 * production: an autosave (slow because it was re-fetching many
+	 * forwarded/inline attachments over IMAP, see AttachmentService's own
+	 * caching fix for that) finally tries to link attachments to a draft
+	 * that a concurrent Send already deleted in the meantime. Linking
+	 * against a non-existent local_message_id must not surface as an
+	 * uncaught foreign-key-violation 500 -- there is nothing left to
+	 * attach to, so this save is simply stale and should be dropped
+	 * silently, leaving the attachment row exactly as it was.
+	 */
+	public function testSaveLocalMessageAttachmentsSilentlyDropsForeignKeyViolationForDeletedMessage(): void {
+		$nonExistentLocalMessageId = 999999999;
+
+		$this->mapper->saveLocalMessageAttachments($this->user1, $nonExistentLocalMessageId, [$this->attachmentIds[0]]);
+
+		$found = $this->mapper->find($this->user1, $this->attachmentIds[0]);
+		$this->assertNull($found->getLocalMessageId());
 	}
 }
