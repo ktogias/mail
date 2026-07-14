@@ -677,6 +677,90 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	describe('appendOrReplaceEnvelopeId: O(1) thread dedup via a Map, instead of an O(L) scan per envelope', () => {
+		// The old implementation re-scanned the whole growing list with
+		// findIndex() for every single envelope in a batch -- O(n*L) for a
+		// batch of n against a list of L ids, confirmed live as a real,
+		// measurable cost for large batches against large (thousands of
+		// ids) mailboxes, on top of the read-sort-dedupe-write batching
+		// fixed separately the same day. The working list now carries its
+		// own thread-root -> index Map alongside the plain id array, kept
+		// in sync incrementally so each lookup is O(1).
+		function working(ids) {
+			const indexByThreadKey = new Map()
+			ids.forEach((id, index) => indexByThreadKey.set(store.envelopes[id].threadRootId ?? `id:${id}`, index))
+			return { ids, indexByThreadKey }
+		}
+
+		it('appends a new thread and records its index in the Map', () => {
+			store.envelopes[1] = { databaseId: 1, threadRootId: 'thread-A' }
+			store.envelopes[2] = { databaseId: 2, threadRootId: 'thread-B' }
+			const w = working([1])
+
+			store.appendOrReplaceEnvelopeId(w, { databaseId: 2, threadRootId: 'thread-B' })
+
+			expect(w.ids).toEqual([1, 2])
+			expect(w.indexByThreadKey.get('thread-B')).toBe(1)
+		})
+
+		it('replaces the existing entry in place for an already-known thread, without re-scanning', () => {
+			store.envelopes[1] = { databaseId: 1, threadRootId: 'thread-A' }
+			store.envelopes[2] = { databaseId: 2, threadRootId: 'thread-A' } // a newer reply, same thread
+			const w = working([1])
+
+			store.appendOrReplaceEnvelopeId(w, { databaseId: 2, threadRootId: 'thread-A' })
+
+			expect(w.ids).toEqual([2])
+			expect(w.indexByThreadKey.get('thread-A')).toBe(0)
+		})
+
+		it('singleton (flat) view always appends, ignoring the thread Map entirely', () => {
+			store.preferences['layout-message-view'] = 'singleton'
+			store.envelopes[1] = { databaseId: 1, threadRootId: 'thread-A' }
+			const w = working([1])
+
+			store.appendOrReplaceEnvelopeId(w, { databaseId: 2, threadRootId: 'thread-A' })
+
+			expect(w.ids).toEqual([1, 2])
+		})
+
+		// Regression found while building the Map: JS's === treats two
+		// DIFFERENT thread-less envelopes' undefined threadRootId as
+		// equal, unlike the server's own EXISTS-based thread match ("NULL
+		// never equals NULL" -- see MessageMapper::findIdsByQuery()'s own
+		// comment), which only ever matches a thread-less message against
+		// itself. The old findIndex()-based implementation had this exact
+		// same bug, just less visibly -- a second, unrelated, never-
+		// threaded message landing in the same batch would silently
+		// overwrite the first one's list entry instead of getting its own.
+		it('does NOT collapse two different thread-less messages into one entry', () => {
+			store.envelopes[1] = { databaseId: 1, threadRootId: null }
+			store.envelopes[2] = { databaseId: 2, threadRootId: null }
+			const w = working([1])
+
+			store.appendOrReplaceEnvelopeId(w, { databaseId: 2, threadRootId: null })
+
+			expect(w.ids).toEqual([1, 2])
+		})
+
+		it('end to end via addEnvelopesMutation: three thread-less messages in one batch all survive', () => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			const account = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: { id: 'INBOX', name: 'INBOX', databaseId: 11, accountId: 13, specialRole: 'inbox' },
+			})
+			store.mailboxes[11].envelopeLists[''] = []
+			store.preferences['sort-order'] = 'newest'
+
+			const threadless = (id) => ({ databaseId: id, mailboxId: 11, dateInt: id, flags: { seen: false } })
+			store.addEnvelopesMutation({ query: '', envelopes: [threadless(1), threadless(2), threadless(3)] })
+
+			expect(store.mailboxes[11].envelopeLists['']).toEqual([3, 2, 1])
+		})
+	})
+
 	describe('stripMalformedUndefinedToken: fetchEnvelopes/syncEnvelopes never send a literal "undefined" token', () => {
 		// Regression: a query string containing the literal word
 		// "undefined" (an undefined value stringified into a compound

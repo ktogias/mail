@@ -3183,23 +3183,48 @@ export default function mainStoreActions() {
 		 * If the given thread root id exist the message is replaced
 		 * otherwise appended
 		 *
-		 * @param {Array} existing list of envelope ids for a message list
+		 * @param {{ids: Array, indexByThreadKey: Map}} working the batch's
+		 *        working list for one mailbox (see addEnvelopesMutation's
+		 *        workingListFor()) -- ids is the list of envelope ids
+		 *        itself, indexByThreadKey is the O(1) thread-root -> index
+		 *        lookup kept in sync alongside it, replacing what used to
+		 *        be an O(L) findIndex() scan per envelope (confirmed live
+		 *        as part of the Firefox-unresponsive-script investigation:
+		 *        large batches against large, thousands-of-ids mailboxes
+		 *        made this scan itself a real, measurable cost, on top of
+		 *        the read-sort-dedupe-write batching fix that addressed
+		 *        the rest of that same slowdown).
 		 * @param {object} envelope envelope with tag objects
-		 * @return {Array} list of envelope ids
+		 * @return {Array} ids, for convenience -- same array working.ids
+		 *        already points at
 		 */
-		appendOrReplaceEnvelopeId(existing, envelope) {
+		appendOrReplaceEnvelopeId(working, envelope) {
 			if (this.getPreference('layout-message-view') === 'singleton') {
-				existing.push(envelope.databaseId)
-			} else {
-				const index = existing.findIndex((id) => this.envelopes[id].threadRootId === envelope.threadRootId)
-				if (index === -1) {
-					existing.push(envelope.databaseId)
-				} else {
-					existing[index] = envelope.databaseId
-				}
+				working.ids.push(envelope.databaseId)
+				return working.ids
 			}
 
-			return existing
+			// threadRootId is genuinely NULL/absent for any message the
+			// server never grouped into a thread at all (confirmed
+			// server-side too -- see findIdsByQuery()'s own comment: "NULL
+			// never equals NULL", so a thread-less message only ever
+			// matches itself) -- unlike SQL, JS's === would treat two
+			// DIFFERENT thread-less envelopes' undefined threadRootId as
+			// equal, incorrectly collapsing one into the other. Falling
+			// back to the envelope's own id keeps every thread-less
+			// message its own, independent entry, matching the server's
+			// own semantics instead of silently overwriting an unrelated
+			// message.
+			const key = envelope.threadRootId ?? `id:${envelope.databaseId}`
+			const index = working.indexByThreadKey.get(key)
+			if (index === undefined) {
+				working.indexByThreadKey.set(key, working.ids.length)
+				working.ids.push(envelope.databaseId)
+			} else {
+				working.ids[index] = envelope.databaseId
+			}
+
+			return working.ids
 		},
 		savePreferenceMutation({
 			key,
@@ -3465,10 +3490,21 @@ export default function mainStoreActions() {
 			// plain (non-reactive) working array across the whole batch,
 			// and only sort + dedupe + Vue.set it once per list actually
 			// touched, after the loop.
-			const workingLists = new Map() // mailbox -> working array of ids
+			// mailbox -> { ids, indexByThreadKey }. indexByThreadKey lets
+			// appendOrReplaceEnvelopeId() below look up "does this batch's
+			// working list already have an entry for this thread" in O(1)
+			// instead of an O(L) findIndex scan per envelope -- built once
+			// per mailbox touched in this batch, from a single pass over
+			// its starting ids, then kept in sync incrementally as the
+			// batch's own envelopes are appended/replaced.
+			const workingLists = new Map()
+			const threadKeyFor = (id) => this.envelopes[id].threadRootId ?? `id:${id}`
 			const workingListFor = (targetMailbox) => {
 				if (!workingLists.has(targetMailbox)) {
-					workingLists.set(targetMailbox, dropStaleIds(targetMailbox.envelopeLists[listId] || [], targetMailbox.databaseId))
+					const ids = dropStaleIds(targetMailbox.envelopeLists[listId] || [], targetMailbox.databaseId)
+					const indexByThreadKey = new Map()
+					ids.forEach((id, index) => indexByThreadKey.set(threadKeyFor(id), index))
+					workingLists.set(targetMailbox, { ids, indexByThreadKey })
 				}
 				return workingLists.get(targetMailbox)
 			}
@@ -3487,7 +3523,12 @@ export default function mainStoreActions() {
 						.map((mbId) => this.mailboxes[mbId])
 						.filter((mb) => mb.specialRole && mb.specialRole === mailbox.specialRole)
 						.forEach((unifiedMailbox) => {
-							workingListFor(unifiedMailbox).push(envelope.databaseId)
+							// Unchanged from before: a blind push, deduped
+							// only by exact id via uniq() below -- not
+							// routed through appendOrReplaceEnvelopeId()'s
+							// thread-dedup logic, same as prior to this
+							// Map-based rewrite.
+							workingListFor(unifiedMailbox).ids.push(envelope.databaseId)
 						})
 				}
 
@@ -3524,7 +3565,7 @@ export default function mainStoreActions() {
 			})
 
 			workingLists.forEach((working, targetMailbox) => {
-				Vue.set(targetMailbox.envelopeLists, listId, uniq(orderByDateInt(working)))
+				Vue.set(targetMailbox.envelopeLists, listId, uniq(orderByDateInt(working.ids)))
 			})
 		},
 		// Several search buckets are really just a boolean predicate over a
