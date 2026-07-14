@@ -73,16 +73,28 @@
 								<!-- Counter and indicator -->
 								<div
 									v-if="counterNumber || hasIndicator"
-									:class="{ 'extra--hidden': !showAdditionalElements }"
 									class="list-item-content__inner__details__extra">
 									<NcCounterBubble
 										v-if="counterNumber"
 										:active="isActive || active"
+										:class="{ 'extra--hidden': !showAdditionalElements }"
 										class="list-item-content__inner__details__extra__counter"
 										:type="counterType">
 										{{ counterNumber }}
 									</NcCounterBubble>
 
+									<!-- Deliberately NOT gated by showAdditionalElements: this is
+									     informational state (e.g. unread), unrelated to whether the
+									     hover-revealed action buttons are showing. It used to share
+									     that same visibility toggle, which is driven by @mouseover/
+									     @focus -- both of which mobile browsers synthesize on every
+									     tap. Confirmed live: selecting a message on mobile made its
+									     own unread dot vanish (tap -> synthetic mouseover -> hidden),
+									     reappearing only once focus moved to the next tapped row. The
+									     two floating action-button areas (list-item__hoverable) are
+									     absolutely positioned overlays with their own background --
+									     they don't actually compete for this same layout space, so
+									     nothing here needs to hide for them to show. -->
 									<span v-if="hasIndicator" class="list-item-content__inner__details__extra__indicator">
 										<!-- @slot This slot is used for some indicator in form of icon -->
 										<slot name="indicator" />
