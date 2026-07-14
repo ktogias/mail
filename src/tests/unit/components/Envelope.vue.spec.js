@@ -555,6 +555,100 @@ describe('Envelope', () => {
 		})
 	})
 
+	describe('onToggleJunk()/onToggleJunkThread() request them from EnvelopeList, for a shared undo window', () => {
+		// Real fix history in this exact area: marking a message as spam
+		// used to never actually move it (confirmed live, it reappeared
+		// after every refresh) -- moveEnvelopeToJunk()'s eager resolution
+		// and the delete-emit-before-store-mutation ordering are
+		// preserved exactly as before; only the deferred store calls
+		// themselves moved to EnvelopeList.vue.
+		function mountEnvelope(flagOverrides = {}) {
+			return shallowMount(Envelope, {
+				mocks: { $route },
+				propsData: {
+					mailbox: { specialRole: '', databaseId: 42, myAcls: undefined },
+					data: {
+						accountId: 123,
+						databaseId: 999,
+						from: [{ email: 'info@test.com' }],
+						flags: { seen: false, flagged: false, $junk: false, answered: false, hasAttachments: false, draft: false, ...flagOverrides },
+					},
+				},
+				store,
+				localVue,
+			})
+		}
+
+		beforeEach(() => {
+			store.getEnvelopeTags = vi.fn().mockReturnValue([])
+		})
+
+		it('onToggleJunk() emits delete first, then request-toggle-junk-one, when the envelope will actually move', async () => {
+			store.moveEnvelopeToJunk = vi.fn().mockResolvedValue(true)
+			const view = mountEnvelope()
+
+			view.vm.onToggleJunk()
+			await vi.waitFor(() => expect(view.emitted()['request-toggle-junk-one']).toBeTruthy())
+
+			expect(view.emitted().delete[0]).toEqual([999])
+			expect(view.emitted()['request-toggle-junk-one'][0]).toEqual([{
+				envelope: view.vm.data,
+				removeEnvelope: true,
+				isImportant: false,
+			}])
+		})
+
+		it('onToggleJunk() does not emit delete when the envelope stays in the current view', async () => {
+			store.moveEnvelopeToJunk = vi.fn().mockResolvedValue(false)
+			const view = mountEnvelope()
+
+			view.vm.onToggleJunk()
+			await vi.waitFor(() => expect(view.emitted()['request-toggle-junk-one']).toBeTruthy())
+
+			expect(view.emitted().delete).toBeFalsy()
+			expect(view.emitted()['request-toggle-junk-one'][0][0].removeEnvelope).toBe(false)
+		})
+
+		it('onToggleJunk() reports isImportant so EnvelopeList can defer clearing it too', async () => {
+			store.moveEnvelopeToJunk = vi.fn().mockResolvedValue(false)
+			store.getEnvelopeTags = vi.fn().mockReturnValue([{ imapLabel: '$label1' }])
+			const view = mountEnvelope()
+
+			view.vm.onToggleJunk()
+			await vi.waitFor(() => expect(view.emitted()['request-toggle-junk-one']).toBeTruthy())
+
+			expect(view.emitted()['request-toggle-junk-one'][0][0].isImportant).toBe(true)
+		})
+
+		it('never calls toggleEnvelopeJunk itself -- that is EnvelopeList.vue\'s job now', async () => {
+			store.moveEnvelopeToJunk = vi.fn().mockResolvedValue(true)
+			store.toggleEnvelopeJunk = vi.fn()
+			const view = mountEnvelope()
+
+			view.vm.onToggleJunk()
+			await vi.waitFor(() => expect(view.emitted()['request-toggle-junk-one']).toBeTruthy())
+
+			expect(store.toggleEnvelopeJunk).not.toHaveBeenCalled()
+		})
+
+		it('onToggleJunkThread() emits request-toggle-junk-thread with every envelope in the thread', async () => {
+			store.moveEnvelopeToJunk = vi.fn().mockResolvedValue(true)
+			store.preferences = { 'layout-message-view': 'threaded' }
+			const threadEnvelopes = [{ databaseId: 999, flags: {} }, { databaseId: 1000, flags: {} }]
+			store.getEnvelopesByThreadRootId = vi.fn().mockReturnValue(threadEnvelopes)
+			const view = mountEnvelope()
+
+			await view.vm.onToggleJunkThread()
+
+			expect(view.emitted().delete).toEqual([[threadEnvelopes[0]], [threadEnvelopes[1]]])
+			expect(view.emitted()['request-toggle-junk-thread'][0]).toEqual([{
+				envelopes: threadEnvelopes,
+				removeEnvelope: true,
+				isImportant: false,
+			}])
+		})
+	})
+
 	describe('hover prefetch', () => {
 		// Gmail-style: start fetching a row's message+thread while the
 		// pointer is still hovering, so the data is already there by the

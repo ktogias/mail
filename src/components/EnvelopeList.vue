@@ -130,6 +130,8 @@
 				:compact-mode="compactMode"
 				@delete="$emit('delete', env.databaseId)"
 				@request-delete="onRequestDeleteOne"
+				@request-toggle-junk-one="onRequestToggleJunkOne"
+				@request-toggle-junk-thread="onRequestToggleJunkThread"
 				@update:selected="onEnvelopeSelectToggle(env, index, $event)"
 				@select-multiple="onEnvelopeSelectMultiple(env, index)"
 				@open:quick-actions-settings="showQuickActionsSettings = true" />
@@ -442,44 +444,56 @@ export default {
 			this.unselectAll()
 		},
 
-		async markSelectionJunk() {
-			// Parallel, not a sequential for-of loop: a sequential loop
-			// updates the store (and the selection count the action
-			// button's own label reads) after EACH item resolves, so a
-			// bulk action on N messages visibly processed one at a time
-			// -- the button label counted down mid-operation, looking
-			// like the action had stalled and needed a second click to
-			// pick up the rest. Same pattern deleteAllSelected() already
-			// uses below: one Promise.all, one error surfaced if any
-			// item failed, one atomic-looking UI transition.
-			await Promise.all(this.selectedEnvelopes
-				.filter((envelope) => !envelope.flags.$junk)
-				.map(async (envelope) => {
-					await this.mainStore.toggleEnvelopeJunk({
+		// Shared by markSelectionJunk()/markSelectionNotJunk() below: real
+		// user reports exist of an entire mailbox getting bulk-marked as
+		// spam by accident with no way back (Apple Mail's own community
+		// forum has multiple threads about exactly this) -- the same
+		// undo window bulk delete already gets.
+		//
+		// moveEnvelopeToJunk() is resolved eagerly, before deferring
+		// anything: it's a read-only check (does a junk mailbox exist,
+		// is the envelope not already there), not a mutation, so there's
+		// nothing un-doable about calling it up front -- and the pending-
+		// hide list needs to know NOW which envelopes will actually
+		// disappear from view, since only those should vanish immediately
+		// (one that would stay visible either way must not flicker out
+		// and back in over the undo window).
+		async performBulkJunkToggle(envelopes, message) {
+			const targets = await Promise.all(envelopes.map(async (envelope) => ({
+				envelope,
+				removeEnvelope: await this.mainStore.moveEnvelopeToJunk(envelope),
+			})))
+
+			this.performActionWithUndo({
+				ids: targets.filter((target) => target.removeEnvelope).map((target) => target.envelope.databaseId),
+				message,
+				action: async () => {
+					await Promise.all(targets.map(({ envelope, removeEnvelope }) => this.mainStore.toggleEnvelopeJunk({
 						envelope,
-						removeEnvelope: await this.mainStore.moveEnvelopeToJunk(envelope),
-					})
-				}))
-				.catch((error) => {
-					logger.error('could not mark selection as spam', { error })
-					showError(t('mail', 'Could not mark messages as spam'))
-				})
+						removeEnvelope,
+					})))
+				},
+			}).catch((error) => {
+				logger.error('could not toggle junk status for selection', { error })
+				showError(t('mail', 'Could not update spam status for the selected messages'))
+			})
+		},
+
+		async markSelectionJunk() {
+			const envelopes = this.selectedEnvelopes.filter((envelope) => !envelope.flags.$junk)
+			await this.performBulkJunkToggle(
+				envelopes,
+				n('mail', '{number} message marked as spam', '{number} messages marked as spam', envelopes.length, { number: envelopes.length }),
+			)
 			this.unselectAll()
 		},
 
 		async markSelectionNotJunk() {
-			await Promise.all(this.selectedEnvelopes
-				.filter((envelope) => envelope.flags.$junk)
-				.map(async (envelope) => {
-					await this.mainStore.toggleEnvelopeJunk({
-						envelope,
-						removeEnvelope: await this.mainStore.moveEnvelopeToJunk(envelope),
-					})
-				}))
-				.catch((error) => {
-					logger.error('could not mark selection as not spam', { error })
-					showError(t('mail', 'Could not mark messages as not spam'))
-				})
+			const envelopes = this.selectedEnvelopes.filter((envelope) => envelope.flags.$junk)
+			await this.performBulkJunkToggle(
+				envelopes,
+				n('mail', '{number} message marked as not spam', '{number} messages marked as not spam', envelopes.length, { number: envelopes.length }),
+			)
 			this.unselectAll()
 		},
 
@@ -621,6 +635,64 @@ export default {
 						return t('mail', 'Could not delete message')
 					},
 				}))
+			})
+		},
+
+		// A single envelope's own junk-toggle action (Envelope.vue's
+		// onToggleJunk()) requests it here instead of calling the store
+		// directly, same reasoning as onRequestDeleteOne() above --
+		// deferred behind the same undo window as the bulk
+		// markSelectionJunk()/markSelectionNotJunk() actions.
+		// removeEnvelope reflects whether a junk mailbox is actually
+		// configured for this account (see moveEnvelopeToJunk()) -- only
+		// hide the row immediately if it's actually about to leave the
+		// current view; otherwise it stays visible either way and must
+		// not flicker.
+		onRequestToggleJunkOne({ envelope, removeEnvelope, isImportant }) {
+			const wasJunk = envelope.flags.$junk
+			this.performActionWithUndo({
+				ids: removeEnvelope ? [envelope.databaseId] : [],
+				message: wasJunk ? t('mail', 'Marked as not spam') : t('mail', 'Marked as spam'),
+				action: async () => {
+					if (isImportant) {
+						await this.mainStore.toggleEnvelopeImportant(envelope)
+					}
+					if (!envelope.flags.seen) {
+						await this.mainStore.toggleEnvelopeSeen({ envelope })
+					}
+					await this.mainStore.toggleEnvelopeJunk({ envelope, removeEnvelope })
+				},
+			}).catch((error) => {
+				logger.error('could not toggle junk status', { error })
+				showError(t('mail', 'Could not update spam status'))
+			})
+		},
+
+		// Same as onRequestToggleJunkOne() above, but applied to every
+		// message in the thread at once (Envelope.vue's
+		// onToggleJunkThread()) -- removeEnvelope/isImportant are
+		// computed once from the clicked envelope and applied uniformly
+		// to the whole thread, matching the pre-existing behavior this
+		// replaces.
+		onRequestToggleJunkThread({ envelopes, removeEnvelope, isImportant }) {
+			const wasJunk = envelopes[0]?.flags.$junk
+			this.performActionWithUndo({
+				ids: removeEnvelope ? envelopes.map((envelope) => envelope.databaseId) : [],
+				message: wasJunk ? t('mail', 'Thread marked as not spam') : t('mail', 'Thread marked as spam'),
+				action: async () => {
+					await Promise.all(envelopes.map(async (envelope) => {
+						if (isImportant) {
+							await this.mainStore.toggleEnvelopeImportant(envelope)
+						}
+						if (!envelope.flags.seen) {
+							await this.mainStore.toggleEnvelopeSeen({ envelope })
+						}
+						await this.mainStore.toggleEnvelopeJunk({ envelope, removeEnvelope })
+					}))
+				},
+			}).catch((error) => {
+				logger.error('could not toggle junk status for thread', { error })
+				showError(t('mail', 'Could not update spam status'))
 			})
 		},
 

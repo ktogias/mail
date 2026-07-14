@@ -786,6 +786,8 @@ describe('ThreadEnvelope', () => {
 			store.getAccount = vi.fn().mockReturnValue({ name: 'Test', emailAddress: 'test@test.com' })
 			store.deleteMessage = vi.fn()
 			store.moveMessage = vi.fn()
+			store.toggleEnvelopeJunk = vi.fn()
+			store.moveEnvelopeToJunk = vi.fn().mockResolvedValue(false)
 		})
 
 		function mountThreadEnvelope() {
@@ -836,6 +838,21 @@ describe('ThreadEnvelope', () => {
 
 			expect(view.emitted()['request-archive'][0]).toEqual([view.vm.envelope])
 			expect(store.moveMessage).not.toHaveBeenCalled()
+		})
+
+		it('onToggleJunk() emits request-toggle-junk-one instead of calling the store itself', async () => {
+			store.moveEnvelopeToJunk = vi.fn().mockResolvedValue(true)
+			const view = mountThreadEnvelope()
+
+			view.vm.onToggleJunk()
+			await vi.waitFor(() => expect(view.emitted()['request-toggle-junk-one']).toBeTruthy())
+
+			expect(view.emitted()['request-toggle-junk-one'][0]).toEqual([{
+				envelope: view.vm.envelope,
+				removeEnvelope: true,
+				isImportant: false,
+			}])
+			expect(store.toggleEnvelopeJunk).not.toHaveBeenCalled()
 		})
 	})
 })

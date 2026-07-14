@@ -1277,79 +1277,59 @@ export default {
 			const threadEnvelopes = this.layoutMessageViewThreaded
 				? this.mainStore.getEnvelopesByThreadRootId(this.data.accountId, this.data.threadRootId)
 				: [this.data]
-			threadEnvelopes.forEach(async (envelope) => {
-				if (this.isImportant) {
-					await this.mainStore.toggleEnvelopeImportant(envelope)
-				}
 
-				if (!envelope.flags.seen) {
-					await this.mainStore.toggleEnvelopeSeen({ envelope })
-				}
+			/**
+			 * moveEnvelopeToJunk() returns true if the envelope should be
+			 * moved to a different mailbox -- it does NOT perform the
+			 * move itself (a previous version of this comment claimed the
+			 * 'delete' event bubbling to Mailbox.onDelete was "the actual
+			 * implementation"; traced end to end, Mailbox.onDelete only
+			 * fetches one replacement envelope and navigates the route --
+			 * it never called any move/delete endpoint. Confirmed live:
+			 * marking messages as spam never actually moved them, they
+			 * reappeared after every refresh). EnvelopeList.vue's
+			 * onRequestToggleJunkThread() now performs the real move via
+			 * toggleEnvelopeJunk() -> moveMessage(), deferred behind an
+			 * undo window like every other delete/archive/junk action.
+			 *
+			 * This event is fired only for the list-navigation
+			 * bookkeeping in Mailbox.onDelete (fetch a replacement
+			 * envelope, jump to the next/previous message if this one
+			 * was open) -- it must run before the deferred junk-toggle
+			 * below ever removes anything from the store, since
+			 * Mailbox.onDelete's fetchNextEnvelopes() needs to find this
+			 * envelope still present to locate its neighbour.
+			 */
+			if (removeEnvelope) {
+				threadEnvelopes.forEach((envelope) => this.$emit('delete', envelope))
+			}
 
-				/**
-				 * moveEnvelopeToJunk() returns true if the envelope should
-				 * be moved to a different mailbox -- it does NOT perform
-				 * the move itself (a previous version of this comment
-				 * claimed the 'delete' event bubbling to Mailbox.onDelete
-				 * was "the actual implementation"; traced end to end,
-				 * Mailbox.onDelete only fetches one replacement envelope
-				 * and navigates the route -- it never called any move/
-				 * delete endpoint. Confirmed live: marking messages as
-				 * spam never actually moved them, they reappeared after
-				 * every refresh). toggleEnvelopeJunk() below now performs
-				 * the real move via moveMessage().
-				 *
-				 * This event is fired only for the list-navigation
-				 * bookkeeping in Mailbox.onDelete (fetch a replacement
-				 * envelope, jump to the next/previous message if this one
-				 * was open) -- it must run before toggleEnvelopeJunk()
-				 * removes the envelope from the store below, since
-				 * Mailbox.onDelete's fetchNextEnvelopes() needs to find
-				 * this envelope still present to locate its neighbour.
-				 */
-
-				if (removeEnvelope) {
-					this.$emit('delete', envelope)
-				}
-
-				await this.mainStore.toggleEnvelopeJunk({
-					envelope,
-					removeEnvelope,
-				})
+			this.$emit('request-toggle-junk-thread', {
+				envelopes: threadEnvelopes,
+				removeEnvelope,
+				isImportant: this.isImportant,
 			})
 		},
 
-		async onToggleJunk() {
-			const removeEnvelope = await this.mainStore.moveEnvelopeToJunk(this.data)
+		onToggleJunk() {
+			// The actual store calls (moveEnvelopeToJunk() resolves
+			// eagerly below since it's read-only, but the important/seen
+			// side effects and the real toggleEnvelopeJunk() move are
+			// EnvelopeList.vue's job now, deferred behind an undo window
+			// -- same reasoning as onDelete()/onArchive() above.
+			this.mainStore.moveEnvelopeToJunk(this.data).then((removeEnvelope) => {
+				// See onToggleJunkThread() above for why this needs to
+				// fire before the deferred toggle-junk request below ever
+				// removes anything from the store.
+				if (removeEnvelope) {
+					this.$emit('delete', this.data.databaseId)
+				}
 
-			if (this.isImportant) {
-				await this.mainStore.toggleEnvelopeImportant(this.data)
-			}
-
-			if (!this.data.flags.seen) {
-				await this.mainStore.toggleEnvelopeSeen({ envelope: this.data })
-			}
-
-			/**
-			 * moveEnvelopeToJunk returns true if the envelope should be moved to a different mailbox.
-			 *
-			 * Our backend (MessageMapper.move) implemented move as copy and delete.
-			 * The message is copied to another mailbox and gets a new UID; the message in the current folder is deleted.
-			 *
-			 * Trigger the delete event here to open the next envelope and remove the current envelope from the list.
-			 * The delete event bubbles up to Mailbox.onDelete to the actual implementation.
-			 *
-			 * In Mailbox.onDelete, fetchNextEnvelopes requires the current envelope to find the next envelope.
-			 * Therefore, it must run before removing the envelope.
-			 */
-
-			if (removeEnvelope) {
-				await this.$emit('delete', this.data.databaseId)
-			}
-
-			await this.mainStore.toggleEnvelopeJunk({
-				envelope: this.data,
-				removeEnvelope,
+				this.$emit('request-toggle-junk-one', {
+					envelope: this.data,
+					removeEnvelope,
+					isImportant: this.isImportant,
+				})
 			})
 		},
 

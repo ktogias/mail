@@ -31,6 +31,7 @@
 				@delete="$emit('delete', env.databaseId)"
 				@request-delete="onRequestDeleteOne"
 				@request-archive="onRequestArchiveOne"
+				@request-toggle-junk-one="onRequestToggleJunkOne"
 				@loaded="addLoadedThread"
 				@move="onMove(env.databaseId)"
 				@toggle-expand="toggleExpand(env.databaseId)"
@@ -293,6 +294,30 @@ export default {
 			}).catch((error) => {
 				logger.error('could not archive message', error)
 				showError(t('mail', 'Could not archive message'))
+			})
+		},
+
+		// ThreadEnvelope.vue's and MenuEnvelope.vue's own junk-toggle
+		// actions both request it here instead of calling the store
+		// directly -- same mechanism EnvelopeList.vue's
+		// onRequestToggleJunkOne() applies for the mailbox list view.
+		onRequestToggleJunkOne({ envelope, removeEnvelope, isImportant }) {
+			const wasJunk = envelope.flags.$junk
+			this.performActionWithUndo({
+				ids: removeEnvelope ? [envelope.databaseId] : [],
+				message: wasJunk ? t('mail', 'Marked as not spam') : t('mail', 'Marked as spam'),
+				action: async () => {
+					if (isImportant) {
+						await this.mainStore.toggleEnvelopeImportant(envelope)
+					}
+					if (!envelope.flags.seen) {
+						await this.mainStore.toggleEnvelopeSeen({ envelope })
+					}
+					await this.mainStore.toggleEnvelopeJunk({ envelope, removeEnvelope })
+				},
+			}).catch((error) => {
+				logger.error('could not toggle junk status', { error })
+				showError(t('mail', 'Could not update spam status'))
 			})
 		},
 

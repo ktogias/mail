@@ -1004,4 +1004,52 @@ describe('Thread', () => {
 			expect(store.moveMessage).toHaveBeenCalledWith({ id: 1001, destMailboxId: 55 })
 		})
 	})
+
+	describe('onRequestToggleJunkOne (ThreadEnvelope.vue/MenuEnvelope.vue both request it instead of calling the store directly)', () => {
+		const envelope = { databaseId: 1001, accountId: 100, flags: { seen: false } }
+
+		beforeEach(() => {
+			vi.useFakeTimers()
+			store.toggleEnvelopeImportant = vi.fn().mockResolvedValue()
+			store.toggleEnvelopeSeen = vi.fn().mockResolvedValue()
+			store.toggleEnvelopeJunk = vi.fn().mockResolvedValue()
+			showUndo.mockClear()
+		})
+
+		afterEach(() => {
+			vi.useRealTimers()
+		})
+
+		function mountThread() {
+			return shallowMount(Thread, {
+				mocks: { $route: { params: { threadId: 200 } } },
+				store,
+				localVue,
+			})
+		}
+
+		it('defers important/seen/junk toggling behind the undo window', async () => {
+			const view = mountThread()
+
+			view.vm.onRequestToggleJunkOne({ envelope, removeEnvelope: true, isImportant: true })
+			await vi.advanceTimersByTimeAsync(0)
+			expect(store.toggleEnvelopeJunk).not.toHaveBeenCalled()
+
+			await vi.advanceTimersByTimeAsync(10000)
+			expect(store.toggleEnvelopeImportant).toHaveBeenCalledWith(envelope)
+			expect(store.toggleEnvelopeSeen).toHaveBeenCalledWith({ envelope })
+			expect(store.toggleEnvelopeJunk).toHaveBeenCalledWith({ envelope, removeEnvelope: true })
+		})
+
+		it('never toggles anything if Undo is clicked in time', async () => {
+			const view = mountThread()
+
+			view.vm.onRequestToggleJunkOne({ envelope, removeEnvelope: true, isImportant: true })
+			const onUndo = showUndo.mock.calls[0][1]
+			onUndo()
+			await vi.advanceTimersByTimeAsync(10000)
+
+			expect(store.toggleEnvelopeJunk).not.toHaveBeenCalled()
+		})
+	})
 })

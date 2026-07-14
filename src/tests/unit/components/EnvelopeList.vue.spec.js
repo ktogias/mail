@@ -165,4 +165,152 @@ describe('EnvelopeList', () => {
 			expect(store.deleteThread).not.toHaveBeenCalled()
 		})
 	})
+
+	describe('undo window on bulk junk-marking (real user reports exist of accidental bulk spam-marking with no way back)', () => {
+		beforeEach(() => {
+			vi.useFakeTimers()
+			store.toggleEnvelopeJunk = vi.fn().mockResolvedValue()
+			showUndo.mockClear()
+		})
+
+		afterEach(() => {
+			vi.useRealTimers()
+		})
+
+		it('hides only the envelopes that will actually leave the mailbox (removeEnvelope=true), immediately', async () => {
+			// Envelope 2 has no junk mailbox configured for its account
+			// (or is already there) -- it stays visible either way, so it
+			// must not flicker out and back in over the undo window.
+			store.moveEnvelopeToJunk = vi.fn().mockImplementation((envelope) => Promise.resolve(envelope.databaseId !== 2))
+			const view = mountEnvelopeList()
+			await view.setData({ selection: [1, 2, 3] })
+
+			await view.vm.markSelectionJunk()
+
+			expect(view.vm.sortedEnvelops.map((e) => e.databaseId)).toEqual([2])
+			expect(store.toggleEnvelopeJunk).not.toHaveBeenCalled()
+		})
+
+		it('only actually flags/moves the selection once the undo window passes uninterrupted', async () => {
+			store.moveEnvelopeToJunk = vi.fn().mockResolvedValue(true)
+			const view = mountEnvelopeList()
+			await view.setData({ selection: [1, 2] })
+
+			await view.vm.markSelectionJunk()
+			await vi.advanceTimersByTimeAsync(10000)
+
+			expect(store.toggleEnvelopeJunk).toHaveBeenCalledTimes(2)
+			expect(store.toggleEnvelopeJunk).toHaveBeenCalledWith({ envelope: envelopes[0], removeEnvelope: true })
+			expect(store.toggleEnvelopeJunk).toHaveBeenCalledWith({ envelope: envelopes[1], removeEnvelope: true })
+		})
+
+		it('never marks anything as spam at all if Undo is clicked in time', async () => {
+			store.moveEnvelopeToJunk = vi.fn().mockResolvedValue(true)
+			const view = mountEnvelopeList()
+			await view.setData({ selection: [1, 2] })
+
+			await view.vm.markSelectionJunk()
+			const onUndo = showUndo.mock.calls[0][1]
+			onUndo()
+			await vi.advanceTimersByTimeAsync(10000)
+
+			expect(store.toggleEnvelopeJunk).not.toHaveBeenCalled()
+			expect(view.vm.sortedEnvelops.map((e) => e.databaseId).sort()).toEqual([1, 2, 3])
+		})
+
+		it('markSelectionNotJunk only targets already-junk envelopes', async () => {
+			envelopes[0].flags.$junk = true
+			store.moveEnvelopeToJunk = vi.fn().mockResolvedValue(true)
+			const view = mountEnvelopeList()
+			await view.setData({ selection: [1, 2, 3] })
+
+			await view.vm.markSelectionNotJunk()
+			await vi.advanceTimersByTimeAsync(10000)
+
+			expect(store.toggleEnvelopeJunk).toHaveBeenCalledTimes(1)
+			expect(store.toggleEnvelopeJunk).toHaveBeenCalledWith({ envelope: envelopes[0], removeEnvelope: true })
+		})
+	})
+
+	describe('onRequestToggleJunkOne/onRequestToggleJunkThread (a single row/thread requests the same undo window)', () => {
+		beforeEach(() => {
+			vi.useFakeTimers()
+			store.toggleEnvelopeImportant = vi.fn().mockResolvedValue()
+			store.toggleEnvelopeSeen = vi.fn().mockResolvedValue()
+			store.toggleEnvelopeJunk = vi.fn().mockResolvedValue()
+			showUndo.mockClear()
+		})
+
+		afterEach(() => {
+			vi.useRealTimers()
+		})
+
+		it('hides the row immediately only when removeEnvelope is true', async () => {
+			const view = mountEnvelopeList()
+
+			view.vm.onRequestToggleJunkOne({ envelope: envelopes[0], removeEnvelope: true, isImportant: false })
+			expect(view.vm.sortedEnvelops.map((e) => e.databaseId)).toEqual([2, 3])
+		})
+
+		it('does not hide the row when removeEnvelope is false -- it stays visible either way', async () => {
+			const view = mountEnvelopeList()
+
+			view.vm.onRequestToggleJunkOne({ envelope: envelopes[0], removeEnvelope: false, isImportant: false })
+			expect(view.vm.sortedEnvelops.map((e) => e.databaseId)).toEqual([1, 2, 3])
+		})
+
+		it('defers clearing important and marking seen until the undo window passes, in the same order as before', async () => {
+			envelopes[0].flags.seen = false
+			const view = mountEnvelopeList()
+
+			view.vm.onRequestToggleJunkOne({ envelope: envelopes[0], removeEnvelope: true, isImportant: true })
+			await vi.advanceTimersByTimeAsync(0)
+			expect(store.toggleEnvelopeImportant).not.toHaveBeenCalled()
+
+			await vi.advanceTimersByTimeAsync(10000)
+			expect(store.toggleEnvelopeImportant).toHaveBeenCalledWith(envelopes[0])
+			expect(store.toggleEnvelopeSeen).toHaveBeenCalledWith({ envelope: envelopes[0] })
+			expect(store.toggleEnvelopeJunk).toHaveBeenCalledWith({ envelope: envelopes[0], removeEnvelope: true })
+		})
+
+		it('does not mark seen again if the envelope was already seen', async () => {
+			envelopes[0].flags.seen = true
+			const view = mountEnvelopeList()
+
+			view.vm.onRequestToggleJunkOne({ envelope: envelopes[0], removeEnvelope: true, isImportant: false })
+			await vi.advanceTimersByTimeAsync(10000)
+
+			expect(store.toggleEnvelopeSeen).not.toHaveBeenCalled()
+		})
+
+		it('never toggles anything at all if Undo is clicked in time', async () => {
+			const view = mountEnvelopeList()
+
+			view.vm.onRequestToggleJunkOne({ envelope: envelopes[0], removeEnvelope: true, isImportant: true })
+			const onUndo = showUndo.mock.calls[0][1]
+			onUndo()
+			await vi.advanceTimersByTimeAsync(10000)
+
+			expect(store.toggleEnvelopeImportant).not.toHaveBeenCalled()
+			expect(store.toggleEnvelopeSeen).not.toHaveBeenCalled()
+			expect(store.toggleEnvelopeJunk).not.toHaveBeenCalled()
+			expect(view.vm.sortedEnvelops.map((e) => e.databaseId).sort()).toEqual([1, 2, 3])
+		})
+
+		it('onRequestToggleJunkThread applies the toggle to every envelope in the thread', async () => {
+			const threadEnvelopes = [
+				{ databaseId: 101, flags: { seen: true } },
+				{ databaseId: 102, flags: { seen: false } },
+			]
+			const view = mountEnvelopeList()
+
+			view.vm.onRequestToggleJunkThread({ envelopes: threadEnvelopes, removeEnvelope: true, isImportant: false })
+			await vi.advanceTimersByTimeAsync(10000)
+
+			expect(store.toggleEnvelopeJunk).toHaveBeenCalledWith({ envelope: threadEnvelopes[0], removeEnvelope: true })
+			expect(store.toggleEnvelopeJunk).toHaveBeenCalledWith({ envelope: threadEnvelopes[1], removeEnvelope: true })
+			expect(store.toggleEnvelopeSeen).toHaveBeenCalledWith({ envelope: threadEnvelopes[1] })
+			expect(store.toggleEnvelopeSeen).not.toHaveBeenCalledWith({ envelope: threadEnvelopes[0] })
+		})
+	})
 })

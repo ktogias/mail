@@ -250,6 +250,7 @@
 							:more-actions-open.sync="moreActionsOpen"
 							@reply="onReply('', false, false)"
 							@delete="$emit('delete', envelope.databaseId)"
+							@request-toggle-junk-one="$emit('request-toggle-junk-one', $event)"
 							@show-source-modal="onShowSourceModal"
 							@open-tag-modal="onOpenTagModal"
 							@open-move-modal="onOpenMoveModal"
@@ -1044,7 +1045,7 @@ export default {
 			this.mainStore.toggleEnvelopeFlagged(this.envelope)
 		},
 
-		async onToggleJunk() {
+		onToggleJunk() {
 			// Was passing this.envelope directly as toggleEnvelopeJunk()'s
 			// single {envelope, removeEnvelope} argument -- destructuring
 			// `envelope` off an envelope object (not a wrapper) gave
@@ -1052,11 +1053,15 @@ export default {
 			// every click. This action is only ever shown for an
 			// already-junk message (v-if="envelope.flags.$junk" on the
 			// icon), so removeEnvelope must be computed the same way
-			// every other junk-toggle entry point does.
-			const removeEnvelope = await this.mainStore.moveEnvelopeToJunk(this.envelope)
-			await this.mainStore.toggleEnvelopeJunk({
-				envelope: this.envelope,
-				removeEnvelope,
+			// every other junk-toggle entry point does. The real store
+			// call is Thread.vue's job now, deferred behind an undo
+			// window -- see onDelete()/onArchive() above.
+			this.mainStore.moveEnvelopeToJunk(this.envelope).then((removeEnvelope) => {
+				this.$emit('request-toggle-junk-one', {
+					envelope: this.envelope,
+					removeEnvelope,
+					isImportant: false,
+				})
 			})
 		},
 
