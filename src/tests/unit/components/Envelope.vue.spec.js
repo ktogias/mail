@@ -555,6 +555,52 @@ describe('Envelope', () => {
 		})
 	})
 
+	describe('onArchive()/moveThread() request them from EnvelopeList, for a shared undo window', () => {
+		function mountEnvelope(propsOverride = {}) {
+			return shallowMount(Envelope, {
+				mocks: { $route },
+				propsData: {
+					mailbox: { specialRole: '', databaseId: 42, myAcls: undefined },
+					data: {
+						accountId: 123,
+						databaseId: 999,
+						from: [{ email: 'info@test.com' }],
+						flags: { seen: false, flagged: false, $junk: false, answered: false, hasAttachments: false, draft: false },
+					},
+					...propsOverride,
+				},
+				store,
+				localVue,
+			})
+		}
+
+		it('onArchive() emits archive (for navigation) and request-archive (for the actual deferred move), never calling the store itself', () => {
+			store.moveThread = vi.fn()
+			store.moveMessage = vi.fn()
+			const view = mountEnvelope()
+
+			view.vm.onArchive()
+
+			expect(view.emitted().archive[0]).toEqual([999])
+			expect(view.emitted()['request-archive'][0]).toEqual([{ envelope: view.vm.data, isThreaded: true }])
+			expect(store.moveThread).not.toHaveBeenCalled()
+			expect(store.moveMessage).not.toHaveBeenCalled()
+		})
+
+		it('moveThread() (the quick-actions "move to X" step) emits request-move with the chosen destination, never calling the store itself', () => {
+			store.moveThread = vi.fn()
+			store.moveMessage = vi.fn()
+			const view = mountEnvelope()
+
+			view.vm.moveThread(77)
+
+			expect(view.emitted()['request-move'][0]).toEqual([{ envelope: view.vm.data, isThreaded: true, destMailboxId: 77 }])
+			expect(view.emitted().move).toBeTruthy()
+			expect(store.moveThread).not.toHaveBeenCalled()
+			expect(store.moveMessage).not.toHaveBeenCalled()
+		})
+	})
+
 	describe('onToggleJunk()/onToggleJunkThread() request them from EnvelopeList, for a shared undo window', () => {
 		// Real fix history in this exact area: marking a message as spam
 		// used to never actually move it (confirmed live, it reappeared

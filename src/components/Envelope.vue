@@ -1378,28 +1378,19 @@ export default {
 			this.quickActionMenu = false
 		},
 
-		async onArchive() {
+		onArchive() {
 			// Remove from selection first
 			this.setSelected(false)
 			// Archive
 			this.$emit('archive', this.data.databaseId)
 
-			try {
-				if (this.layoutMessageViewThreaded) {
-					await this.mainStore.moveThread({
-						envelope: this.data,
-						destMailboxId: this.account.archiveMailboxId,
-					})
-				} else {
-					await this.mainStore.moveMessage({
-						id: this.data.databaseId,
-						destMailboxId: this.account.archiveMailboxId,
-					})
-				}
-			} catch (error) {
-				logger.error('could not archive message', error)
-				showError(t('mail', 'Could not archive message'))
-			}
+			// The actual store call is EnvelopeList.vue's job now,
+			// deferred behind an undo window -- same reasoning as
+			// onDelete()/onToggleJunk() above.
+			this.$emit('request-archive', {
+				envelope: this.data,
+				isThreaded: this.layoutMessageViewThreaded,
+			})
 		},
 
 		async onSnooze(timestamp) {
@@ -1471,18 +1462,17 @@ export default {
 			this.$emit('move')
 		},
 
-		async moveThread(destMailboxId) {
-			if (this.layoutMessageViewThreaded) {
-				await this.mainStore.moveThread({
-					envelope: this.data,
-					destMailboxId,
-				})
-			} else {
-				await this.mainStore.moveMessage({
-					id: this.data.databaseId,
-					destMailboxId,
-				})
-			}
+		moveThread(destMailboxId) {
+			// The actual store call is EnvelopeList.vue's job now,
+			// deferred behind an undo window -- same reasoning as
+			// onDelete()/onArchive()/onToggleJunk() above. Used by the
+			// quick-actions "move to X" step (executeQuickAction()
+			// below).
+			this.$emit('request-move', {
+				envelope: this.data,
+				isThreaded: this.layoutMessageViewThreaded,
+				destMailboxId,
+			})
 			this.onMove()
 		},
 

@@ -130,6 +130,8 @@
 				:compact-mode="compactMode"
 				@delete="$emit('delete', env.databaseId)"
 				@request-delete="onRequestDeleteOne"
+				@request-archive="onRequestArchiveOne"
+				@request-move="onRequestMoveOne"
 				@request-toggle-junk-one="onRequestToggleJunkOne"
 				@request-toggle-junk-thread="onRequestToggleJunkThread"
 				@update:selected="onEnvelopeSelectToggle(env, index, $event)"
@@ -635,6 +637,47 @@ export default {
 						return t('mail', 'Could not delete message')
 					},
 				}))
+			})
+		},
+
+		// A single envelope's own archive button (Envelope.vue's
+		// onArchive()) requests it here instead of calling the store
+		// directly, same reasoning as onRequestDeleteOne() above.
+		onRequestArchiveOne({ envelope, isThreaded }) {
+			this.performActionWithUndo({
+				ids: [envelope.databaseId],
+				message: t('mail', 'Message archived'),
+				action: async () => {
+					if (isThreaded) {
+						await this.mainStore.moveThread({ envelope, destMailboxId: this.account.archiveMailboxId })
+					} else {
+						await this.mainStore.moveMessage({ id: envelope.databaseId, destMailboxId: this.account.archiveMailboxId })
+					}
+				},
+			}).catch((error) => {
+				logger.error('could not archive message', error)
+				showError(t('mail', 'Could not archive message'))
+			})
+		},
+
+		// A single envelope's own quick-action "move to X" step
+		// (Envelope.vue's moveThread()) requests it here instead of
+		// calling the store directly, same reasoning as
+		// onRequestDeleteOne() above.
+		onRequestMoveOne({ envelope, isThreaded, destMailboxId }) {
+			this.performActionWithUndo({
+				ids: [envelope.databaseId],
+				message: t('mail', 'Message moved'),
+				action: async () => {
+					if (isThreaded) {
+						await this.mainStore.moveThread({ envelope, destMailboxId })
+					} else {
+						await this.mainStore.moveMessage({ id: envelope.databaseId, destMailboxId })
+					}
+				},
+			}).catch((error) => {
+				logger.error('could not move message', { error })
+				showError(t('mail', 'Could not move message'))
 			})
 		},
 
