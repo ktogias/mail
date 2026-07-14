@@ -537,21 +537,21 @@ export default {
 
 			logger.info(`snoozing message ${this.envelope.databaseId}`)
 
+			// Ensuring the snooze mailbox exists is a one-time,
+			// idempotent setup step (creating an IMAP folder), not
+			// itself something worth an undo window -- only the actual
+			// snooze is deferred, by Thread.vue, same reasoning as
+			// onToggleJunk() above.
 			if (!this.account.snoozeMailboxId) {
 				await this.mainStore.createAndSetSnoozeMailbox(this.account)
 			}
 
-			try {
-				await this.mainStore.snoozeMessage({
-					id: this.envelope.databaseId,
-					unixTimestamp: timestamp / 1000,
-					destMailboxId: this.account.snoozeMailboxId,
-				})
-				showSuccess(t('mail', 'Message was snoozed'))
-			} catch (error) {
-				logger.error('Could not snooze message', error)
-				showError(t('mail', 'Could not snooze message'))
-			}
+			this.$emit('request-snooze', {
+				envelope: this.envelope,
+				isThreaded: false,
+				unixTimestamp: timestamp / 1000,
+				destMailboxId: this.account.snoozeMailboxId,
+			})
 		},
 
 		async onUnSnooze() {

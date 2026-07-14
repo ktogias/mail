@@ -33,6 +33,7 @@
 				@request-archive="onRequestArchiveOne"
 				@request-toggle-junk-one="onRequestToggleJunkOne"
 				@request-move="onRequestMove"
+				@request-snooze="onRequestSnooze"
 				@loaded="addLoadedThread"
 				@move="onMove(env.databaseId)"
 				@toggle-expand="toggleExpand(env.databaseId)"
@@ -339,6 +340,29 @@ export default {
 			}).catch((error) => {
 				logger.error('could not move message', { error })
 				showError(t('mail', 'Could not move message'))
+			})
+		},
+
+		// MenuEnvelope.vue's own snooze action (via ThreadEnvelope.vue's
+		// re-emit) requests it here instead of calling the store
+		// directly -- same mechanism EnvelopeList.vue's
+		// onRequestSnooze() applies for the mailbox list view. The
+		// snooze mailbox itself, if it needed creating, was already
+		// created eagerly by the caller.
+		onRequestSnooze({ envelope, isThreaded, unixTimestamp, destMailboxId }) {
+			this.performActionWithUndo({
+				ids: [envelope.databaseId],
+				message: t('mail', 'Message snoozed'),
+				action: async () => {
+					if (isThreaded) {
+						await this.mainStore.snoozeThread({ envelope, unixTimestamp, destMailboxId })
+					} else {
+						await this.mainStore.snoozeMessage({ id: envelope.databaseId, unixTimestamp, destMailboxId })
+					}
+				},
+			}).catch((error) => {
+				logger.error('could not snooze message', { error })
+				showError(t('mail', 'Could not snooze message'))
 			})
 		},
 

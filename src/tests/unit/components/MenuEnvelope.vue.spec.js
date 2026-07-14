@@ -77,4 +77,52 @@ describe('MenuEnvelope', () => {
 			expect(store.toggleEnvelopeJunk).not.toHaveBeenCalled()
 		})
 	})
+
+	describe('onSnooze() requests it from Thread.vue (via ThreadEnvelope.vue), for a shared undo window', () => {
+		function mountMenuEnvelope() {
+			return shallowMount(MenuEnvelope, {
+				propsData: {
+					envelope: {
+						databaseId: 999,
+						accountId: 123,
+						flags: { seen: false, flagged: false, $junk: false },
+					},
+					mailbox: { specialRole: '', databaseId: 42, myAcls: undefined },
+				},
+				store,
+				localVue,
+			})
+		}
+
+		it('creates the snooze mailbox first if the account does not have one yet, then emits request-snooze', async () => {
+			const account = { databaseId: 4, snoozeMailboxId: null, archiveMailboxId: null }
+			store.getAccount = vi.fn().mockReturnValue(account)
+			store.createAndSetSnoozeMailbox = vi.fn().mockImplementation(async (acc) => {
+				acc.snoozeMailboxId = 88
+			})
+			store.snoozeMessage = vi.fn()
+			const view = mountMenuEnvelope()
+
+			await view.vm.onSnooze(1700000000000)
+
+			expect(store.createAndSetSnoozeMailbox).toHaveBeenCalled()
+			expect(view.emitted()['request-snooze'][0]).toEqual([{
+				envelope: view.vm.envelope,
+				isThreaded: false,
+				unixTimestamp: 1700000000,
+				destMailboxId: 88,
+			}])
+			expect(store.snoozeMessage).not.toHaveBeenCalled()
+		})
+
+		it('never calls snoozeMessage itself -- that is Thread.vue\'s job now', async () => {
+			store.getAccount = vi.fn().mockReturnValue({ databaseId: 4, snoozeMailboxId: 88, archiveMailboxId: null })
+			store.snoozeMessage = vi.fn()
+			const view = mountMenuEnvelope()
+
+			await view.vm.onSnooze(1700000000000)
+
+			expect(store.snoozeMessage).not.toHaveBeenCalled()
+		})
+	})
 })

@@ -1398,29 +1398,21 @@ export default {
 			// Remove from selection first
 			this.setSelected(false)
 
+			// Ensuring the snooze mailbox exists is a one-time,
+			// idempotent setup step (creating an IMAP folder), not
+			// itself something worth an undo window -- only the actual
+			// snooze below is deferred, same reasoning as
+			// onDelete()/onArchive()/onToggleJunk() above.
 			if (!this.account.snoozeMailboxId) {
 				await this.mainStore.createAndSetSnoozeMailbox(this.account)
 			}
 
-			try {
-				if (this.layoutMessageViewThreaded) {
-					await this.mainStore.snoozeThread({
-						envelope: this.data,
-						unixTimestamp: timestamp / 1000,
-						destMailboxId: this.account.snoozeMailboxId,
-					})
-				} else {
-					await this.mainStore.snoozeMessage({
-						id: this.data.databaseId,
-						unixTimestamp: timestamp / 1000,
-						destMailboxId: this.account.snoozeMailboxId,
-					})
-				}
-				showSuccess(t('mail', 'Thread was snoozed'))
-			} catch (error) {
-				logger.error('could not snooze thread', error)
-				showError(t('mail', 'Could not snooze thread'))
-			}
+			this.$emit('request-snooze', {
+				envelope: this.data,
+				isThreaded: this.layoutMessageViewThreaded,
+				unixTimestamp: timestamp / 1000,
+				destMailboxId: this.account.snoozeMailboxId,
+			})
 		},
 
 		async onUnSnooze() {

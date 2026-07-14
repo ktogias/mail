@@ -555,6 +555,74 @@ describe('Envelope', () => {
 		})
 	})
 
+	describe('onSnooze() requests it from EnvelopeList, for a shared undo window', () => {
+		function mountEnvelope(propsOverride = {}) {
+			return shallowMount(Envelope, {
+				mocks: { $route },
+				propsData: {
+					mailbox: { specialRole: '', databaseId: 42, myAcls: undefined },
+					data: {
+						accountId: 123,
+						databaseId: 999,
+						from: [{ email: 'info@test.com' }],
+						to: [],
+						cc: [],
+						attachments: [],
+						subject: '',
+						dateInt: 1692200926180,
+						flags: { seen: false, flagged: false, $junk: false, answered: false, hasAttachments: false, draft: false },
+					},
+					...propsOverride,
+				},
+				store,
+				localVue,
+			})
+		}
+
+		it('creates the snooze mailbox first if the account does not have one yet, then emits request-snooze', async () => {
+			store.accountsUnmapped[123].snoozeMailboxId = null
+			store.createAndSetSnoozeMailbox = vi.fn().mockImplementation(async (account) => {
+				account.snoozeMailboxId = 88
+			})
+			store.snoozeMessage = vi.fn()
+			const view = mountEnvelope()
+
+			await view.vm.onSnooze(1700000000000)
+
+			expect(store.createAndSetSnoozeMailbox).toHaveBeenCalled()
+			expect(view.emitted()['request-snooze'][0]).toEqual([{
+				envelope: view.vm.data,
+				isThreaded: true,
+				unixTimestamp: 1700000000,
+				destMailboxId: 88,
+			}])
+			expect(store.snoozeMessage).not.toHaveBeenCalled()
+		})
+
+		it('does not try to create a snooze mailbox that already exists', async () => {
+			store.accountsUnmapped[123].snoozeMailboxId = 88
+			store.createAndSetSnoozeMailbox = vi.fn()
+			const view = mountEnvelope()
+
+			await view.vm.onSnooze(1700000000000)
+
+			expect(store.createAndSetSnoozeMailbox).not.toHaveBeenCalled()
+			expect(view.emitted()['request-snooze'][0][0].destMailboxId).toBe(88)
+		})
+
+		it('never calls snoozeThread/snoozeMessage itself -- that is EnvelopeList.vue\'s job now', async () => {
+			store.accountsUnmapped[123].snoozeMailboxId = 88
+			store.snoozeThread = vi.fn()
+			store.snoozeMessage = vi.fn()
+			const view = mountEnvelope()
+
+			await view.vm.onSnooze(1700000000000)
+
+			expect(store.snoozeThread).not.toHaveBeenCalled()
+			expect(store.snoozeMessage).not.toHaveBeenCalled()
+		})
+	})
+
 	describe('onArchive()/moveThread() request them from EnvelopeList, for a shared undo window', () => {
 		beforeEach(() => {
 			// archiveMailbox (used by the template's hasArchiveAcl, which

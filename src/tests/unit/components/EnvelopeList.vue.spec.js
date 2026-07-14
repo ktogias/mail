@@ -395,4 +395,50 @@ describe('EnvelopeList', () => {
 			expect(view.vm.sortedEnvelops.map((e) => e.databaseId).sort()).toEqual([1, 2, 3])
 		})
 	})
+
+	describe('onRequestSnooze (a single row\'s own snooze action)', () => {
+		beforeEach(() => {
+			vi.useFakeTimers()
+			store.snoozeThread = vi.fn().mockResolvedValue()
+			store.snoozeMessage = vi.fn().mockResolvedValue()
+			showUndo.mockClear()
+		})
+
+		afterEach(() => {
+			vi.useRealTimers()
+		})
+
+		it('hides the row immediately and defers the real snooze (snoozeThread) behind an undo window', async () => {
+			const view = mountEnvelopeList()
+
+			view.vm.onRequestSnooze({ envelope: envelopes[0], isThreaded: true, unixTimestamp: 1700000000, destMailboxId: 88 })
+			expect(view.vm.sortedEnvelops.map((e) => e.databaseId)).toEqual([2, 3])
+			expect(store.snoozeThread).not.toHaveBeenCalled()
+
+			await vi.advanceTimersByTimeAsync(10000)
+			expect(store.snoozeThread).toHaveBeenCalledWith({ envelope: envelopes[0], unixTimestamp: 1700000000, destMailboxId: 88 })
+		})
+
+		it('routes a non-threaded snooze request through snoozeMessage instead of snoozeThread', async () => {
+			const view = mountEnvelopeList()
+
+			view.vm.onRequestSnooze({ envelope: envelopes[0], isThreaded: false, unixTimestamp: 1700000000, destMailboxId: 88 })
+			await vi.advanceTimersByTimeAsync(10000)
+
+			expect(store.snoozeMessage).toHaveBeenCalledWith({ id: envelopes[0].databaseId, unixTimestamp: 1700000000, destMailboxId: 88 })
+			expect(store.snoozeThread).not.toHaveBeenCalled()
+		})
+
+		it('never snoozes anything if Undo is clicked in time', async () => {
+			const view = mountEnvelopeList()
+
+			view.vm.onRequestSnooze({ envelope: envelopes[0], isThreaded: true, unixTimestamp: 1700000000, destMailboxId: 88 })
+			const onUndo = showUndo.mock.calls[0][1]
+			onUndo()
+			await vi.advanceTimersByTimeAsync(10000)
+
+			expect(store.snoozeThread).not.toHaveBeenCalled()
+			expect(view.vm.sortedEnvelops.map((e) => e.databaseId).sort()).toEqual([1, 2, 3])
+		})
+	})
 })

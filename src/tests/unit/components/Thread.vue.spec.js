@@ -1100,4 +1100,49 @@ describe('Thread', () => {
 			expect(store.syncEnvelopes).not.toHaveBeenCalled()
 		})
 	})
+
+	describe('onRequestSnooze (MenuEnvelope.vue\'s own snooze action, via ThreadEnvelope.vue)', () => {
+		const envelope = { databaseId: 1001, accountId: 100 }
+
+		beforeEach(() => {
+			vi.useFakeTimers()
+			store.snoozeThread = vi.fn().mockResolvedValue()
+			store.snoozeMessage = vi.fn().mockResolvedValue()
+			showUndo.mockClear()
+		})
+
+		afterEach(() => {
+			vi.useRealTimers()
+		})
+
+		function mountThread() {
+			return shallowMount(Thread, {
+				mocks: { $route: { params: { threadId: 200 } } },
+				store,
+				localVue,
+			})
+		}
+
+		it('defers the real snooze behind an undo window', async () => {
+			const view = mountThread()
+
+			view.vm.onRequestSnooze({ envelope, isThreaded: false, unixTimestamp: 1700000000, destMailboxId: 88 })
+			await vi.advanceTimersByTimeAsync(0)
+			expect(store.snoozeMessage).not.toHaveBeenCalled()
+
+			await vi.advanceTimersByTimeAsync(10000)
+			expect(store.snoozeMessage).toHaveBeenCalledWith({ id: envelope.databaseId, unixTimestamp: 1700000000, destMailboxId: 88 })
+		})
+
+		it('never snoozes anything if Undo is clicked in time', async () => {
+			const view = mountThread()
+
+			view.vm.onRequestSnooze({ envelope, isThreaded: false, unixTimestamp: 1700000000, destMailboxId: 88 })
+			const onUndo = showUndo.mock.calls[0][1]
+			onUndo()
+			await vi.advanceTimersByTimeAsync(10000)
+
+			expect(store.snoozeMessage).not.toHaveBeenCalled()
+		})
+	})
 })

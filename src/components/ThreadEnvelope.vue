@@ -251,6 +251,7 @@
 							@reply="onReply('', false, false)"
 							@delete="$emit('delete', envelope.databaseId)"
 							@request-toggle-junk-one="$emit('request-toggle-junk-one', $event)"
+							@request-snooze="$emit('request-snooze', $event)"
 							@show-source-modal="onShowSourceModal"
 							@open-tag-modal="onOpenTagModal"
 							@open-move-modal="onOpenMoveModal"

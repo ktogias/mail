@@ -134,6 +134,7 @@
 				@request-move="onRequestMove"
 				@request-toggle-junk-one="onRequestToggleJunkOne"
 				@request-toggle-junk-thread="onRequestToggleJunkThread"
+				@request-snooze="onRequestSnooze"
 				@update:selected="onEnvelopeSelectToggle(env, index, $event)"
 				@select-multiple="onEnvelopeSelectMultiple(env, index)"
 				@open:quick-actions-settings="showQuickActionsSettings = true" />
@@ -745,6 +746,29 @@ export default {
 			}).catch((error) => {
 				logger.error('could not toggle junk status for thread', { error })
 				showError(t('mail', 'Could not update spam status'))
+			})
+		},
+
+		// A single envelope's own snooze action (Envelope.vue's
+		// onSnooze()) requests it here instead of calling the store
+		// directly, same reasoning as onRequestDeleteOne() above. The
+		// snooze mailbox itself, if it needed creating, was already
+		// created eagerly (not deferred -- a one-time, idempotent setup
+		// step, not the undo-able action itself).
+		onRequestSnooze({ envelope, isThreaded, unixTimestamp, destMailboxId }) {
+			this.performActionWithUndo({
+				ids: [envelope.databaseId],
+				message: t('mail', 'Message snoozed'),
+				action: async () => {
+					if (isThreaded) {
+						await this.mainStore.snoozeThread({ envelope, unixTimestamp, destMailboxId })
+					} else {
+						await this.mainStore.snoozeMessage({ id: envelope.databaseId, unixTimestamp, destMailboxId })
+					}
+				},
+			}).catch((error) => {
+				logger.error('could not snooze message', { error })
+				showError(t('mail', 'Could not snooze message'))
 			})
 		},
 
