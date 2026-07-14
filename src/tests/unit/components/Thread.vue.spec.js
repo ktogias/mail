@@ -3,12 +3,18 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+import { showUndo } from '@nextcloud/dialogs'
 import { createLocalVue, shallowMount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import Thread from '../../../components/Thread.vue'
 import Nextcloud from '../../../mixins/Nextcloud.js'
 import { UNIFIED_INBOX_ID } from '../../../store/constants.js'
 import useMainStore from '../../../store/mainStore.js'
+
+vi.mock('@nextcloud/dialogs', async (importOriginal) => ({
+	...(await importOriginal()),
+	showUndo: vi.fn(),
+}))
 
 const localVue = createLocalVue()
 
@@ -932,6 +938,70 @@ describe('Thread', () => {
 			expect(store.fetchMessage).toHaveBeenCalledWith(9103, { speculative: true })
 			expect(store.fetchMessage).not.toHaveBeenCalledWith(9001, expect.anything())
 			expect(store.fetchMessage).not.toHaveBeenCalledWith(9003, expect.anything())
+		})
+	})
+
+	describe('onRequestDeleteOne/onRequestArchiveOne (ThreadEnvelope.vue requests them instead of calling the store itself)', () => {
+		// Deleting/archiving a single message from within an open thread
+		// used to call deleteMessage()/moveMessage() directly from
+		// ThreadEnvelope.vue -- a separate entry point from
+		// EnvelopeList.vue's own delete, with zero undo coverage. Both
+		// now go through the same UndoableActionMixin.
+		const envelope = { databaseId: 1001, accountId: 100 }
+
+		beforeEach(() => {
+			vi.useFakeTimers()
+			store.deleteMessage = vi.fn().mockResolvedValue()
+			store.moveMessage = vi.fn().mockResolvedValue()
+			store.getAccount = vi.fn().mockReturnValue({ archiveMailboxId: 55 })
+			showUndo.mockClear()
+		})
+
+		afterEach(() => {
+			vi.useRealTimers()
+		})
+
+		function mountThread() {
+			return shallowMount(Thread, {
+				mocks: { $route: { params: { threadId: 200 } } },
+				store,
+				localVue,
+			})
+		}
+
+		it('defers the real delete behind an undo window', async () => {
+			const view = mountThread()
+
+			view.vm.onRequestDeleteOne(envelope)
+			await vi.advanceTimersByTimeAsync(0)
+			expect(store.deleteMessage).not.toHaveBeenCalled()
+
+			await vi.advanceTimersByTimeAsync(10000)
+			expect(store.deleteMessage).toHaveBeenCalledWith({ id: 1001 })
+		})
+
+		it('never deletes at all if Undo is clicked in time', async () => {
+			const view = mountThread()
+
+			view.vm.onRequestDeleteOne(envelope)
+			await vi.advanceTimersByTimeAsync(0)
+			const onUndo = showUndo.mock.calls[0][1]
+			onUndo()
+
+			await vi.advanceTimersByTimeAsync(10000)
+			expect(store.deleteMessage).not.toHaveBeenCalled()
+		})
+
+		it('defers the real archive (moveMessage, resolving the destination from the envelope\'s own account) behind the same undo window', async () => {
+			const view = mountThread()
+
+			view.vm.onRequestArchiveOne(envelope)
+			await vi.advanceTimersByTimeAsync(0)
+			expect(store.moveMessage).not.toHaveBeenCalled()
+
+			await vi.advanceTimersByTimeAsync(10000)
+			expect(store.getAccount).toHaveBeenCalledWith(100)
+			expect(store.moveMessage).toHaveBeenCalledWith({ id: 1001, destMailboxId: 55 })
 		})
 	})
 })

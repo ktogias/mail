@@ -419,8 +419,6 @@ import TaskModal from './TaskModal.vue'
 import TranslationModal from './TranslationModal.vue'
 import importantSvg from '../../img/important.svg'
 import { isPgpText } from '../crypto/pgp.js'
-import { matchError } from '../errors/match.js'
-import NoTrashMailboxConfiguredError from '../errors/NoTrashMailboxConfiguredError.js'
 import logger from '../logger.js'
 import HoverPrefetchMixin from '../mixins/HoverPrefetchMixin.js'
 import ViewportPrefetchMixin from '../mixins/ViewportPrefetchMixin.js'
@@ -1066,7 +1064,7 @@ export default {
 			this.mainStore.toggleEnvelopeSeen({ envelope: this.envelope })
 		},
 
-		async onDelete() {
+		onDelete() {
 			// Remove from selection first
 			if (this.withSelect) {
 				this.$emit('unselect')
@@ -1077,43 +1075,27 @@ export default {
 
 			logger.info(`deleting message ${this.envelope.databaseId}`)
 
-			try {
-				await this.mainStore.deleteMessage({
-					id: this.envelope.databaseId,
-				})
-			} catch (error) {
-				showError(await matchError(error, {
-					[NoTrashMailboxConfiguredError.getName()]() {
-						return t('mail', 'No trash folder configured')
-					},
-					default(error) {
-						logger.error('could not delete message', error)
-						return t('mail', 'Could not delete message')
-					},
-				}))
-			}
+			// The actual store call is Thread.vue's job now, not this
+			// component's: it owns the undo-window bookkeeping
+			// (UndoableActionMixin) that hides this row immediately and
+			// only actually deletes a few seconds later unless undone,
+			// same mechanism EnvelopeList.vue's own delete already goes
+			// through for the mailbox list view.
+			this.$emit('request-delete', this.envelope)
 		},
 
-		async onArchive() {
+		onArchive() {
 			// Remove from selection first
 			if (this.withSelect) {
 				this.$emit('unselect')
 			}
 
-			// Archive
-			this.$emit('archive', this.envelope.databaseId)
-
 			logger.info(`archiving message ${this.envelope.databaseId}`)
 
-			try {
-				await this.mainStore.moveMessage({
-					id: this.envelope.databaseId,
-					destMailboxId: this.account.archiveMailboxId,
-				})
-			} catch (error) {
-				logger.error('could not archive message', error)
-				return t('mail', 'Could not archive message')
-			}
+			// Same reasoning as onDelete() above: Thread.vue defers the
+			// real moveMessage() call behind an undo window instead of
+			// this component calling it directly.
+			this.$emit('request-archive', this.envelope)
 		},
 
 		async onDisableFollowUpReminder() {

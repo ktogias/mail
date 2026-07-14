@@ -4,7 +4,8 @@
 -->
 
 <template>
-	<div class="mailbox"
+	<div
+		class="mailbox"
 		:class="{ 'empty-content': (!hasMessages && !loadingEnvelopes) || error }">
 		<Error
 			v-if="error"
@@ -19,7 +20,7 @@
 		<EmptyMailboxSection v-else-if="(isPriorityInbox || searchQuery) && !hasMessages" key="empty" />
 		<EmptyMailbox v-else-if="!hasMessages" key="empty" />
 		<template v-else-if="hasGroupedEnvelopes && !isPriorityInbox">
-			<div v-for="[label, group] in groupEnvelopes" :key="label">
+			<div v-for="[label, group] in visibleGroupEnvelopes" :key="label">
 				<SectionTitle class="section-title" :name="getLabelForGroup(label)" />
 				<EnvelopeList
 					:account="account"
@@ -38,7 +39,7 @@
 			:load-more-label="loadMoreLabel"
 			:mailbox="mailbox"
 			:search-query="searchQuery"
-			:envelopes="envelopesToShow"
+			:envelopes="visibleEnvelopesToShow"
 			:loading-more="loadingMore"
 			:load-more-button="showLoadMore"
 			:skip-transition="skipListTransition"
@@ -64,6 +65,7 @@ import { matchError } from '../errors/match.js'
 import NoTrashMailboxConfiguredError
 	from '../errors/NoTrashMailboxConfiguredError.js'
 import logger from '../logger.js'
+import UndoableActionMixin from '../mixins/UndoableActionMixin.js'
 import useMainStore from '../store/mainStore.js'
 import { mailboxHasRights } from '../util/acl.js'
 import { wait } from '../util/wait.js'
@@ -79,6 +81,8 @@ export default {
 		LoadingSkeleton,
 		SectionTitle,
 	},
+
+	mixins: [UndoableActionMixin],
 
 	props: {
 		groupEnvelopes: {
@@ -165,6 +169,23 @@ export default {
 				return this.envelopes.slice(0, this.initialPageSize)
 			}
 			return this.envelopes
+		},
+
+		// Envelopes pending an undoable delete/archive from a keyboard
+		// shortcut (see UndoableActionMixin) are hidden here, immediately,
+		// same reasoning as EnvelopeList.vue's own sortedEnvelops filter:
+		// the message should look gone right away, not linger for the
+		// full undo window just because nothing irreversible has actually
+		// happened yet.
+		visibleEnvelopesToShow() {
+			return this.envelopesToShow.filter((envelope) => !this.isPendingUndo(envelope.databaseId))
+		},
+
+		visibleGroupEnvelopes() {
+			return this.groupEnvelopes.map(([label, group]) => [
+				label,
+				group.filter((envelope) => !this.isPendingUndo(envelope.databaseId)),
+			])
 		},
 
 		hasGroupedEnvelopes() {
@@ -518,11 +539,20 @@ export default {
 					}
 					logger.debug('deleting', { env })
 					this.onDelete(env.databaseId)
-					try {
-						await this.mainStore.deleteThread({
-							envelope: env,
-						})
-					} catch (error) {
+					// Not awaited: same reasoning as EnvelopeList.vue's
+					// deleteAllSelected() -- the real delete is deferred
+					// behind an undo window (UndoableActionMixin), and
+					// shouldn't block navigating to the next/prev message,
+					// which onDelete() above already handles immediately.
+					this.performActionWithUndo({
+						ids: [env.databaseId],
+						message: t('mail', 'Message deleted'),
+						action: async () => {
+							await this.mainStore.deleteThread({
+								envelope: env,
+							})
+						},
+					}).catch(async (error) => {
 						logger.error('could not delete envelope', {
 							env,
 							error,
@@ -536,7 +566,7 @@ export default {
 								return t('mail', 'Could not delete message')
 							},
 						}))
-					}
+					})
 
 					break
 				case 'arch':
@@ -559,19 +589,23 @@ export default {
 
 					logger.debug('archiving', { env })
 					this.onDelete(env.databaseId)
-					try {
-						await this.mainStore.moveThread({
-							envelope: env,
-							destMailboxId: this.account.archiveMailboxId,
-						})
-					} catch (error) {
+					this.performActionWithUndo({
+						ids: [env.databaseId],
+						message: t('mail', 'Message archived'),
+						action: async () => {
+							await this.mainStore.moveThread({
+								envelope: env,
+								destMailboxId: this.account.archiveMailboxId,
+							})
+						},
+					}).catch((error) => {
 						logger.error('could not archive envelope', {
 							env,
 							error,
 						})
 
 						showError(t('mail', 'Could not archive message'))
-					}
+					})
 					break
 				case 'flag':
 					logger.debug('flagging envelope via shortkey', { env })

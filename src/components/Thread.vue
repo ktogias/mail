@@ -20,7 +20,7 @@
 			</div>
 			<ThreadSummary v-if="showSummaryBox" :loading="summaryLoading" :summary="summaryText" />
 			<ThreadEnvelope
-				v-for="(env, index) in thread"
+				v-for="(env, index) in visibleThread"
 				:key="env.databaseId"
 				:envelope="env"
 				:mailbox-id="$route.params.mailboxId"
@@ -29,6 +29,8 @@
 				:full-height="thread.length === 1"
 				:thread-index="index"
 				@delete="$emit('delete', env.databaseId)"
+				@request-delete="onRequestDeleteOne"
+				@request-archive="onRequestArchiveOne"
 				@loaded="addLoadedThread"
 				@move="onMove(env.databaseId)"
 				@toggle-expand="toggleExpand(env.databaseId)"
@@ -46,7 +48,10 @@ import Error from './Error.vue'
 import Loading from './Loading.vue'
 import ThreadEnvelope from './ThreadEnvelope.vue'
 import ThreadSummary from './ThreadSummary.vue'
+import { matchError } from '../errors/match.js'
+import NoTrashMailboxConfiguredError from '../errors/NoTrashMailboxConfiguredError.js'
 import logger from '../logger.js'
+import UndoableActionMixin from '../mixins/UndoableActionMixin.js'
 import { summarizeThread } from '../service/AiIntergrationsService.js'
 import useMainStore from '../store/mainStore.js'
 import { getRandomMessageErrorMessage } from '../util/ErrorMessageFactory.js'
@@ -61,6 +66,8 @@ export default {
 		Loading,
 		ThreadEnvelope,
 	},
+
+	mixins: [UndoableActionMixin],
 
 	data() {
 		return {
@@ -133,6 +140,16 @@ export default {
 			} else {
 				return envelopes.filter((envelope) => !mailboxesToIgnore.includes(envelope.mailboxId))
 			}
+		},
+
+		// Messages pending an undoable delete/archive (see
+		// UndoableActionMixin) are hidden here immediately, same
+		// reasoning as EnvelopeList.vue's own sortedEnvelops filter: the
+		// message should look gone right away, not linger for the full
+		// undo window just because nothing irreversible has actually
+		// happened yet.
+		visibleThread() {
+			return this.thread.filter((envelope) => !this.isPendingUndo(envelope.databaseId))
 		},
 
 		threadSubject() {
@@ -233,6 +250,50 @@ export default {
 				this.expandedThreads = this.expandedThreads.filter((id) => id !== threadId)
 				this.fetchThread()
 			}
+		},
+
+		// ThreadEnvelope.vue's own delete/archive actions request them
+		// here instead of calling the store directly, so a message
+		// deleted/archived from within an open thread goes through the
+		// same undo window as the mailbox list's delete
+		// (EnvelopeList.vue's onRequestDeleteOne()).
+		onRequestDeleteOne(envelope) {
+			this.performActionWithUndo({
+				ids: [envelope.databaseId],
+				message: t('mail', 'Message deleted'),
+				action: async () => {
+					await this.mainStore.deleteMessage({
+						id: envelope.databaseId,
+					})
+				},
+			}).catch(async (error) => {
+				showError(await matchError(error, {
+					[NoTrashMailboxConfiguredError.getName()]() {
+						return t('mail', 'No trash folder configured')
+					},
+					default(error) {
+						logger.error('could not delete message', error)
+						return t('mail', 'Could not delete message')
+					},
+				}))
+			})
+		},
+
+		onRequestArchiveOne(envelope) {
+			const account = this.mainStore.getAccount(envelope.accountId)
+			this.performActionWithUndo({
+				ids: [envelope.databaseId],
+				message: t('mail', 'Message archived'),
+				action: async () => {
+					await this.mainStore.moveMessage({
+						id: envelope.databaseId,
+						destMailboxId: account.archiveMailboxId,
+					})
+				},
+			}).catch((error) => {
+				logger.error('could not archive message', error)
+				showError(t('mail', 'Could not archive message'))
+			})
 		},
 
 		// Which message to auto-expand (and scroll to) when the thread

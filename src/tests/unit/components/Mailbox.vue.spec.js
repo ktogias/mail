@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+import { showError, showUndo } from '@nextcloud/dialogs'
 import { createLocalVue, shallowMount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import Mailbox from '../../../components/Mailbox.vue'
@@ -10,6 +11,12 @@ import MailboxLockedError from '../../../errors/MailboxLockedError.js'
 import MailboxNotCachedError from '../../../errors/MailboxNotCachedError.js'
 import Nextcloud from '../../../mixins/Nextcloud.js'
 import useMainStore from '../../../store/mainStore.js'
+
+vi.mock('@nextcloud/dialogs', async (importOriginal) => ({
+	...(await importOriginal()),
+	showUndo: vi.fn(),
+	showError: vi.fn(),
+}))
 
 const localVue = createLocalVue()
 localVue.mixin(Nextcloud)
@@ -351,6 +358,91 @@ describe('Mailbox', () => {
 
 			expect(store.lastOpenedFromList).toBeNull()
 			expect(view.vm.$router.push).not.toHaveBeenCalled()
+		})
+	})
+
+	describe('keyboard-shortcut delete/archive go through the same undo window as a list click', () => {
+		// Mailbox.vue's own 'del'/'arch' keyboard shortcuts used to call
+		// deleteThread()/moveThread() directly -- a third entry point
+		// (besides EnvelopeList.vue's bulk delete and Envelope.vue's own
+		// row click) with zero undo coverage. Both now go through the
+		// same UndoableActionMixin every other delete/archive path uses.
+		beforeEach(() => {
+			store.getEnvelopes = vi.fn().mockReturnValue([
+				{ databaseId: 1, mailboxId: 38 },
+			])
+			store.deleteThread = vi.fn().mockResolvedValue()
+			store.moveThread = vi.fn().mockResolvedValue()
+			account.archiveMailboxId = 99
+			showUndo.mockClear()
+			showError.mockClear()
+		})
+
+		it('defers the real delete behind an undo window instead of calling it immediately', async () => {
+			vi.useFakeTimers()
+			try {
+				const view = mountMailbox({}, { $route: { params: { threadId: 1 } } })
+
+				view.vm.handleShortcut({ srcKey: 'del' })
+				await vi.advanceTimersByTimeAsync(0)
+				expect(store.deleteThread).not.toHaveBeenCalled()
+
+				await vi.advanceTimersByTimeAsync(10000)
+				expect(store.deleteThread).toHaveBeenCalledWith({ envelope: { databaseId: 1, mailboxId: 38 } })
+			} finally {
+				vi.useRealTimers()
+			}
+		})
+
+		it('never deletes at all if Undo is clicked in time', async () => {
+			vi.useFakeTimers()
+			try {
+				const view = mountMailbox({}, { $route: { params: { threadId: 1 } } })
+
+				view.vm.handleShortcut({ srcKey: 'del' })
+				await vi.advanceTimersByTimeAsync(0)
+				const onUndo = showUndo.mock.calls[0][1]
+				onUndo()
+
+				await vi.advanceTimersByTimeAsync(10000)
+				expect(store.deleteThread).not.toHaveBeenCalled()
+			} finally {
+				vi.useRealTimers()
+			}
+		})
+
+		it('defers the real archive (moveThread) behind the same undo window', async () => {
+			vi.useFakeTimers()
+			try {
+				const view = mountMailbox({}, { $route: { params: { threadId: 1 } } })
+
+				view.vm.handleShortcut({ srcKey: 'arch' })
+				await vi.advanceTimersByTimeAsync(0)
+				expect(store.moveThread).not.toHaveBeenCalled()
+
+				await vi.advanceTimersByTimeAsync(10000)
+				expect(store.moveThread).toHaveBeenCalledWith({
+					envelope: { databaseId: 1, mailboxId: 38 },
+					destMailboxId: 99,
+				})
+			} finally {
+				vi.useRealTimers()
+			}
+		})
+
+		it('surfaces an error if the deferred delete itself fails once the undo window passes', async () => {
+			store.deleteThread = vi.fn().mockRejectedValue(new Error('boom'))
+			vi.useFakeTimers()
+			try {
+				const view = mountMailbox({}, { $route: { params: { threadId: 1 } } })
+
+				view.vm.handleShortcut({ srcKey: 'del' })
+				await vi.advanceTimersByTimeAsync(10000)
+
+				expect(showError).toHaveBeenCalled()
+			} finally {
+				vi.useRealTimers()
+			}
 		})
 	})
 

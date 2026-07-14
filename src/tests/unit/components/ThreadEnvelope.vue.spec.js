@@ -773,4 +773,69 @@ describe('ThreadEnvelope', () => {
 			expect(ViewportPrefetchObserver.unobserveViewportVisibility).toHaveBeenCalledWith(el)
 		})
 	})
+
+	describe('onDelete()/onArchive() request them from Thread.vue instead of calling the store directly', () => {
+		// Thread.vue owns the undo-window bookkeeping now (same mechanism
+		// EnvelopeList.vue's own delete already goes through for the
+		// mailbox list view) -- this component's job is just to say what
+		// the user asked for.
+		let store
+
+		beforeEach(() => {
+			store = useMainStore()
+			store.getAccount = vi.fn().mockReturnValue({ name: 'Test', emailAddress: 'test@test.com' })
+			store.deleteMessage = vi.fn()
+			store.moveMessage = vi.fn()
+		})
+
+		function mountThreadEnvelope() {
+			return shallowMount(ThreadEnvelope, {
+				propsData: {
+					account: {},
+					mailbox: { specialRole: '' },
+					envelope: {
+						accountId: 123,
+						databaseId: 999,
+						from: [{ email: 'info@test.com' }],
+						to: [],
+						cc: [],
+						flags: { seen: false, flagged: false, $junk: false, answered: false, hasAttachments: false, draft: false },
+						subject: '',
+						dateInt: 1692200926180,
+					},
+					threadSubject: '',
+					threadIndex: 0,
+					expanded: false,
+				},
+				computed: {
+					mailbox() {
+						return { myAcls: undefined }
+					},
+					archiveMailbox() {
+						return { myAcls: undefined }
+					},
+				},
+				localVue,
+			})
+		}
+
+		it('onDelete() emits delete (for navigation) and request-delete (for the actual deferred deletion), never calling the store itself', () => {
+			const view = mountThreadEnvelope()
+
+			view.vm.onDelete()
+
+			expect(view.emitted().delete[0]).toEqual([999])
+			expect(view.emitted()['request-delete'][0]).toEqual([view.vm.envelope])
+			expect(store.deleteMessage).not.toHaveBeenCalled()
+		})
+
+		it('onArchive() emits request-archive, never calling the store itself', () => {
+			const view = mountThreadEnvelope()
+
+			view.vm.onArchive()
+
+			expect(view.emitted()['request-archive'][0]).toEqual([view.vm.envelope])
+			expect(store.moveMessage).not.toHaveBeenCalled()
+		})
+	})
 })
