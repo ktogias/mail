@@ -572,9 +572,6 @@ import TagModal from './TagModal.vue'
 import TaskModal from './TaskModal.vue'
 import { isPgpText } from '../crypto/pgp.js'
 import { DraggableEnvelopeDirective } from '../directives/drag-and-drop/draggable-envelope/index.js'
-import { matchError } from '../errors/match.js'
-import NoTrashMailboxConfiguredError
-	from '../errors/NoTrashMailboxConfiguredError.js'
 import logger from '../logger.js'
 import AttachmentMixin from '../mixins/AttachmentMixin.js'
 import HoverPrefetchMixin from '../mixins/HoverPrefetchMixin.js'
@@ -1356,33 +1353,24 @@ export default {
 			})
 		},
 
-		async onDelete() {
+		onDelete() {
 			// Remove from selection first
 			this.setSelected(false)
 			// Delete
 			this.$emit('delete', this.data.databaseId)
 
-			try {
-				if (this.layoutMessageViewThreaded) {
-					await this.mainStore.deleteThread({
-						envelope: this.data,
-					})
-				} else {
-					await this.mainStore.deleteMessage({
-						id: this.data.databaseId,
-					})
-				}
-			} catch (error) {
-				showError(await matchError(error, {
-					[NoTrashMailboxConfiguredError.getName()]() {
-						return t('mail', 'No trash folder configured')
-					},
-					default(error) {
-						logger.error('could not delete message', error)
-						return t('mail', 'Could not delete message')
-					},
-				}))
-			}
+			// The actual store call is EnvelopeList.vue's job now, not
+			// this component's: it owns the undo-window bookkeeping
+			// (UndoableActionMixin) that hides this row immediately and
+			// only actually deletes a few seconds later unless undone --
+			// the same mechanism a bulk delete from the list already
+			// goes through, so a single click here behaves consistently
+			// with selecting one message and hitting the same delete
+			// button.
+			this.$emit('request-delete', {
+				envelope: this.data,
+				isThreaded: this.layoutMessageViewThreaded,
+			})
 		},
 
 		showMoreActionOptions() {

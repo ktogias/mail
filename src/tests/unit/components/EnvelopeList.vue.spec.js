@@ -3,11 +3,17 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+import { showUndo } from '@nextcloud/dialogs'
 import { createLocalVue, shallowMount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import EnvelopeList from '../../../components/EnvelopeList.vue'
 import Nextcloud from '../../../mixins/Nextcloud.js'
 import useMainStore from '../../../store/mainStore.js'
+
+vi.mock('@nextcloud/dialogs', async (importOriginal) => ({
+	...(await importOriginal()),
+	showUndo: vi.fn(),
+}))
 
 const localVue = createLocalVue()
 localVue.mixin(Nextcloud)
@@ -82,6 +88,81 @@ describe('EnvelopeList', () => {
 
 			expect(store.lastOpenedFromList).toBeNull()
 			expect(view.vm.$router.push).toHaveBeenCalledWith(expect.objectContaining({ name: 'mailbox' }))
+		})
+	})
+
+	describe('undo window on delete (backlog item #5: no confirmation dialog, but a real undo)', () => {
+		// Deletes had no confirmation dialog and no undo affordance at
+		// all -- reversibility was entirely implicit ("go find it in
+		// Trash yourself"). The stronger, standard pattern is an "N
+		// deleted -- Undo" toast: the row disappears immediately, but the
+		// real, irreversible server-side call is held back for a few
+		// seconds in case the user meant something else.
+		beforeEach(() => {
+			vi.useFakeTimers()
+			store.deleteThread = vi.fn().mockResolvedValue()
+			store.deleteMessage = vi.fn().mockResolvedValue()
+			showUndo.mockClear()
+		})
+
+		afterEach(() => {
+			vi.useRealTimers()
+		})
+
+		it('hides the deleted envelopes immediately, before the undo window even starts counting down', async () => {
+			const view = mountEnvelopeList()
+			await view.setData({ selection: [1, 2] })
+
+			await view.vm.deleteAllSelected()
+
+			expect(view.vm.sortedEnvelops.map((e) => e.databaseId)).toEqual([3])
+			// Nothing irreversible yet -- the real call only happens once
+			// the undo window passes without being cancelled.
+			expect(store.deleteThread).not.toHaveBeenCalled()
+		})
+
+		it('only actually deletes once the undo window passes uninterrupted', async () => {
+			const view = mountEnvelopeList()
+			await view.setData({ selection: [1, 2] })
+
+			await view.vm.deleteAllSelected()
+			await vi.advanceTimersByTimeAsync(10000)
+
+			expect(store.deleteThread).toHaveBeenCalledTimes(2)
+		})
+
+		it('never calls the real delete at all if Undo is clicked in time', async () => {
+			const view = mountEnvelopeList()
+			await view.setData({ selection: [1, 2] })
+
+			await view.vm.deleteAllSelected()
+			const onUndo = showUndo.mock.calls[0][1]
+			onUndo()
+			await vi.advanceTimersByTimeAsync(10000)
+
+			expect(store.deleteThread).not.toHaveBeenCalled()
+			expect(view.vm.sortedEnvelops.map((e) => e.databaseId).sort()).toEqual([1, 2, 3])
+		})
+
+		it('a single envelope\'s own delete request goes through the same undo window as a bulk delete', async () => {
+			const view = mountEnvelopeList()
+
+			view.vm.onRequestDeleteOne({ envelope: envelopes[0], isThreaded: true })
+			expect(view.vm.sortedEnvelops.map((e) => e.databaseId)).toEqual([2, 3])
+			expect(store.deleteThread).not.toHaveBeenCalled()
+
+			await vi.advanceTimersByTimeAsync(10000)
+			expect(store.deleteThread).toHaveBeenCalledWith({ envelope: envelopes[0] })
+		})
+
+		it('routes a single non-threaded delete request through deleteMessage instead of deleteThread', async () => {
+			const view = mountEnvelopeList()
+
+			view.vm.onRequestDeleteOne({ envelope: envelopes[0], isThreaded: false })
+			await vi.advanceTimersByTimeAsync(10000)
+
+			expect(store.deleteMessage).toHaveBeenCalledWith({ id: envelopes[0].databaseId })
+			expect(store.deleteThread).not.toHaveBeenCalled()
 		})
 	})
 })

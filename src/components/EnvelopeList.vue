@@ -129,6 +129,7 @@
 				:selected-envelopes="selectedEnvelopes"
 				:compact-mode="compactMode"
 				@delete="$emit('delete', env.databaseId)"
+				@request-delete="onRequestDeleteOne"
 				@update:selected="onEnvelopeSelectToggle(env, index, $event)"
 				@select-multiple="onEnvelopeSelectMultiple(env, index)"
 				@open:quick-actions-settings="showQuickActionsSettings = true" />
@@ -192,6 +193,7 @@ import { matchError } from '../errors/match.js'
 import NoTrashMailboxConfiguredError
 	from '../errors/NoTrashMailboxConfiguredError.js'
 import logger from '../logger.js'
+import UndoableActionMixin from '../mixins/UndoableActionMixin.js'
 import useMainStore from '../store/mainStore.js'
 
 export default {
@@ -219,6 +221,8 @@ export default {
 		TagModal,
 		Settings,
 	},
+
+	mixins: [UndoableActionMixin],
 
 	props: {
 		account: {
@@ -287,12 +291,19 @@ export default {
 		},
 
 		sortedEnvelops() {
+			// Envelopes pending an undoable delete (see
+			// UndoableActionMixin) are hidden here, immediately, rather
+			// than waiting for the real delete call to actually land --
+			// that's the whole point of the undo window: the message
+			// looks gone right away, but nothing irreversible has
+			// happened server-side yet.
+			const notPendingUndo = this.envelopes.filter((envelope) => !this.isPendingUndo(envelope.databaseId))
 			if (this.sortOrder === 'oldest') {
-				return [...this.envelopes].sort((a, b) => {
+				return [...notPendingUndo].sort((a, b) => {
 					return a.dateInt < b.dateInt ? -1 : 1
 				})
 			}
-			return [...this.envelopes]
+			return [...notPendingUndo]
 		},
 
 		selectMode() {
@@ -493,29 +504,56 @@ export default {
 		},
 
 		async deleteAllSelected() {
+			// Captured up front, before performActionWithUndo() below
+			// hides these from sortedEnvelops/selectedEnvelopes -- both
+			// the navigation-target logic right below and the deferred
+			// delete itself need the ORIGINAL selection, not whatever it
+			// shrinks to once these envelopes stop being selectable.
+			const envelopesToDelete = this.selectedEnvelopes
 			let nextEnvelopeToNavigate
 			let isAllSelected
 
-			if (this.selectedEnvelopes.length === this.sortedEnvelops.length) {
+			if (envelopesToDelete.length === this.sortedEnvelops.length) {
 				isAllSelected = true
 			} else {
-				const indexSelectedEnvelope = this.selectedEnvelopes.findIndex((selectedEnvelope) => selectedEnvelope.databaseId === this.$route.params.threadId)
+				const indexSelectedEnvelope = envelopesToDelete.findIndex((selectedEnvelope) => selectedEnvelope.databaseId === this.$route.params.threadId)
 
 				// one of threads is selected
 				if (indexSelectedEnvelope !== -1) {
-					const lastSelectedEnvelope = this.selectedEnvelopes[this.selectedEnvelopes.length - 1]
-					const diff = this.sortedEnvelops.filter((envelope) => envelope === lastSelectedEnvelope || !this.selectedEnvelopes.includes(envelope))
+					const lastSelectedEnvelope = envelopesToDelete[envelopesToDelete.length - 1]
+					const diff = this.sortedEnvelops.filter((envelope) => envelope === lastSelectedEnvelope || !envelopesToDelete.includes(envelope))
 					const lastIndex = diff.indexOf(lastSelectedEnvelope)
 					nextEnvelopeToNavigate = diff[lastIndex === 0 ? 1 : lastIndex - 1]
 				}
 			}
 
-			await Promise.all(this.selectedEnvelopes.map(async (envelope) => {
-				logger.info(`deleting thread ${envelope.threadRootId}`)
-				await this.mainStore.deleteThread({
-					envelope,
-				})
-			})).catch(async (error) => {
+			// Not awaited here: the actual deletion is deferred behind an
+			// undo window (see UndoableActionMixin) and shouldn't block
+			// navigating away, same as a real Gmail/Thunderbird delete --
+			// you're taken to the next message immediately, the delete
+			// itself silently completes a few seconds later unless
+			// undone. Still chained with its own .catch() so a real
+			// failure (once the deferred delete actually runs) surfaces
+			// its own error independently of whatever this function does
+			// next.
+			this.performActionWithUndo({
+				ids: envelopesToDelete.map((envelope) => envelope.databaseId),
+				message: n(
+					'mail',
+					'{number} thread deleted',
+					'{number} threads deleted',
+					envelopesToDelete.length,
+					{ number: envelopesToDelete.length },
+				),
+				action: async () => {
+					await Promise.all(envelopesToDelete.map(async (envelope) => {
+						logger.info(`deleting thread ${envelope.threadRootId}`)
+						await this.mainStore.deleteThread({
+							envelope,
+						})
+					}))
+				},
+			}).catch(async (error) => {
 				showError(await matchError(error, {
 					[NoTrashMailboxConfiguredError.getName()]() {
 						return t('mail', 'No trash folder configured')
@@ -543,7 +581,7 @@ export default {
 				await this.mainStore.fetchNextEnvelopes({
 					mailboxId: this.mailbox.databaseId,
 					query: this.searchQuery,
-					quantity: this.selectedEnvelopes.length,
+					quantity: envelopesToDelete.length,
 				})
 			} else if (isAllSelected) {
 				await this.$router.push({
@@ -554,6 +592,36 @@ export default {
 				})
 			}
 			this.unselectAll()
+		},
+
+		// A single envelope's own delete action (Envelope.vue's onDelete())
+		// requests it here instead of calling the store directly, so it
+		// goes through the same undo window as a bulk delete -- otherwise
+		// a single click's delete would have no undo at all while a
+		// multi-select delete did, an inconsistency a user would notice
+		// immediately.
+		onRequestDeleteOne({ envelope, isThreaded }) {
+			this.performActionWithUndo({
+				ids: [envelope.databaseId],
+				message: t('mail', 'Message deleted'),
+				action: async () => {
+					if (isThreaded) {
+						await this.mainStore.deleteThread({ envelope })
+					} else {
+						await this.mainStore.deleteMessage({ id: envelope.databaseId })
+					}
+				},
+			}).catch(async (error) => {
+				showError(await matchError(error, {
+					[NoTrashMailboxConfiguredError.getName()]() {
+						return t('mail', 'No trash folder configured')
+					},
+					default(error) {
+						logger.error('could not delete message', error)
+						return t('mail', 'Could not delete message')
+					},
+				}))
+			})
 		},
 
 		setEnvelopeSelected(envelope, selected) {

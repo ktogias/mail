@@ -502,6 +502,59 @@ describe('Envelope', () => {
 		})
 	})
 
+	describe('onDelete() delegates the actual deletion to EnvelopeList, for a shared undo window', () => {
+		// EnvelopeList.vue owns the undo-toast bookkeeping (a single
+		// click here should behave exactly like a bulk delete of one
+		// message) -- this component's own job is just to say "the user
+		// asked to delete this", not to call the store directly anymore.
+		function mountEnvelope(propsOverride = {}) {
+			return shallowMount(Envelope, {
+				mocks: { $route },
+				propsData: {
+					mailbox: { specialRole: '', databaseId: 42, myAcls: undefined },
+					data: {
+						accountId: 123,
+						databaseId: 999,
+						from: [{ email: 'info@test.com' }],
+						flags: { seen: false, flagged: false, $junk: false, answered: false, hasAttachments: false, draft: false },
+					},
+					...propsOverride,
+				},
+				store,
+				localVue,
+			})
+		}
+
+		it('emits both delete (for navigation) and request-delete (for the actual deferred deletion), threaded by default', () => {
+			const view = mountEnvelope()
+
+			view.vm.onDelete()
+
+			expect(view.emitted().delete[0]).toEqual([999])
+			expect(view.emitted()['request-delete'][0]).toEqual([{ envelope: view.vm.data, isThreaded: true }])
+		})
+
+		it('flags the request as non-threaded when the threaded layout preference is off', () => {
+			store.preferences = { 'layout-message-view': 'flat' }
+			const view = mountEnvelope()
+
+			view.vm.onDelete()
+
+			expect(view.emitted()['request-delete'][0]).toEqual([{ envelope: view.vm.data, isThreaded: false }])
+		})
+
+		it('never calls deleteThread/deleteMessage itself -- that is EnvelopeList.vue\'s job now', () => {
+			store.deleteThread = vi.fn()
+			store.deleteMessage = vi.fn()
+			const view = mountEnvelope()
+
+			view.vm.onDelete()
+
+			expect(store.deleteThread).not.toHaveBeenCalled()
+			expect(store.deleteMessage).not.toHaveBeenCalled()
+		})
+	})
+
 	describe('hover prefetch', () => {
 		// Gmail-style: start fetching a row's message+thread while the
 		// pointer is still hovering, so the data is already there by the
