@@ -6,7 +6,6 @@
 	<MailboxPicker
 		:account="account"
 		:selected.sync="destMailboxId"
-		:loading="moving"
 		:label-select="moveThread ? t('mail', 'Move thread') : t('mail', 'Move message')"
 		:label-select-loading="moveThread ? t('mail', 'Moving thread') : t('mail', 'Moving message')"
 		@select="onMove"
@@ -14,10 +13,7 @@
 </template>
 
 <script>
-import { mapStores } from 'pinia'
 import MailboxPicker from './MailboxPicker.vue'
-import logger from '../logger.js'
-import useMainStore from '../store/mainStore.js'
 
 export default {
 	name: 'MoveModal',
@@ -44,13 +40,8 @@ export default {
 
 	data() {
 		return {
-			moving: false,
 			destMailboxId: undefined,
 		}
-	},
-
-	computed: {
-		...mapStores(useMainStore),
 	},
 
 	methods: {
@@ -58,35 +49,27 @@ export default {
 			this.$emit('close')
 		},
 
-		async onMove() {
-			this.moving = true
+		// The actual store calls are the caller's job now (EnvelopeList.vue
+		// or Thread.vue, depending on where this modal was opened from),
+		// deferred behind an undo window like every other delete/archive/
+		// junk/move action -- this modal's own job ends at picking a
+		// destination. Closes immediately rather than showing its own
+		// "Moving..." spinner: same reasoning as every other action here,
+		// the move looks done right away, the real, irreversible IMAP
+		// call happens a few seconds later unless undone.
+		onMove() {
+			const envelopes = this.envelopes
+				.filter((envelope) => envelope.mailboxId !== this.destMailboxId)
 
-			try {
-				const envelopes = this.envelopes
-					.filter((envelope) => envelope.mailboxId !== this.destMailboxId)
-
-				if (envelopes.length === 0) {
-					return
-				}
-
-				for (const envelope of envelopes) {
-					if (this.moveThread) {
-						await this.mainStore.moveThread({ envelope, destMailboxId: this.destMailboxId })
-					} else {
-						await this.mainStore.moveMessage({ id: envelope.databaseId, destMailboxId: this.destMailboxId })
-					}
-				}
-
-				await this.mainStore.syncEnvelopes({ mailboxId: this.destMailboxId })
-				this.$emit('move')
-			} catch (error) {
-				logger.error('could not move messages', {
-					error,
+			if (envelopes.length > 0) {
+				this.$emit('request-move', {
+					envelopes,
+					destMailboxId: this.destMailboxId,
+					moveThread: this.moveThread,
 				})
-			} finally {
-				this.moving = false
-				this.$emit('close')
 			}
+
+			this.$emit('close')
 		},
 	},
 }

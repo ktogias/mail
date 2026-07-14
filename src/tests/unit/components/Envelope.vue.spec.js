@@ -556,6 +556,20 @@ describe('Envelope', () => {
 	})
 
 	describe('onArchive()/moveThread() request them from EnvelopeList, for a shared undo window', () => {
+		beforeEach(() => {
+			// archiveMailbox (used by the template's hasArchiveAcl, which
+			// re-evaluates on the next tick after these methods emit)
+			// resolves via mainStore.getMailbox(account.archiveMailboxId)
+			// -- with no archiveMailboxId set on the fixture account,
+			// that's undefined, and mailboxHasRights() doesn't handle a
+			// missing mailbox object at all. Populating real store state
+			// (not just mocking the getter) since the crash happens on a
+			// deferred re-render, not synchronously within the method
+			// call itself.
+			store.accountsUnmapped[123].archiveMailboxId = 1
+			store.mailboxes[1] = { myAcls: undefined }
+		})
+
 		function mountEnvelope(propsOverride = {}) {
 			return shallowMount(Envelope, {
 				mocks: { $route },
@@ -565,6 +579,11 @@ describe('Envelope', () => {
 						accountId: 123,
 						databaseId: 999,
 						from: [{ email: 'info@test.com' }],
+						to: [],
+						cc: [],
+						attachments: [],
+						subject: '',
+						dateInt: 1692200926180,
 						flags: { seen: false, flagged: false, $junk: false, answered: false, hasAttachments: false, draft: false },
 					},
 					...propsOverride,
@@ -594,7 +613,7 @@ describe('Envelope', () => {
 
 			view.vm.moveThread(77)
 
-			expect(view.emitted()['request-move'][0]).toEqual([{ envelope: view.vm.data, isThreaded: true, destMailboxId: 77 }])
+			expect(view.emitted()['request-move'][0]).toEqual([{ envelopes: [view.vm.data], destMailboxId: 77, moveThread: true }])
 			expect(view.emitted().move).toBeTruthy()
 			expect(store.moveThread).not.toHaveBeenCalled()
 			expect(store.moveMessage).not.toHaveBeenCalled()

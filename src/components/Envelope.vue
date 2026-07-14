@@ -500,6 +500,7 @@
 				:envelopes="[data]"
 				:move-thread="listViewThreaded"
 				@move="onMove"
+				@request-move="$emit('request-move', $event)"
 				@close="onCloseMoveModal" />
 			<EventModal
 				v-if="showEventModal"
@@ -1467,11 +1468,13 @@ export default {
 			// deferred behind an undo window -- same reasoning as
 			// onDelete()/onArchive()/onToggleJunk() above. Used by the
 			// quick-actions "move to X" step (executeQuickAction()
-			// below).
+			// below). Same request-move event and {envelopes, ...} shape
+			// MoveModal's own request uses, so EnvelopeList.vue only
+			// needs the one handler for both.
 			this.$emit('request-move', {
-				envelope: this.data,
-				isThreaded: this.layoutMessageViewThreaded,
+				envelopes: [this.data],
 				destMailboxId,
+				moveThread: this.layoutMessageViewThreaded,
 			})
 			this.onMove()
 		},

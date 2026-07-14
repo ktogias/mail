@@ -1052,4 +1052,52 @@ describe('Thread', () => {
 			expect(store.toggleEnvelopeJunk).not.toHaveBeenCalled()
 		})
 	})
+
+	describe('onRequestMove (ThreadEnvelope.vue\'s own "Move to folder..." dialog)', () => {
+		const envelope = { databaseId: 1001, accountId: 100 }
+
+		beforeEach(() => {
+			vi.useFakeTimers()
+			store.moveThread = vi.fn().mockResolvedValue()
+			store.moveMessage = vi.fn().mockResolvedValue()
+			store.syncEnvelopes = vi.fn().mockResolvedValue()
+			showUndo.mockClear()
+		})
+
+		afterEach(() => {
+			vi.useRealTimers()
+		})
+
+		function mountThread() {
+			return shallowMount(Thread, {
+				mocks: { $route: { params: { threadId: 200 } } },
+				store,
+				localVue,
+			})
+		}
+
+		it('defers the real move behind an undo window and syncs the destination mailbox afterwards', async () => {
+			const view = mountThread()
+
+			view.vm.onRequestMove({ envelopes: [envelope], destMailboxId: 55, moveThread: true })
+			await vi.advanceTimersByTimeAsync(0)
+			expect(store.moveThread).not.toHaveBeenCalled()
+
+			await vi.advanceTimersByTimeAsync(10000)
+			expect(store.moveThread).toHaveBeenCalledWith({ envelope, destMailboxId: 55 })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 55 })
+		})
+
+		it('never moves anything if Undo is clicked in time', async () => {
+			const view = mountThread()
+
+			view.vm.onRequestMove({ envelopes: [envelope], destMailboxId: 55, moveThread: true })
+			const onUndo = showUndo.mock.calls[0][1]
+			onUndo()
+			await vi.advanceTimersByTimeAsync(10000)
+
+			expect(store.moveThread).not.toHaveBeenCalled()
+			expect(store.syncEnvelopes).not.toHaveBeenCalled()
+		})
+	})
 })

@@ -131,7 +131,7 @@
 				@delete="$emit('delete', env.databaseId)"
 				@request-delete="onRequestDeleteOne"
 				@request-archive="onRequestArchiveOne"
-				@request-move="onRequestMoveOne"
+				@request-move="onRequestMove"
 				@request-toggle-junk-one="onRequestToggleJunkOne"
 				@request-toggle-junk-thread="onRequestToggleJunkThread"
 				@update:selected="onEnvelopeSelectToggle(env, index, $event)"
@@ -159,6 +159,7 @@
 			:account="account"
 			:envelopes="selectedEnvelopes"
 			:move-thread="true"
+			@request-move="onRequestMove"
 			@close="onCloseMoveModal" />
 
 		<NcDialog
@@ -661,19 +662,27 @@ export default {
 		},
 
 		// A single envelope's own quick-action "move to X" step
-		// (Envelope.vue's moveThread()) requests it here instead of
-		// calling the store directly, same reasoning as
-		// onRequestDeleteOne() above.
-		onRequestMoveOne({ envelope, isThreaded, destMailboxId }) {
+		// (Envelope.vue's moveThread()) and the explicit "Move to
+		// folder..." dialog (MoveModal.vue, for both a single message
+		// and a bulk selection) both request it here instead of calling
+		// the store directly, same reasoning as onRequestDeleteOne()
+		// above -- one combined undo toast covering every envelope in
+		// the request, same as deleteAllSelected() does for bulk delete.
+		onRequestMove({ envelopes, destMailboxId, moveThread }) {
 			this.performActionWithUndo({
-				ids: [envelope.databaseId],
-				message: t('mail', 'Message moved'),
+				ids: envelopes.map((envelope) => envelope.databaseId),
+				message: n(
+					'mail',
+					'{number} message moved',
+					'{number} messages moved',
+					envelopes.length,
+					{ number: envelopes.length },
+				),
 				action: async () => {
-					if (isThreaded) {
-						await this.mainStore.moveThread({ envelope, destMailboxId })
-					} else {
-						await this.mainStore.moveMessage({ id: envelope.databaseId, destMailboxId })
-					}
+					await Promise.all(envelopes.map((envelope) => (moveThread
+						? this.mainStore.moveThread({ envelope, destMailboxId })
+						: this.mainStore.moveMessage({ id: envelope.databaseId, destMailboxId }))))
+					await this.mainStore.syncEnvelopes({ mailboxId: destMailboxId })
 				},
 			}).catch((error) => {
 				logger.error('could not move message', { error })

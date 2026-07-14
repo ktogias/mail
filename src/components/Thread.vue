@@ -32,6 +32,7 @@
 				@request-delete="onRequestDeleteOne"
 				@request-archive="onRequestArchiveOne"
 				@request-toggle-junk-one="onRequestToggleJunkOne"
+				@request-move="onRequestMove"
 				@loaded="addLoadedThread"
 				@move="onMove(env.databaseId)"
 				@toggle-expand="toggleExpand(env.databaseId)"
@@ -318,6 +319,26 @@ export default {
 			}).catch((error) => {
 				logger.error('could not toggle junk status', { error })
 				showError(t('mail', 'Could not update spam status'))
+			})
+		},
+
+		// ThreadEnvelope.vue's own "Move to folder..." dialog
+		// (MoveModal.vue) requests it here instead of calling the store
+		// directly -- same mechanism EnvelopeList.vue's onRequestMove()
+		// applies for the mailbox list view.
+		onRequestMove({ envelopes, destMailboxId, moveThread }) {
+			this.performActionWithUndo({
+				ids: envelopes.map((envelope) => envelope.databaseId),
+				message: t('mail', 'Message moved'),
+				action: async () => {
+					await Promise.all(envelopes.map((envelope) => (moveThread
+						? this.mainStore.moveThread({ envelope, destMailboxId })
+						: this.mainStore.moveMessage({ id: envelope.databaseId, destMailboxId }))))
+					await this.mainStore.syncEnvelopes({ mailboxId: destMailboxId })
+				},
+			}).catch((error) => {
+				logger.error('could not move message', { error })
+				showError(t('mail', 'Could not move message'))
 			})
 		},
 

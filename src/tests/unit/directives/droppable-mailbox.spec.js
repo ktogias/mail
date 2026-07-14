@@ -3,8 +3,14 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-import { DroppableMailboxDirective } from '../../../directives/drag-and-drop/droppable-mailbox/index.js'
+import { showUndo } from '@nextcloud/dialogs'
+import DroppableMailbox, { DroppableMailboxDirective } from '../../../directives/drag-and-drop/droppable-mailbox/index.js'
 import dragEventBus from '../../../directives/drag-and-drop/util/dragEventBus.js'
+
+vi.mock('@nextcloud/dialogs', async (importOriginal) => ({
+	...(await importOriginal()),
+	showUndo: vi.fn(),
+}))
 
 /**
  * Creates a mock DOM element with a firstChild for the directive.
@@ -164,5 +170,75 @@ describe('DroppableMailboxDirective', () => {
 
 		// Should not throw
 		expect(() => unbind(el)).not.toThrow()
+	})
+})
+
+describe('DroppableMailbox.processDroppedItem() (deferred behind an undo window, like every other move)', () => {
+	// Not a Vue component, so it can't use UndoableActionMixin -- uses
+	// the same mechanism's plain-JS core (deferWithUndo(),
+	// ../../../service/UndoableAction.js) directly instead.
+	let mainStore
+	let envelopeEl
+
+	beforeEach(() => {
+		vi.useFakeTimers()
+		mainStore = {
+			getPreference: vi.fn().mockReturnValue('threaded'),
+			moveThread: vi.fn().mockResolvedValue(),
+			moveMessage: vi.fn().mockResolvedValue(),
+		}
+		envelopeEl = document.createElement('div')
+		envelopeEl.setAttribute('data-envelope-id', '42')
+		document.body.appendChild(envelopeEl)
+		showUndo.mockClear()
+	})
+
+	afterEach(() => {
+		vi.useRealTimers()
+		envelopeEl.remove()
+	})
+
+	function makeInstance() {
+		const el = { firstChild: { addEventListener: vi.fn(), removeEventListener: vi.fn() }, setAttribute: vi.fn() }
+		return new DroppableMailbox(el, { mainStore, mailboxId: 7, accountId: 1, isValidDropTarget: true })
+	}
+
+	it('marks the row pending immediately but defers the real move behind an undo window', async () => {
+		const instance = makeInstance()
+
+		const done = instance.processDroppedItem({ databaseId: 42 })
+		expect(envelopeEl.getAttribute('draggable-envelope')).toBe('pending')
+		expect(mainStore.moveThread).not.toHaveBeenCalled()
+
+		await vi.advanceTimersByTimeAsync(10000)
+		await done
+
+		expect(mainStore.moveThread).toHaveBeenCalledWith({ envelope: { databaseId: 42 }, destMailboxId: 7 })
+		expect(envelopeEl.hasAttribute('draggable-envelope')).toBe(false)
+	})
+
+	it('never moves anything if Undo is clicked in time, and clears the pending attribute', async () => {
+		const instance = makeInstance()
+
+		const done = instance.processDroppedItem({ databaseId: 42 })
+		const onUndo = showUndo.mock.calls[0][1]
+		onUndo()
+		await vi.advanceTimersByTimeAsync(10000)
+		await done
+
+		expect(mainStore.moveThread).not.toHaveBeenCalled()
+		expect(envelopeEl.hasAttribute('draggable-envelope')).toBe(false)
+	})
+
+	it('routes through moveMessage instead of moveThread when the layout is not threaded', async () => {
+		mainStore.getPreference.mockReturnValue('flat')
+		const instance = makeInstance()
+
+		const done = instance.processDroppedItem({ databaseId: 42 })
+		await vi.advanceTimersByTimeAsync(10000)
+		await done
+
+		expect(mainStore.moveMessage).toHaveBeenCalledWith({ id: 42, destMailboxId: 7 })
+		expect(mainStore.moveThread).not.toHaveBeenCalled()
 	})
 })

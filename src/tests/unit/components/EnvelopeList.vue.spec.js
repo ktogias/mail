@@ -314,11 +314,12 @@ describe('EnvelopeList', () => {
 		})
 	})
 
-	describe('onRequestArchiveOne/onRequestMoveOne (a single row\'s own archive button/quick-action move)', () => {
+	describe('onRequestArchiveOne/onRequestMove (a single row\'s own archive button, quick-action move, and the Move-to-folder dialog)', () => {
 		beforeEach(() => {
 			vi.useFakeTimers()
 			store.moveThread = vi.fn().mockResolvedValue()
 			store.moveMessage = vi.fn().mockResolvedValue()
+			store.syncEnvelopes = vi.fn().mockResolvedValue()
 			account.archiveMailboxId = 99
 			showUndo.mockClear()
 		})
@@ -348,10 +349,10 @@ describe('EnvelopeList', () => {
 			expect(store.moveThread).not.toHaveBeenCalled()
 		})
 
-		it('defers the real move (moveThread) to the chosen destination behind an undo window', async () => {
+		it('defers the real move (moveThread) to the chosen destination behind an undo window -- quick-action shape (one envelope)', async () => {
 			const view = mountEnvelopeList()
 
-			view.vm.onRequestMoveOne({ envelope: envelopes[0], isThreaded: true, destMailboxId: 77 })
+			view.vm.onRequestMove({ envelopes: [envelopes[0]], destMailboxId: 77, moveThread: true })
 			expect(view.vm.sortedEnvelops.map((e) => e.databaseId)).toEqual([2, 3])
 			expect(store.moveThread).not.toHaveBeenCalled()
 
@@ -359,10 +360,33 @@ describe('EnvelopeList', () => {
 			expect(store.moveThread).toHaveBeenCalledWith({ envelope: envelopes[0], destMailboxId: 77 })
 		})
 
+		it('defers a bulk move-to-folder (MoveModal.vue) for every selected envelope, as one combined undo toast', async () => {
+			const view = mountEnvelopeList()
+
+			view.vm.onRequestMove({ envelopes: [envelopes[0], envelopes[1]], destMailboxId: 77, moveThread: true })
+			expect(view.vm.sortedEnvelops.map((e) => e.databaseId)).toEqual([3])
+			expect(showUndo).toHaveBeenCalledTimes(1)
+
+			await vi.advanceTimersByTimeAsync(10000)
+			expect(store.moveThread).toHaveBeenCalledWith({ envelope: envelopes[0], destMailboxId: 77 })
+			expect(store.moveThread).toHaveBeenCalledWith({ envelope: envelopes[1], destMailboxId: 77 })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 77 })
+		})
+
+		it('routes a non-threaded move request through moveMessage instead of moveThread', async () => {
+			const view = mountEnvelopeList()
+
+			view.vm.onRequestMove({ envelopes: [envelopes[0]], destMailboxId: 77, moveThread: false })
+			await vi.advanceTimersByTimeAsync(10000)
+
+			expect(store.moveMessage).toHaveBeenCalledWith({ id: envelopes[0].databaseId, destMailboxId: 77 })
+			expect(store.moveThread).not.toHaveBeenCalled()
+		})
+
 		it('never moves anything if Undo is clicked in time', async () => {
 			const view = mountEnvelopeList()
 
-			view.vm.onRequestMoveOne({ envelope: envelopes[0], isThreaded: true, destMailboxId: 77 })
+			view.vm.onRequestMove({ envelopes: [envelopes[0]], destMailboxId: 77, moveThread: true })
 			const onUndo = showUndo.mock.calls[0][1]
 			onUndo()
 			await vi.advanceTimersByTimeAsync(10000)

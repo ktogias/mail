@@ -269,6 +269,7 @@
 						:account="account"
 						:envelopes="[envelope]"
 						@move="onMove"
+						@request-move="$emit('request-move', $event)"
 						@close="onCloseMoveModal" />
 					<EventModal
 						v-if="showEventModal"

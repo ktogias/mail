@@ -2,7 +2,9 @@
  * SPDX-FileCopyrightText: 2020 Nextcloud GmbH and Nextcloud contributors
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
+import { translate as t } from '@nextcloud/l10n'
 import logger from '../../../logger.js'
+import { deferWithUndo } from '../../../service/UndoableAction.js'
 import dragEventBus from '../util/dragEventBus.js'
 
 export class DroppableMailbox {
@@ -146,21 +148,37 @@ export class DroppableMailbox {
 		const item = document.querySelector(`[data-envelope-id="${envelope.databaseId}"]`)
 		item.setAttribute('draggable-envelope', 'pending')
 
+		// Not a Vue component -- this is a plain class instantiated by
+		// the directive binding, so it can't use UndoableActionMixin at
+		// all. deferWithUndo() (../../../service/UndoableAction.js) is
+		// the same mechanism's non-Vue core: an undo toast, then the
+		// real move only if it wasn't clicked, same as every other
+		// delete/archive/junk/move action in this app now gets. Unlike
+		// those, there's no list this directive owns to hide the row
+		// from immediately -- the existing draggable-envelope="pending"
+		// attribute (already set above) is this path's own "something
+		// is happening" signal for the duration of the undo window.
 		try {
-			if (this.mainStore.getPreference('layout-message-view') === 'threaded') {
-				await this.mainStore.moveThread({
-					envelope,
-					destMailboxId: this.options.mailboxId,
-				})
-			} else {
-				await this.mainStore.moveMessage({
-					id: envelope.databaseId,
-					destMailboxId: this.options.mailboxId,
-				})
-			}
+			await deferWithUndo({
+				message: t('mail', 'Message moved'),
+				action: async () => {
+					if (this.mainStore.getPreference('layout-message-view') === 'threaded') {
+						await this.mainStore.moveThread({
+							envelope,
+							destMailboxId: this.options.mailboxId,
+						})
+					} else {
+						await this.mainStore.moveMessage({
+							id: envelope.databaseId,
+							destMailboxId: this.options.mailboxId,
+						})
+					}
+				},
+			})
 		} catch (error) {
-			item.removeAttribute('draggable-envelope')
 			logger.error('could not move messages', error)
+		} finally {
+			item.removeAttribute('draggable-envelope')
 		}
 	}
 }
