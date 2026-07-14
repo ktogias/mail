@@ -482,8 +482,74 @@ const WATCHED_SYNC_CONCURRENCY = 3
 // 3 x this -- keep the product comfortably below the FPM pool size.
 const ENVELOPE_FETCH_CONCURRENCY = 3
 
+// A single, shared concurrency budget for every mapWithConcurrencyLimit()
+// caller combined -- the priority-inbox section fan-out and the
+// watched-mailbox poller each already had their OWN limit
+// (ENVELOPE_FETCH_CONCURRENCY, WATCHED_SYNC_CONCURRENCY), which bounded
+// each MECHANISM on its own but never their sum. The priority inbox's 3
+// sections already multiply their own limit by running concurrently
+// against each other (3 x ENVELOPE_FETCH_CONCURRENCY = 9), and the
+// watched-mailbox poller's own budget runs fully independently on top of
+// that. Confirmed live: a hard reload starts every one of these
+// mechanisms from an empty cache at the same instant, and their COMBINED
+// in-flight request count -- not any single one of the numbers above --
+// is what actually overwhelmed this NAS: a wall of 504s across several
+// real mailboxes' priority-inbox buckets at once (see
+// nextcloud-mail-oauth-integration.md). Every mapWithConcurrencyLimit()
+// worker now also acquires a permit from this ONE shared pool before
+// calling `fn`, on top of (not instead of) its own call's existing
+// `limit` -- so the actual combined concurrency across every
+// simultaneously-active caller is bounded by SHARED_NETWORK_CONCURRENCY
+// regardless of how many independent mechanisms happen to be running at
+// once. Sized to this NAS's 4 cores as a starting point, not a
+// theoretically-derived optimum -- worth re-measuring live if it turns
+// out too tight (steady-state polling feeling sluggish) or still too
+// loose (bursts still timing out).
+const SHARED_NETWORK_CONCURRENCY = 4
+
+class ConcurrencyLimiter {
+	constructor(limit) {
+		this.limit = limit
+		this.active = 0
+		this.queue = []
+	}
+
+	acquire() {
+		if (this.active < this.limit) {
+			this.active++
+			return Promise.resolve()
+		}
+		return new Promise((resolve) => this.queue.push(resolve))
+	}
+
+	release() {
+		this.active--
+		const next = this.queue.shift()
+		if (next) {
+			this.active++
+			next()
+		}
+	}
+}
+
+let sharedNetworkLimiter = new ConcurrencyLimiter(SHARED_NETWORK_CONCURRENCY)
+
+// Test-only: the limiter is module-level (deliberately -- it must be
+// shared across every store instance, not per-instance state), so it
+// otherwise persists across unrelated tests in the same file. A test
+// that doesn't drive every one of its mapWithConcurrencyLimit() calls to
+// full completion (e.g. one that intentionally leaves work in flight to
+// test an abort path) would leak held permits into whichever test runs
+// next, silently shrinking its available shared budget.
+export function resetSharedNetworkLimiterForTests() {
+	sharedNetworkLimiter = new ConcurrencyLimiter(SHARED_NETWORK_CONCURRENCY)
+}
+
 /**
- * Run `fn` over `items` with at most `limit` calls in flight at once.
+ * Run `fn` over `items` with at most `limit` calls in flight at once for
+ * THIS call -- and, on top of that, gated by the single shared
+ * `sharedNetworkLimiter` every other concurrent caller also draws from
+ * (see SHARED_NETWORK_CONCURRENCY above).
  *
  * Each item's own promise settles independently -- unlike Promise.all,
  * one item throwing does not reject the others. Callers are expected to
@@ -494,13 +560,18 @@ const ENVELOPE_FETCH_CONCURRENCY = 3
  * @param limit
  * @param fn
  */
-async function mapWithConcurrencyLimit(items, limit, fn) {
+export async function mapWithConcurrencyLimit(items, limit, fn) {
 	const results = new Array(items.length)
 	let nextIndex = 0
 	async function worker() {
 		while (nextIndex < items.length) {
 			const currentIndex = nextIndex++
-			results[currentIndex] = await fn(items[currentIndex], currentIndex)
+			await sharedNetworkLimiter.acquire()
+			try {
+				results[currentIndex] = await fn(items[currentIndex], currentIndex)
+			} finally {
+				sharedNetworkLimiter.release()
+			}
 		}
 	}
 	await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))

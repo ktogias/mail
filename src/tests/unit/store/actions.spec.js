@@ -15,7 +15,7 @@ import * as NotificationService from '../../../service/NotificationService.js'
 import * as ThreadService from '../../../service/ThreadService.js'
 import { PAGE_SIZE, UNIFIED_INBOX_ID } from '../../../store/constants.js'
 import useMainStore from '../../../store/mainStore.js'
-import { computeLockRetryDelayMs } from '../../../store/mainStore/actions.js'
+import { computeLockRetryDelayMs, mapWithConcurrencyLimit, resetSharedNetworkLimiterForTests } from '../../../store/mainStore/actions.js'
 import { normalizedEnvelopeListId } from '../../../util/normalization.js'
 import { wait } from '../../../util/wait.js'
 
@@ -51,6 +51,7 @@ describe('Vuex store actions', () => {
 		setActivePinia(createPinia())
 
 		store = useMainStore()
+		resetSharedNetworkLimiterForTests()
 	})
 
 	afterEach(() => {
@@ -3535,6 +3536,88 @@ describe('Vuex store actions', () => {
 			// longer for no corresponding benefit.
 			vi.spyOn(Math, 'random').mockReturnValue(1)
 			expect(computeLockRetryDelayMs(5, 10_000)).toBe(12_000)
+		})
+	})
+
+	describe('mapWithConcurrencyLimit: a shared budget across independent, simultaneous callers', () => {
+		// Confirmed live: a hard reload starts the priority-inbox section
+		// fan-out AND the watched-mailbox poller from an empty cache at the
+		// same instant. Each already had its OWN concurrency limit
+		// (ENVELOPE_FETCH_CONCURRENCY, WATCHED_SYNC_CONCURRENCY), which
+		// bounded each mechanism on its own -- but two SEPARATE calls to
+		// mapWithConcurrencyLimit(), each requesting up to their own
+		// per-call limit, used to have no shared ceiling at all: their
+		// combined in-flight count was simply the sum. A wall of 504s
+		// across several real mailboxes' priority-inbox buckets at once
+		// resulted (see nextcloud-mail-oauth-integration.md).
+
+		function controllablePromiseFn(track) {
+			return () => new Promise((resolve) => {
+				track.concurrent++
+				track.maxConcurrent = Math.max(track.maxConcurrent, track.concurrent)
+				track.pendingResolvers.push(() => {
+					track.concurrent--
+					resolve()
+				})
+			})
+		}
+
+		it('caps the COMBINED concurrency of two simultaneous calls, not just each one individually', async () => {
+			const track = { concurrent: 0, maxConcurrent: 0, pendingResolvers: [] }
+			const fn = controllablePromiseFn(track)
+
+			// Two independent calls, each with its own limit of 3 -- exactly
+			// like the priority-inbox fan-out and the watched-mailbox poller
+			// each requesting up to their own per-call cap at the same time.
+			// Alone, either one would peak at 3; together, unbounded, they'd
+			// peak at 6. The shared limiter (SHARED_NETWORK_CONCURRENCY = 4
+			// in actions.js) must keep the combined peak at 4.
+			const callA = mapWithConcurrencyLimit([1, 2, 3], 3, fn)
+			const callB = mapWithConcurrencyLimit([4, 5, 6], 3, fn)
+
+			await vi.waitFor(() => {
+				if (track.pendingResolvers.length < 4) {
+					throw new Error(`only ${track.pendingResolvers.length} combined workers have started so far`)
+				}
+			})
+
+			expect(track.pendingResolvers.length).toBe(4)
+			expect(track.maxConcurrent).toBe(4)
+
+			// Draining lets the remaining 2 (one from each call) start
+			// without ever exceeding the shared cap.
+			while (track.pendingResolvers.length > 0) {
+				track.pendingResolvers.splice(0).forEach((resolve) => resolve())
+				await new Promise((resolve) => setTimeout(resolve, 0))
+			}
+			await Promise.all([callA, callB])
+
+			expect(track.maxConcurrent).toBe(4)
+		})
+
+		it('still lets a single call reach its own lower per-call limit when nothing else is running', async () => {
+			const track = { concurrent: 0, maxConcurrent: 0, pendingResolvers: [] }
+			const fn = controllablePromiseFn(track)
+
+			const call = mapWithConcurrencyLimit([1, 2, 3, 4, 5], 2, fn)
+
+			await vi.waitFor(() => {
+				if (track.pendingResolvers.length < 2) {
+					throw new Error(`only ${track.pendingResolvers.length} workers have started so far`)
+				}
+			})
+
+			// The per-call limit (2) is tighter than the shared budget (4)
+			// here, so it -- not the shared one -- is what actually governs.
+			expect(track.maxConcurrent).toBe(2)
+
+			while (track.pendingResolvers.length > 0) {
+				track.pendingResolvers.splice(0).forEach((resolve) => resolve())
+				await new Promise((resolve) => setTimeout(resolve, 0))
+			}
+			await call
+
+			expect(track.maxConcurrent).toBe(2)
 		})
 	})
 
