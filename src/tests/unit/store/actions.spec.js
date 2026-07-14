@@ -770,18 +770,56 @@ describe('Vuex store actions', () => {
 			store.envelopes[id] = { databaseId: id, mailboxId: 11, dateInt: id, flags: { flagged } }
 		}
 
-		it('a star being added moves the message from not:starred to is:starred', () => {
+		it('a star being added adds the message to is:starred, but does not immediately evict it from not:starred (a differently-unstarred sibling might still justify it)', () => {
 			seedKnownEnvelope(70, false)
 			store.mailboxes[11].envelopeLists['is:starred'] = []
 			store.mailboxes[11].envelopeLists['not:starred'] = [70]
 
 			store.updateEnvelopeMutation({ envelope: { databaseId: 70, mailboxId: 11, flags: { flagged: true } } })
 
+			// Safe to add: this envelope alone proves the thread now has a
+			// starred message.
 			expect(store.mailboxes[11].envelopeLists['is:starred']).toEqual([70])
-			expect(store.mailboxes[11].envelopeLists['not:starred']).toEqual([])
+			// Not evicted from not:starred: this envelope becoming starred
+			// doesn't rule out some OTHER thread sibling still being
+			// unstarred, which alone would justify the thread's place there
+			// -- only not:starred's own thread-aware sync may safely remove
+			// it.
+			expect(store.mailboxes[11].envelopeLists['not:starred']).toEqual([70])
 		})
 
-		it('a star being removed moves the message from is:starred to not:starred', () => {
+		// Default layout-message-view is 'threaded' (see getPreference's own
+		// default), where this envelope only ever stands in for its whole
+		// thread's newest message (same as MessageMapper::findIdsByQuery()'s
+		// own EXISTS-based thread match server-side). Reported live: a
+		// thread's newest reply losing its star kept evicting the whole
+		// thread from Favorites on every routine resync, even though an
+		// OLDER message in that same thread was still starred -- flickering
+		// out and back in every tick as Favorites' own dedicated,
+		// thread-aware sync re-added what this generic reclassification had
+		// just removed. Fixed: a single envelope's own flags can prove
+		// inclusion (safe to ADD -- see not:starred below) but can never
+		// prove exclusion of an already-listed thread (unsafe to REMOVE),
+		// since some other message in the same thread might still qualify.
+		it('a star being removed does not immediately evict an already-listed thread from is:starred (a differently-starred sibling might still justify it)', () => {
+			seedKnownEnvelope(71, true)
+			store.mailboxes[11].envelopeLists['is:starred'] = [71]
+			store.mailboxes[11].envelopeLists['not:starred'] = []
+
+			store.updateEnvelopeMutation({ envelope: { databaseId: 71, mailboxId: 11, flags: { flagged: false } } })
+
+			// Not evicted -- only is:starred's own thread-aware server sync
+			// may safely remove it now.
+			expect(store.mailboxes[11].envelopeLists['is:starred']).toEqual([71])
+			// Safe to add to not:starred though: this envelope alone proves
+			// the thread now has an unstarred message, sufficient on its own.
+			expect(store.mailboxes[11].envelopeLists['not:starred']).toEqual([71])
+		})
+
+		it('in singleton (flat, non-threaded) view, a star being removed DOES immediately move the message to not:starred', () => {
+			// In flat view one row IS one message -- no thread-sibling
+			// ambiguity, so the straightforward removal remains correct.
+			store.preferences['layout-message-view'] = 'singleton'
 			seedKnownEnvelope(71, true)
 			store.mailboxes[11].envelopeLists['is:starred'] = [71]
 			store.mailboxes[11].envelopeLists['not:starred'] = []
@@ -790,6 +828,24 @@ describe('Vuex store actions', () => {
 
 			expect(store.mailboxes[11].envelopeLists['is:starred']).toEqual([])
 			expect(store.mailboxes[11].envelopeLists['not:starred']).toEqual([71])
+		})
+
+		// Closest reproduction of the actual live incident: the thread's
+		// newest message (mirroring real message id 998453) is unstarred,
+		// but Favorites already correctly lists the thread (its own
+		// dedicated, thread-aware sync found an older starred sibling). A
+		// routine, unrelated '' bucket sync then reprocesses this same
+		// envelope -- unchanged, still unstarred -- and must not silently
+		// evict the thread.
+		it('a routine unfiltered sync of a thread whose newest message is unstarred does not evict it from an already-correct is:starred list', () => {
+			store.mailboxes[11].envelopeLists['is:starred'] = [998453]
+
+			store.addEnvelopesMutation({
+				query: '',
+				envelopes: [{ databaseId: 998453, mailboxId: 11, dateInt: 998453, flags: { seen: true, flagged: false, important: false } }],
+			})
+
+			expect(store.mailboxes[11].envelopeLists['is:starred']).toEqual([998453])
 		})
 
 		it('does not touch a flag-predicate bucket that is not loaded', () => {
@@ -890,7 +946,7 @@ describe('Vuex store actions', () => {
 			expect(store.mailboxes[11].envelopeLists['subject:foo is:pi-other']).toEqual([999])
 		})
 
-		it('a flag flip moves a message between compound buckets, same as the bare-key case', () => {
+		it('a flag flip ADDS a message to the newly-matching compound bucket, same as the bare-key case', () => {
 			seedKnownEnvelope(94, false)
 			store.mailboxes[11].envelopeLists['not:starred is:pi-other'] = [94]
 			store.mailboxes[11].envelopeLists['not:starred is:pi-important'] = []
@@ -898,7 +954,13 @@ describe('Vuex store actions', () => {
 
 			store.updateEnvelopeMutation({ envelope: { databaseId: 94, mailboxId: 11, flags: { flagged: false, important: true } } })
 
-			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-other']).toEqual([])
+			// Stays in not:starred/is:pi-other too, same reasoning as the
+			// bare-key is:starred case above: this envelope becoming
+			// important doesn't rule out some OTHER thread sibling still
+			// being not-important, which alone would justify the thread's
+			// place in that bucket -- only its own thread-aware sync may
+			// safely remove it.
+			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-other']).toEqual([94])
 			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-important']).toEqual([94])
 		})
 	})

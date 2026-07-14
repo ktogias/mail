@@ -3574,10 +3574,33 @@ export default function mainStoreActions() {
 					const list = mailbox.envelopeLists[listId]
 					const shouldContain = tokens.every((token) => knownTokenPredicates[token](envelope.flags))
 					const withoutSelf = list.filter((id) => id !== envelope.databaseId && this.envelopes[id] !== undefined)
+
+					// In threaded view, `envelope` is only a stand-in for its
+					// whole thread (the newest message), same as the
+					// server's own thread-match query (see
+					// findIdsByQuery()'s EXISTS-based thread match in
+					// MessageMapper.php). This envelope's own flags can only
+					// ever PROVE the thread belongs in a flag-predicate
+					// bucket (if it matches, the thread certainly does, via
+					// itself) -- they can never prove it doesn't, because
+					// some OTHER message in the same thread might still
+					// match even when this one no longer does. Confirmed
+					// live: a thread whose newest reply isn't starred, but
+					// an earlier message in it is, got evicted from
+					// Favorites on every routine sync of that reply, then
+					// reappeared only once Favorites' own dedicated,
+					// thread-aware query re-ran -- a visible flicker every
+					// tick. So a negative local verdict must never evict an
+					// already-listed thread here; only the bucket's own
+					// server sync is authoritative for removals in
+					// threaded view.
+					const isThreaded = this.getPreference('layout-message-view', 'threaded') === 'threaded'
+					const keepListedAnyway = isThreaded && list.includes(envelope.databaseId)
+
 					Vue.set(
 						mailbox.envelopeLists,
 						listId,
-						shouldContain ? uniq(orderByDateInt(withoutSelf.concat([envelope.databaseId]))) : withoutSelf,
+						(shouldContain || keepListedAnyway) ? uniq(orderByDateInt(withoutSelf.concat([envelope.databaseId]))) : withoutSelf,
 					)
 				}
 			}
