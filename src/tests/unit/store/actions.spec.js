@@ -766,16 +766,20 @@ describe('Vuex store actions', () => {
 			store.preferences['sort-order'] = 'newest'
 		})
 
-		function seedKnownEnvelope(id, flagged) {
-			store.envelopes[id] = { databaseId: id, mailboxId: 11, dateInt: id, flags: { flagged } }
+		function seedKnownEnvelope(id, flagged, extra = {}) {
+			store.envelopes[id] = { databaseId: id, mailboxId: 11, dateInt: id, flags: { flagged }, ...extra }
 		}
 
 		it('a star being added adds the message to is:starred, but does not immediately evict it from not:starred (a differently-unstarred sibling might still justify it)', () => {
-			seedKnownEnvelope(70, false)
+			// threadRootId set: this envelope stands for a real (possibly
+			// multi-message) thread whose other members aren't loaded here --
+			// exactly the case the ratchet exists for. A message with NO
+			// threadRootId at all is covered by its own, separate test below.
+			seedKnownEnvelope(70, false, { threadRootId: 'thread-70' })
 			store.mailboxes[11].envelopeLists['is:starred'] = []
 			store.mailboxes[11].envelopeLists['not:starred'] = [70]
 
-			store.updateEnvelopeMutation({ envelope: { databaseId: 70, mailboxId: 11, flags: { flagged: true } } })
+			store.updateEnvelopeMutation({ envelope: { databaseId: 70, mailboxId: 11, threadRootId: 'thread-70', flags: { flagged: true } } })
 
 			// Safe to add: this envelope alone proves the thread now has a
 			// starred message.
@@ -802,11 +806,11 @@ describe('Vuex store actions', () => {
 		// prove exclusion of an already-listed thread (unsafe to REMOVE),
 		// since some other message in the same thread might still qualify.
 		it('a star being removed does not immediately evict an already-listed thread from is:starred (a differently-starred sibling might still justify it)', () => {
-			seedKnownEnvelope(71, true)
+			seedKnownEnvelope(71, true, { threadRootId: 'thread-71' })
 			store.mailboxes[11].envelopeLists['is:starred'] = [71]
 			store.mailboxes[11].envelopeLists['not:starred'] = []
 
-			store.updateEnvelopeMutation({ envelope: { databaseId: 71, mailboxId: 11, flags: { flagged: false } } })
+			store.updateEnvelopeMutation({ envelope: { databaseId: 71, mailboxId: 11, threadRootId: 'thread-71', flags: { flagged: false } } })
 
 			// Not evicted -- only is:starred's own thread-aware server sync
 			// may safely remove it now.
@@ -837,15 +841,83 @@ describe('Vuex store actions', () => {
 		// routine, unrelated '' bucket sync then reprocesses this same
 		// envelope -- unchanged, still unstarred -- and must not silently
 		// evict the thread.
-		it('a routine unfiltered sync of a thread whose newest message is unstarred does not evict it from an already-correct is:starred list', () => {
+		it('a routine unfiltered sync of a thread whose newest message is unstarred does not evict it from an already-correct is:starred list, even reprocessed repeatedly', () => {
 			store.mailboxes[11].envelopeLists['is:starred'] = [998453]
+			const envelope = { databaseId: 998453, mailboxId: 11, dateInt: 998453, threadRootId: 'thread-998453', flags: { seen: true, flagged: false, important: false } }
 
-			store.addEnvelopesMutation({
-				query: '',
-				envelopes: [{ databaseId: 998453, mailboxId: 11, dateInt: 998453, flags: { seen: true, flagged: false, important: false } }],
+			// First sync: 998453 is brand-new to this client, so it's always
+			// reclassified regardless of the efficiency guard below.
+			store.addEnvelopesMutation({ query: '', envelopes: [envelope] })
+			expect(store.mailboxes[11].envelopeLists['is:starred']).toEqual([998453])
+
+			// A second, later tick reprocessing the exact same, unchanged
+			// envelope -- the actual reported shape of the live incident
+			// ("every tick"). Must still not evict it.
+			store.addEnvelopesMutation({ query: '', envelopes: [{ ...envelope, flags: { ...envelope.flags } }] })
+			expect(store.mailboxes[11].envelopeLists['is:starred']).toEqual([998453])
+		})
+
+		// A message with no threadRootId at all was never grouped with
+		// anything server-side either (findIdsByQuery()'s own EXISTS
+		// clause: "tm.thread_root_id = m.thread_root_id" can never be true
+		// when both sides are NULL, so it only ever matches itself there
+		// too) -- there is no thread-sibling ambiguity to be conservative
+		// about, so its own flags are the complete, authoritative answer
+		// in BOTH directions, unlike a genuinely-threaded message.
+		it('a standalone message with no thread grouping at all is fully authoritative on its own, including for removal', () => {
+			seedKnownEnvelope(75, true) // no threadRootId
+			store.mailboxes[11].envelopeLists['is:starred'] = [75]
+			store.mailboxes[11].envelopeLists['not:starred'] = []
+
+			store.updateEnvelopeMutation({ envelope: { databaseId: 75, mailboxId: 11, flags: { flagged: false } } })
+
+			// Unlike the threaded-ambiguity case above: genuinely evicted.
+			expect(store.mailboxes[11].envelopeLists['is:starred']).toEqual([])
+			expect(store.mailboxes[11].envelopeLists['not:starred']).toEqual([75])
+		})
+
+		// When the thread's FULL member list happens to already be loaded
+		// locally (envelope.thread, populated by actually opening the
+		// thread via fetchThread()) with every member still known, the
+		// true membership can be computed directly and correctly, in
+		// either direction, for free -- no need to fall back to the
+		// conservative ratchet at all.
+		it('a fully-loaded thread with no starred member left is safely evicted immediately (full local knowledge, not the ratchet)', () => {
+			seedKnownEnvelope(96, false, { threadRootId: 'thread-96' }) // older sibling, also unstarred
+			seedKnownEnvelope(97, true, { threadRootId: 'thread-96' }) // representative, currently starred
+			store.mailboxes[11].envelopeLists['is:starred'] = [97]
+			store.mailboxes[11].envelopeLists['not:starred'] = []
+
+			store.updateEnvelopeMutation({
+				envelope: { databaseId: 97, mailboxId: 11, threadRootId: 'thread-96', thread: [96, 97], flags: { flagged: false } },
 			})
 
-			expect(store.mailboxes[11].envelopeLists['is:starred']).toEqual([998453])
+			// Genuinely evicted: the full thread is known, and neither
+			// member matches is:starred any more.
+			expect(store.mailboxes[11].envelopeLists['is:starred']).toEqual([])
+			expect(store.mailboxes[11].envelopeLists['not:starred']).toEqual([97])
+		})
+
+		it('a fully-loaded thread whose older sibling is still starred stays listed even though the representative no longer is', () => {
+			seedKnownEnvelope(98, true, { threadRootId: 'thread-98' }) // older sibling, still starred
+			seedKnownEnvelope(99, true, { threadRootId: 'thread-98' }) // representative, about to be unstarred
+			store.mailboxes[11].envelopeLists['is:starred'] = [99]
+			store.mailboxes[11].envelopeLists['not:starred'] = []
+
+			store.updateEnvelopeMutation({
+				envelope: { databaseId: 99, mailboxId: 11, threadRootId: 'thread-98', thread: [98, 99], flags: { flagged: false } },
+			})
+
+			// Stays listed, with FULL certainty (not just the ratchet's
+			// "don't know, so don't touch it"): the older sibling (98) is
+			// known and still starred, so the thread genuinely still
+			// qualifies for is:starred.
+			expect(store.mailboxes[11].envelopeLists['is:starred']).toEqual([99])
+			// Also correctly added to not:starred: envelope 99 itself just
+			// became unstarred, which alone proves the thread now qualifies
+			// there too -- safe to add via its own flags directly, no
+			// sibling check even needed for this direction.
+			expect(store.mailboxes[11].envelopeLists['not:starred']).toEqual([99])
 		})
 
 		it('does not touch a flag-predicate bucket that is not loaded', () => {
@@ -947,12 +1019,12 @@ describe('Vuex store actions', () => {
 		})
 
 		it('a flag flip ADDS a message to the newly-matching compound bucket, same as the bare-key case', () => {
-			seedKnownEnvelope(94, false)
+			seedKnownEnvelope(94, false, { threadRootId: 'thread-94' })
 			store.mailboxes[11].envelopeLists['not:starred is:pi-other'] = [94]
 			store.mailboxes[11].envelopeLists['not:starred is:pi-important'] = []
 			store.envelopes[94].flags.important = false
 
-			store.updateEnvelopeMutation({ envelope: { databaseId: 94, mailboxId: 11, flags: { flagged: false, important: true } } })
+			store.updateEnvelopeMutation({ envelope: { databaseId: 94, mailboxId: 11, threadRootId: 'thread-94', flags: { flagged: false, important: true } } })
 
 			// Stays in not:starred/is:pi-other too, same reasoning as the
 			// bare-key is:starred case above: this envelope becoming
@@ -962,6 +1034,146 @@ describe('Vuex store actions', () => {
 			// safely remove it.
 			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-other']).toEqual([94])
 			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-important']).toEqual([94])
+		})
+
+		// addEnvelopesMutation() used to call reclassifyFlagBucketsMutation()
+		// unconditionally, for every envelope, on every sync -- including
+		// the (extremely common) case of a routine resync reporting a
+		// message this client already knows about, completely unchanged
+		// (SyncService.php still reports every known message as "changed"
+		// on every sync). Skipping reclassification entirely when nothing
+		// about the envelope's flags actually changed cuts real, repeated
+		// work at its root, the same way updateEnvelopeMutation()'s own
+		// isEqual guard already does for its own call path.
+		it('addEnvelopesMutation skips reclassification for an already-known envelope whose flags are unchanged', () => {
+			seedKnownEnvelope(100, false, { threadRootId: 'thread-100' })
+			const reclassifySpy = vi.spyOn(store, 'reclassifyFlagBucketsMutation')
+
+			store.addEnvelopesMutation({
+				query: '',
+				envelopes: [{ databaseId: 100, mailboxId: 11, dateInt: 100, threadRootId: 'thread-100', flags: { flagged: false } }],
+			})
+
+			expect(reclassifySpy).not.toHaveBeenCalled()
+		})
+
+		it('addEnvelopesMutation still reclassifies a brand-new envelope, never seen before', () => {
+			const reclassifySpy = vi.spyOn(store, 'reclassifyFlagBucketsMutation')
+
+			store.addEnvelopesMutation({
+				query: '',
+				envelopes: [{ databaseId: 101, mailboxId: 11, dateInt: 101, flags: { flagged: true } }],
+			})
+
+			expect(reclassifySpy).toHaveBeenCalledTimes(1)
+		})
+
+		it('addEnvelopesMutation still reclassifies an already-known envelope whose flags genuinely changed', () => {
+			seedKnownEnvelope(102, false, { threadRootId: 'thread-102' })
+			const reclassifySpy = vi.spyOn(store, 'reclassifyFlagBucketsMutation')
+
+			store.addEnvelopesMutation({
+				query: '',
+				envelopes: [{ databaseId: 102, mailboxId: 11, dateInt: 102, threadRootId: 'thread-102', flags: { flagged: true } }],
+			})
+
+			expect(reclassifySpy).toHaveBeenCalledTimes(1)
+		})
+	})
+
+	describe('refreshFlagPredicateBucketsForEnvelope: fast confirmation after an explicit user toggle', () => {
+		// flagEnvelopeMutation() (the optimistic update both
+		// toggleEnvelopeFlagged() and setEnvelopeImportant() use) never
+		// touches envelopeLists at all, and the generic reclassification
+		// pass is deliberately conservative about removals in threaded
+		// view -- so a toggle that should genuinely evict a thread from an
+		// already-loaded bucket would otherwise sit wrong until that
+		// bucket's own next periodic sync. This targeted, immediate
+		// per-bucket resync closes that gap for the one case where it's
+		// affordable: a real, comparatively rare user click, never routine
+		// background polling.
+		beforeEach(() => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			const account = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: { id: 'INBOX', name: 'INBOX', databaseId: 11, accountId: 13, specialRole: 'inbox' },
+			})
+			MessageService.syncEnvelopes.mockResolvedValue({
+				newMessages: [],
+				changedMessages: [],
+				vanishedMessages: [],
+				stats: { unread: 0 },
+			})
+		})
+
+		it('resyncs only the loaded flag-predicate buckets (bare and compound) for the envelope\'s own mailbox', async () => {
+			store.mailboxes[11].envelopeLists['is:starred'] = []
+			store.mailboxes[11].envelopeLists['not:starred is:pi-other'] = []
+			store.mailboxes[11].envelopeLists['subject:foo'] = [] // must be left alone
+
+			await store.refreshFlagPredicateBucketsForEnvelope({ databaseId: 1, mailboxId: 11 })
+
+			const calledQueries = MessageService.syncEnvelopes.mock.calls
+				.filter((call) => call[1] === 11)
+				.map((call) => call[4])
+				.sort()
+			expect(calledQueries).toEqual(['is:starred', 'not:starred is:pi-other'])
+		})
+
+		it('also resyncs the unified inbox\'s own loaded flag-predicate buckets', async () => {
+			store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-important'] = []
+
+			await store.refreshFlagPredicateBucketsForEnvelope({ databaseId: 1, mailboxId: 11 })
+
+			// syncEnvelopes() itself fans a unified mailbox's sync out to its
+			// real constituent mailboxes -- it never calls the service
+			// function with the virtual id directly (see the dedicated
+			// "not the virtual id" test elsewhere in this file). Mailbox 11
+			// is the only real inbox-role mailbox registered here, so the
+			// unified list's own refresh should reach it with the same
+			// query.
+			const calledForUnified = MessageService.syncEnvelopes.mock.calls
+				.some((call) => call[1] === 11 && call[4] === 'is:pi-important')
+			expect(calledForUnified).toBe(true)
+		})
+
+		it('does nothing for an envelope whose mailbox is unknown', async () => {
+			await store.refreshFlagPredicateBucketsForEnvelope({ databaseId: 1, mailboxId: 'does-not-exist' })
+
+			expect(MessageService.syncEnvelopes).not.toHaveBeenCalled()
+		})
+
+		it('toggleEnvelopeFlagged triggers a refresh after a successful toggle', async () => {
+			MessageService.setEnvelopeFlags.mockResolvedValue({})
+			store.mailboxes[11].envelopeLists['is:starred'] = []
+			const envelope = { databaseId: 1, mailboxId: 11, flags: { flagged: false } }
+
+			await store.toggleEnvelopeFlagged(envelope)
+
+			expect(MessageService.syncEnvelopes.mock.calls.some((call) => call[1] === 11 && call[4] === 'is:starred')).toBe(true)
+		})
+
+		it('toggleEnvelopeFlagged does NOT trigger a refresh when the toggle itself fails', async () => {
+			MessageService.setEnvelopeFlags.mockRejectedValue(new Error('network error'))
+			store.mailboxes[11].envelopeLists['is:starred'] = []
+			const envelope = { databaseId: 1, mailboxId: 11, flags: { flagged: false } }
+
+			await expect(store.toggleEnvelopeFlagged(envelope)).rejects.toThrow('network error')
+
+			expect(MessageService.syncEnvelopes).not.toHaveBeenCalled()
+		})
+
+		it('setEnvelopeImportant triggers a refresh after a successful toggle', async () => {
+			MessageService.setEnvelopeFlags.mockResolvedValue({})
+			MessageService.setEnvelopeTag.mockResolvedValue({ id: 909, imapLabel: '$label1' })
+			store.mailboxes[11].envelopeLists['is:pi-important'] = []
+			const envelope = { databaseId: 1, mailboxId: 11, flags: { important: false }, tags: [] }
+
+			await store.setEnvelopeImportant(envelope, true)
+
+			expect(MessageService.syncEnvelopes.mock.calls.some((call) => call[1] === 11 && call[4] === 'is:pi-important')).toBe(true)
 		})
 	})
 

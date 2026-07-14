@@ -2160,6 +2160,11 @@ export default function mainStoreActions() {
 					await setEnvelopeFlags(envelope.databaseId, {
 						flagged: !oldState,
 					})
+					// Fire-and-forget: gives fast, correct confirmation for
+					// any already-loaded Favorites-style bucket this toggle
+					// could affect, without making the user wait on it --
+					// see refreshFlagPredicateBucketsForEnvelope()'s own doc.
+					this.refreshFlagPredicateBucketsForEnvelope(envelope)
 				} catch (error) {
 					logger.error('Could not toggle message flagged state', { error })
 
@@ -2236,6 +2241,9 @@ export default function mainStoreActions() {
 						? this.addEnvelopeTag({ envelope, imapLabel: IMPORTANT_TAG_LABEL })
 						: this.removeEnvelopeTag({ envelope, imapLabel: IMPORTANT_TAG_LABEL }),
 				])
+				// Fire-and-forget, same reasoning as toggleEnvelopeFlagged()'s
+				// own call -- see refreshFlagPredicateBucketsForEnvelope().
+				this.refreshFlagPredicateBucketsForEnvelope(envelope)
 			} catch (error) {
 				logger.error('Could not toggle message importance', { error })
 				this.flagEnvelopeMutation({
@@ -3468,7 +3476,9 @@ export default function mainStoreActions() {
 			envelopes.forEach((envelope) => {
 				const mailbox = this.mailboxes[envelope.mailboxId]
 				this.normalizeTags(envelope)
-				Vue.set(this.envelopes, envelope.databaseId, { ...this.envelopes[envelope.databaseId] || {}, ...envelope, flags: withRecentFlagOverrides(envelope.databaseId, envelope.flags) })
+				const previouslyKnown = this.envelopes[envelope.databaseId]
+				const nextFlags = withRecentFlagOverrides(envelope.databaseId, envelope.flags)
+				Vue.set(this.envelopes, envelope.databaseId, { ...previouslyKnown || {}, ...envelope, flags: nextFlags })
 				Vue.set(envelope, 'accountId', mailbox.accountId)
 				this.appendOrReplaceEnvelopeId(workingListFor(mailbox), envelope)
 				if (addToUnifiedMailboxes) {
@@ -3495,7 +3505,22 @@ export default function mainStoreActions() {
 				// is:pi-important, the server already filtered on; the
 				// reclassification here is only for the OTHER, sibling
 				// buckets a coalesced '' sync didn't separately ask about).
-				this.reclassifyFlagBucketsMutation({ envelope, sourceMailbox: mailbox, includeUnified: addToUnifiedMailboxes, excludeListId: listId })
+				//
+				// Skipped entirely for an already-known envelope whose
+				// flags are unchanged from what's already stored --
+				// SyncService.php still reports every known message as
+				// "changed" on every sync (no real changed-set computation
+				// upstream), so without this guard every routine,
+				// unrelated resync re-evaluates every loaded
+				// flag-predicate bucket for every envelope on every tick,
+				// even when nothing about it changed at all. Mirrors
+				// updateEnvelopeMutation()'s own isEqual guard below, for
+				// the identical reason. A brand-new envelope
+				// (previouslyKnown undefined) always still needs
+				// classifying for the first time.
+				if (previouslyKnown === undefined || !isEqual(previouslyKnown.flags, nextFlags)) {
+					this.reclassifyFlagBucketsMutation({ envelope, sourceMailbox: mailbox, includeUnified: addToUnifiedMailboxes, excludeListId: listId })
+				}
 			})
 
 			workingLists.forEach((working, targetMailbox) => {
@@ -3572,38 +3597,148 @@ export default function mainStoreActions() {
 						continue
 					}
 					const list = mailbox.envelopeLists[listId]
-					const shouldContain = tokens.every((token) => knownTokenPredicates[token](envelope.flags))
 					const withoutSelf = list.filter((id) => id !== envelope.databaseId && this.envelopes[id] !== undefined)
-
-					// In threaded view, `envelope` is only a stand-in for its
-					// whole thread (the newest message), same as the
-					// server's own thread-match query (see
-					// findIdsByQuery()'s EXISTS-based thread match in
-					// MessageMapper.php). This envelope's own flags can only
-					// ever PROVE the thread belongs in a flag-predicate
-					// bucket (if it matches, the thread certainly does, via
-					// itself) -- they can never prove it doesn't, because
-					// some OTHER message in the same thread might still
-					// match even when this one no longer does. Confirmed
-					// live: a thread whose newest reply isn't starred, but
-					// an earlier message in it is, got evicted from
-					// Favorites on every routine sync of that reply, then
-					// reappeared only once Favorites' own dedicated,
-					// thread-aware query re-ran -- a visible flicker every
-					// tick. So a negative local verdict must never evict an
-					// already-listed thread here; only the bucket's own
-					// server sync is authoritative for removals in
-					// threaded view.
 					const isThreaded = this.getPreference('layout-message-view', 'threaded') === 'threaded'
-					const keepListedAnyway = isThreaded && list.includes(envelope.databaseId)
+					const shouldContain = isThreaded
+						? this.threadStillMatchesFlagPredicate({
+								envelope,
+								tokens,
+								knownTokenPredicates,
+								alreadyListed: list.includes(envelope.databaseId),
+							})
+						: tokens.every((token) => knownTokenPredicates[token](envelope.flags))
 
 					Vue.set(
 						mailbox.envelopeLists,
 						listId,
-						(shouldContain || keepListedAnyway) ? uniq(orderByDateInt(withoutSelf.concat([envelope.databaseId]))) : withoutSelf,
+						shouldContain ? uniq(orderByDateInt(withoutSelf.concat([envelope.databaseId]))) : withoutSelf,
 					)
 				}
 			}
+		},
+		/**
+		 * Whether an already-listed THREAD should stay in a flag-predicate
+		 * bucket, given a fresh reading of one of its member envelopes.
+		 * Threaded view only -- see reclassifyFlagBucketsMutation(), which
+		 * uses the plain per-message predicate directly in flat/singleton
+		 * view, where there's no thread-sibling ambiguity at all.
+		 *
+		 * `envelope`'s own flags can only ever PROVE the thread belongs in
+		 * the bucket (if it matches, the thread does too, via itself --
+		 * safe to trust in either direction, ADD or REMOVE, since nothing
+		 * else is needed). They can never PROVE it doesn't: some other
+		 * message sharing the same thread might still match even when this
+		 * one doesn't, mirroring the server's own EXISTS-based thread match
+		 * (findIdsByQuery() in MessageMapper.php) -- one row in the whole
+		 * thread satisfying the predicate is enough for the whole thread to
+		 * qualify. Confirmed live: a thread whose newest reply lost its
+		 * star, with an older message in the same thread still starred,
+		 * got evicted from Favorites on every routine resync of that
+		 * reply, then reappeared only once Favorites' own dedicated,
+		 * thread-aware query re-ran -- a visible flicker every tick.
+		 *
+		 * Two cases let this be resolved locally, with full certainty, in
+		 * either direction, at no network cost:
+		 *  - No thread grouping at all (`threadRootId` unset): the server
+		 *    query's own EXISTS clause only matches a row against itself in
+		 *    this case too (`tm.thread_root_id = m.thread_root_id` can
+		 *    never be true when both sides are NULL) -- so this envelope's
+		 *    own flags are already the complete, authoritative answer.
+		 *  - The thread's full member list is already loaded locally
+		 *    (`envelope.thread`, populated by actually opening the thread
+		 *    via fetchThread()) AND every one of those ids is still known
+		 *    -- then the true membership can be computed directly, for
+		 *    free, from whichever member (if any) matches.
+		 * Deliberately reads `envelope.thread` rather than scanning every
+		 * envelope in the store for a matching threadRootId: this runs
+		 * once per envelope per sync tick, so an O(store size) scan here
+		 * would undercut the whole point of avoiding unnecessary load.
+		 *
+		 * Otherwise -- this envelope doesn't match, and the local
+		 * knowledge isn't complete enough to rule out every other member
+		 * -- an already-listed thread is left exactly as it is; only the
+		 * bucket's own thread-aware server sync may remove it.
+		 *
+		 * @param root0
+		 * @param root0.envelope
+		 * @param root0.tokens
+		 * @param root0.knownTokenPredicates
+		 * @param root0.alreadyListed
+		 */
+		threadStillMatchesFlagPredicate({ envelope, tokens, knownTokenPredicates, alreadyListed }) {
+			const matchesTokens = (flags) => tokens.every((token) => knownTokenPredicates[token](flags))
+
+			if (!envelope.threadRootId) {
+				return matchesTokens(envelope.flags)
+			}
+			if (matchesTokens(envelope.flags)) {
+				return true
+			}
+
+			const fullThreadIds = envelope.thread
+			if (Array.isArray(fullThreadIds) && fullThreadIds.length > 0
+				&& fullThreadIds.every((id) => this.envelopes[id] !== undefined)) {
+				return fullThreadIds.some((id) => matchesTokens(this.envelopes[id].flags))
+			}
+
+			return alreadyListed
+		},
+		/**
+		 * After a user's OWN explicit flag/importance toggle
+		 * (toggleEnvelopeFlagged()/setEnvelopeImportant(), below), the
+		 * optimistic local update (flagEnvelopeMutation()) only ever
+		 * touches envelope.flags itself -- it never touches
+		 * mailbox.envelopeLists at all. Bucket membership only ever
+		 * catches up via reclassifyFlagBucketsMutation(), which is
+		 * deliberately conservative about REMOVALS in threaded view (see
+		 * threadStillMatchesFlagPredicate()): correct, but it means a
+		 * toggle that should genuinely evict a thread from an
+		 * already-loaded bucket (e.g. unstarring a thread's only starred
+		 * message) would otherwise sit wrong until that bucket's own next
+		 * periodic sync, tens of seconds later.
+		 *
+		 * Since this only ever runs for a real, comparatively rare user
+		 * click -- never for routine background polling, which is what
+		 * actually needs to stay cheap -- a small, immediate, targeted
+		 * resync of just the loaded buckets this one flag change could
+		 * possibly affect is worth its cost: correct feedback within
+		 * roughly one request round trip instead of a multi-second wait,
+		 * without adding anything to the steady-state polling cadence.
+		 * Shared by both toggleEnvelopeFlagged() (starring) and
+		 * setEnvelopeImportant() (importance) rather than duplicated, so
+		 * any future flag-predicate bucket gets this for free from
+		 * whichever of the two toggles is relevant to it.
+		 *
+		 * @param envelope
+		 */
+		refreshFlagPredicateBucketsForEnvelope(envelope) {
+			const sourceMailbox = this.mailboxes[envelope.mailboxId]
+			if (!sourceMailbox) {
+				return Promise.resolve()
+			}
+
+			const targetMailboxes = [sourceMailbox]
+			const unifiedAccount = this.accountsUnmapped[UNIFIED_ACCOUNT_ID]
+			if (unifiedAccount) {
+				unifiedAccount.mailboxes
+					.map((mbId) => this.mailboxes[mbId])
+					.filter((mb) => mb.specialRole && mb.specialRole === sourceMailbox.specialRole)
+					.forEach((mb) => targetMailboxes.push(mb))
+			}
+
+			const flagPredicateTokens = new Set(['is:starred', 'not:starred', priorityImportantQuery, priorityOtherQuery])
+			const refreshes = []
+			for (const mailbox of targetMailboxes) {
+				for (const listId of Object.keys(mailbox.envelopeLists)) {
+					const tokens = listId.split(' ').filter(Boolean)
+					if (tokens.length > 0 && tokens.every((token) => flagPredicateTokens.has(token))) {
+						refreshes.push(this.syncEnvelopes({ mailboxId: mailbox.databaseId, query: listId }))
+					}
+				}
+			}
+			return Promise.all(refreshes).catch((error) => {
+				logger.error('Could not refresh flag-predicate buckets after a flag toggle', { error })
+			})
 		},
 		updateEnvelopeMutation({ envelope }) {
 			const existing = this.envelopes[envelope.databaseId]
