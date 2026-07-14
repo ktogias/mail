@@ -2962,6 +2962,39 @@ describe('Vuex store actions', () => {
 			expect(thread).toEqual([threadEnvelope])
 			expect(MessageService.fetchThread).toHaveBeenCalledTimes(2)
 		})
+
+		it('a refetch with byte-identical data keeps the same envelope object reference', async () => {
+			// Confirmed live: a thread gets refetched repeatedly (hover/
+			// viewport prefetch, and a periodic refresh of whichever
+			// thread is open) -- every ~15-30s in one capture. Rebuilding
+			// every message into a brand new object on every refetch, even
+			// when the server reported byte-identical flags, made any
+			// reactive consumer keyed off object identity (e.g. the
+			// Favorites column, built from
+			// envelopeLists['is:starred'].map(id => this.envelopes[id]))
+			// see a "changed" dependency and re-render for no real reason
+			// -- observed live as a fluctuating Favorites list.
+			MessageService.fetchThread.mockResolvedValue([{ ...threadEnvelope, flags: { flagged: true } }])
+			await store.fetchThread(119855)
+			const firstReference = store.envelopes[119855]
+
+			MessageService.fetchThread.mockResolvedValue([{ ...threadEnvelope, flags: { flagged: true } }])
+			await store.fetchThread(119855)
+
+			expect(store.envelopes[119855]).toBe(firstReference)
+		})
+
+		it('a refetch with genuinely different data still rebuilds the envelope', async () => {
+			MessageService.fetchThread.mockResolvedValue([{ ...threadEnvelope, flags: { flagged: false } }])
+			await store.fetchThread(119855)
+			const firstReference = store.envelopes[119855]
+
+			MessageService.fetchThread.mockResolvedValue([{ ...threadEnvelope, flags: { flagged: true } }])
+			await store.fetchThread(119855)
+
+			expect(store.envelopes[119855]).not.toBe(firstReference)
+			expect(store.envelopes[119855].flags.flagged).toBe(true)
+		})
 	})
 
 	describe('cancelSpeculativeFetchesExcept: aborting stale prefetches on real navigation', () => {

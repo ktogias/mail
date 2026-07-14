@@ -3717,7 +3717,24 @@ export default function mainStoreActions() {
 				if (existing.attachments && existing.attachments.length > 0) {
 					merged.attachments = existing.attachments
 				}
-				Vue.set(this.envelopes, e.databaseId, merged)
+				// A thread gets refetched repeatedly -- hover/viewport
+				// prefetch, and a periodic refresh of whichever thread is
+				// currently open -- confirmed live as often as every
+				// 15-30s. Unconditionally rebuilding every one of its
+				// messages into a brand new object reference, even when
+				// nothing in it actually changed, made every reactive
+				// consumer of this.envelopes (e.g. the Favorites column,
+				// built from envelopeLists['is:starred'].map(id =>
+				// this.envelopes[id])) see a "changed" dependency and
+				// re-render on every single refetch -- confirmed live as
+				// a fluctuating Favorites list with byte-identical flags
+				// underneath (see nextcloud-mail-oauth-integration.md).
+				// Same fix as updateEnvelopeMutation(): skip the rebuild,
+				// and keep the existing object identity, when the merged
+				// result wouldn't actually change anything.
+				if (!isEqual(existing, merged)) {
+					Vue.set(this.envelopes, e.databaseId, merged)
+				}
 			})
 
 			// Store the references
