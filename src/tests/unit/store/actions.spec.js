@@ -3520,6 +3520,23 @@ describe('Vuex store actions', () => {
 			await expect(store.deleteMessage({ id: 1 })).rejects.toBeDefined()
 		})
 
+		// Phase 5 (see /home/ktogias/.claude/plans/generic-hugging-fern.md):
+		// this.getEnvelope(id) used to be called INSIDE the catch block,
+		// after the optimistic removal above had already deleted it from
+		// this.envelopes -- always returning undefined on a genuine
+		// failure, silently skipping the revert. Fixed by capturing the
+		// envelope before removing it.
+		it('actually restores the envelope on a genuine failure, not just rejects', async () => {
+			store.addMailboxMutation({ account: account13, mailbox: { databaseId: 11, accountId: 13, name: 'INBOX' } })
+			MessageService.deleteMessage.mockRejectedValue({ response: { status: 500 } })
+			MessageService.fetchEnvelope.mockResolvedValue({ databaseId: 1, mailboxId: 11, flags: {} })
+			store.addEnvelopesMutation({ envelopes: [{ databaseId: 1, mailboxId: 11, dateInt: 1, flags: {} }] })
+
+			await expect(store.deleteMessage({ id: 1 })).rejects.toBeDefined()
+
+			expect(store.getEnvelope(1)).toBeDefined()
+		})
+
 		// The whole Thread family (deleteThread/moveThread/snoozeThread/
 		// unSnoozeThread) was missing this call entirely -- unlike every
 		// singular-message equivalent above, syncWatchedMailboxes()'s
@@ -3685,6 +3702,134 @@ describe('Vuex store actions', () => {
 			store.addEnvelopesMutation({ envelopes: [envelope], addToUnifiedMailboxes: false })
 
 			await expect(store.moveThread({ envelope, destMailboxId: 2 })).rejects.toThrow('network error')
+
+			expect(store.envelopes[1]).toBeDefined()
+		})
+	})
+
+	// Phase 5 of the unified optimistic-update plan (see the same plan
+	// file): moveMessage()/snoozeMessage()/unSnoozeMessage()/
+	// snoozeThread()/unSnoozeThread() used to mutate the store only
+	// AFTER their own network call already succeeded -- unlike
+	// deleteMessage()/deleteThread()/toggleEnvelopeJunk()/moveThread(),
+	// which all remove optimistically first. Extended the same pattern
+	// (optimistic removal + reconcile-before-revert) to these too, now
+	// that Phases 1-4 give it something correct to rely on.
+	describe('moveMessage/snoozeMessage/unSnoozeMessage: now genuinely optimistic', () => {
+		function seedEnvelope(overrides = {}) {
+			const account13 = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({ account: account13, mailbox: { name: 'INBOX', databaseId: 1, accountId: 13 } })
+			const envelope = { databaseId: 1, accountId: 13, mailboxId: 1, dateInt: 1, flags: {}, tags: [], ...overrides }
+			store.addEnvelopesMutation({ envelopes: [envelope], addToUnifiedMailboxes: false })
+			return envelope
+		}
+
+		it('moveMessage removes the envelope immediately, before the network call resolves', async () => {
+			seedEnvelope()
+			MessageService.moveMessage.mockReturnValue(new Promise(() => {}))
+
+			store.moveMessage({ id: 1, destMailboxId: 2 })
+			await Promise.resolve()
+
+			expect(store.envelopes[1]).toBeUndefined()
+		})
+
+		it('moveMessage does not re-add the envelope if reconciliation confirms the move landed', async () => {
+			seedEnvelope()
+			MessageService.moveMessage.mockRejectedValue(new Error('timed out'))
+			MessageService.fetchEnvelope.mockResolvedValue({ mailboxId: 2 })
+
+			await store.moveMessage({ id: 1, destMailboxId: 2 })
+
+			expect(store.envelopes[1]).toBeUndefined()
+		})
+
+		it('moveMessage re-adds the envelope if reconciliation confirms the move genuinely never landed', async () => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			seedEnvelope()
+			MessageService.moveMessage.mockRejectedValue(new Error('network error'))
+			MessageService.fetchEnvelope.mockResolvedValue({ mailboxId: 1 })
+
+			await expect(store.moveMessage({ id: 1, destMailboxId: 2 })).rejects.toThrow('network error')
+
+			expect(store.envelopes[1]).toBeDefined()
+		})
+
+		it('snoozeMessage re-adds the envelope if reconciliation confirms the snooze genuinely never landed', async () => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			seedEnvelope()
+			MessageService.snoozeMessage.mockRejectedValue(new Error('network error'))
+			MessageService.fetchEnvelope.mockResolvedValue({ mailboxId: 1 })
+
+			await expect(store.snoozeMessage({ id: 1, unixTimestamp: 12345, destMailboxId: 2 })).rejects.toThrow('network error')
+
+			expect(store.envelopes[1]).toBeDefined()
+		})
+
+		it('unSnoozeMessage re-adds the envelope if reconciliation confirms it never actually left the snooze mailbox', async () => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			// Already sitting in "the snooze mailbox" (mailboxId 1, for
+			// this test) before unsnoozing -- there's no separate
+			// caller-known destination the way move/snooze have one.
+			seedEnvelope()
+			MessageService.unSnoozeMessage.mockRejectedValue(new Error('network error'))
+			MessageService.fetchEnvelope.mockResolvedValue({ mailboxId: 1 })
+
+			await expect(store.unSnoozeMessage({ id: 1 })).rejects.toThrow('network error')
+
+			expect(store.envelopes[1]).toBeDefined()
+		})
+
+		it('unSnoozeMessage does not re-add the envelope once reconciliation confirms it actually left', async () => {
+			seedEnvelope()
+			MessageService.unSnoozeMessage.mockRejectedValue(new Error('timed out'))
+			MessageService.fetchEnvelope.mockResolvedValue({ mailboxId: 99 })
+
+			await store.unSnoozeMessage({ id: 1 })
+
+			expect(store.envelopes[1]).toBeUndefined()
+		})
+	})
+
+	describe('snoozeThread/unSnoozeThread: now genuinely optimistic', () => {
+		function seedEnvelope(overrides = {}) {
+			const account13 = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({ account: account13, mailbox: { name: 'INBOX', databaseId: 1, accountId: 13 } })
+			const envelope = { databaseId: 1, accountId: 13, mailboxId: 1, dateInt: 1, flags: {}, tags: [], ...overrides }
+			store.addEnvelopesMutation({ envelopes: [envelope], addToUnifiedMailboxes: false })
+			return envelope
+		}
+
+		it('snoozeThread removes the envelope immediately, before the network call resolves', async () => {
+			const envelope = seedEnvelope()
+			ThreadService.snoozeThread.mockReturnValue(new Promise(() => {}))
+
+			store.snoozeThread({ envelope, unixTimestamp: 12345, destMailboxId: 2 })
+			await Promise.resolve()
+
+			expect(store.envelopes[1]).toBeUndefined()
+		})
+
+		it('snoozeThread re-adds the envelope if reconciliation confirms the snooze genuinely never landed', async () => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			const envelope = seedEnvelope()
+			ThreadService.snoozeThread.mockRejectedValue(new Error('network error'))
+			MessageService.fetchEnvelope.mockResolvedValue({ mailboxId: 1 })
+
+			await expect(store.snoozeThread({ envelope, unixTimestamp: 12345, destMailboxId: 2 })).rejects.toThrow('network error')
+
+			expect(store.envelopes[1]).toBeDefined()
+		})
+
+		it('unSnoozeThread re-adds the envelope if reconciliation confirms it never actually left the snooze mailbox', async () => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			const envelope = seedEnvelope()
+			ThreadService.unSnoozeThread.mockRejectedValue(new Error('network error'))
+			MessageService.fetchEnvelope.mockResolvedValue({ mailboxId: 1 })
+
+			await expect(store.unSnoozeThread({ envelope })).rejects.toThrow('network error')
 
 			expect(store.envelopes[1]).toBeDefined()
 		})

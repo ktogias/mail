@@ -2939,6 +2939,16 @@ export default function mainStoreActions() {
 		async deleteMessage({ id }) {
 			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
+				// Captured BEFORE the optimistic removal below, not
+				// re-looked-up inside the catch -- this.getEnvelope(id)
+				// is a raw this.envelopes[id] read, which the removal
+				// below has, by then, already deleted. Re-fetching it
+				// afterwards always returned undefined on a genuine
+				// (non-403) failure, silently skipping the revert this
+				// catch block visibly intends to do -- confirmed: no
+				// existing test ever asserted the envelope actually came
+				// back, only that the call rejected.
+				const envelope = this.getEnvelope(id)
 				this.removeEnvelopeMutation({ id })
 
 				try {
@@ -2966,12 +2976,20 @@ export default function mainStoreActions() {
 						return
 					}
 					logger.error('could not delete message', { error: err })
-					const envelope = this.getEnvelope(id)
-					if (envelope) {
-						this.addEnvelopesMutation({ envelopes: [envelope], bypassRemovalSuppression: true })
-					} else {
-						logger.error('could not find envelope', { id })
+					if (!envelope) {
+						logger.error('could not find envelope to revert', { id })
+						throw err
 					}
+
+					const landed = await reconcileOrRevert({
+						envelope,
+						hasLanded: (authoritative) => authoritative === undefined,
+						revert: () => this.addEnvelopesMutation({ envelopes: [envelope], bypassRemovalSuppression: true }),
+					})
+					if (landed) {
+						return
+					}
+
 					throw err
 				}
 			})
@@ -3067,9 +3085,38 @@ export default function mainStoreActions() {
 		}) {
 			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
-				await moveMessage(id, destMailboxId)
+				// Phase 5 of the unified optimistic-update plan (see
+				// /home/ktogias/.claude/plans/generic-hugging-fern.md):
+				// this used to mutate only AFTER the network call already
+				// succeeded -- correct in that it never needed a revert,
+				// but slower to disappear from the UI than the equivalent
+				// moveThread(), which already removes optimistically.
+				// Captured before removing, mirroring deleteMessage()'s
+				// own (just-fixed) pattern.
+				const envelope = this.getEnvelope(id)
 				this.removeEnvelopeMutation({ id })
-				this.removeMessageMutation({ id })
+
+				try {
+					await moveMessage(id, destMailboxId)
+					this.removeMessageMutation({ id })
+				} catch (error) {
+					logger.error('could not move message', { error })
+					if (!envelope) {
+						logger.error('could not find envelope to revert', { id })
+						throw error
+					}
+
+					const landed = await reconcileOrRevert({
+						envelope,
+						hasLanded: (authoritative) => authoritative?.mailboxId === destMailboxId,
+						revert: () => this.addEnvelopesMutation({ envelopes: [envelope], bypassRemovalSuppression: true }),
+					})
+					if (landed) {
+						return
+					}
+
+					throw error
+				}
 			})
 		},
 		async snoozeMessage({
@@ -3079,16 +3126,64 @@ export default function mainStoreActions() {
 		}) {
 			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
-				await snoozeMessage(id, unixTimestamp, destMailboxId)
+				const envelope = this.getEnvelope(id)
 				this.removeEnvelopeMutation({ id })
-				this.removeMessageMutation({ id })
+
+				try {
+					await snoozeMessage(id, unixTimestamp, destMailboxId)
+					this.removeMessageMutation({ id })
+				} catch (error) {
+					logger.error('could not snooze message', { error })
+					if (!envelope) {
+						logger.error('could not find envelope to revert', { id })
+						throw error
+					}
+
+					const landed = await reconcileOrRevert({
+						envelope,
+						hasLanded: (authoritative) => authoritative?.mailboxId === destMailboxId,
+						revert: () => this.addEnvelopesMutation({ envelopes: [envelope], bypassRemovalSuppression: true }),
+					})
+					if (landed) {
+						return
+					}
+
+					throw error
+				}
 			})
 		},
 		async unSnoozeMessage({ id }) {
 			return handleHttpAuthErrors(async () => {
-				await unSnoozeMessage(id)
+				const envelope = this.getEnvelope(id)
+				// The mailbox the message currently sits in (the snooze
+				// mailbox) before this call -- unsnoozing has no single
+				// caller-known destination the way move/snooze do, so
+				// "did it land" here means "did it actually leave here",
+				// not "did it reach some specific place".
+				const snoozeMailboxId = envelope?.mailboxId
 				this.removeEnvelopeMutation({ id })
-				this.removeMessageMutation({ id })
+
+				try {
+					await unSnoozeMessage(id)
+					this.removeMessageMutation({ id })
+				} catch (error) {
+					logger.error('could not unsnooze message', { error })
+					if (!envelope) {
+						logger.error('could not find envelope to revert', { id })
+						throw error
+					}
+
+					const landed = await reconcileOrRevert({
+						envelope,
+						hasLanded: (authoritative) => authoritative !== undefined && authoritative.mailboxId !== snoozeMailboxId,
+						revert: () => this.addEnvelopesMutation({ envelopes: [envelope], bypassRemovalSuppression: true }),
+					})
+					if (landed) {
+						return
+					}
+
+					throw error
+				}
 			})
 		},
 		async fetchActiveSieveScript({ accountId }) {
@@ -3268,28 +3363,55 @@ export default function mainStoreActions() {
 		}) {
 			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
+				// Phase 5 (see /home/ktogias/.claude/plans/generic-hugging-fern.md):
+				// used to remove only AFTER a successful await, unlike
+				// moveThread()'s already-optimistic removal -- the catch
+				// block's own re-add was, until this change, reverting a
+				// removal that had never actually happened yet.
+				this.removeEnvelopeMutation({ id: envelope.databaseId })
+
 				try {
 					await ThreadService.snoozeThread(envelope.databaseId, unixTimestamp, destMailboxId)
 					logger.debug('thread snoozed')
 				} catch (e) {
-					this.addEnvelopesMutation({ envelopes: [envelope], bypassRemovalSuppression: true })
 					logger.error('could not snooze thread', { error: e })
+
+					const landed = await reconcileOrRevert({
+						envelope,
+						hasLanded: (authoritative) => authoritative?.mailboxId === destMailboxId,
+						revert: () => this.addEnvelopesMutation({ envelopes: [envelope], bypassRemovalSuppression: true }),
+					})
+					if (landed) {
+						return
+					}
+
 					throw e
 				}
-				this.removeEnvelopeMutation({ id: envelope.databaseId })
 			})
 		},
 		async unSnoozeThread({ envelope }) {
 			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
+				const snoozeMailboxId = envelope.mailboxId
+				this.removeEnvelopeMutation({ id: envelope.databaseId })
+
 				try {
 					await ThreadService.unSnoozeThread(envelope.databaseId)
 					logger.debug('thread unSnoozed')
 				} catch (e) {
 					logger.error('could not unsnooze thread', { error: e })
+
+					const landed = await reconcileOrRevert({
+						envelope,
+						hasLanded: (authoritative) => authoritative !== undefined && authoritative.mailboxId !== snoozeMailboxId,
+						revert: () => this.addEnvelopesMutation({ envelopes: [envelope], bypassRemovalSuppression: true }),
+					})
+					if (landed) {
+						return
+					}
+
 					throw e
 				}
-				this.removeEnvelopeMutation({ id: envelope.databaseId })
 			})
 		},
 
