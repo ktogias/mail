@@ -468,6 +468,12 @@ function withRecentFlagOverrides(envelopeId, incomingFlags) {
 		if (incomingFlags[key] !== change.value) {
 			overridden = overridden || { ...incomingFlags }
 			overridden[key] = change.value
+		} else {
+			// The server agrees already -- a real, independent
+			// confirmation the change landed, not just this client's own
+			// optimistic belief. reconcileNearExpiryLocalChanges()'s own
+			// active check never needs to bother with this entry now.
+			change.confirmed = true
 		}
 	}
 	if (perEnvelope.size === 0) {
@@ -505,7 +511,11 @@ function withRecentTagOverrides(envelopeId, incomingTags) {
 		}
 		return incomingTags
 	}
-	return isEqual(incomingTags, change.value) ? incomingTags : change.value
+	if (isEqual(incomingTags, change.value)) {
+		change.confirmed = true
+		return incomingTags
+	}
+	return change.value
 }
 
 /**
@@ -524,7 +534,13 @@ function recordRecentLocalChange(envelopeId, fieldKey, value) {
 		perEnvelope = new Map()
 		recentLocalChanges.set(envelopeId, perEnvelope)
 	}
-	perEnvelope.set(fieldKey, { value, expiresAt: Date.now() + RECENT_FLAG_CHANGE_GRACE_MS })
+	// confirmed: true once a normal sync merge (withRecentFlagOverrides()/
+	// withRecentTagOverrides()) independently observes the server
+	// agreeing -- the common, silent-success case, costing nothing
+	// beyond a comparison already being made. Only entries still false
+	// by the time they're near expiry are worth reconcileNearExpiryLocalChanges()'s
+	// own, more expensive active check.
+	perEnvelope.set(fieldKey, { value, expiresAt: Date.now() + RECENT_FLAG_CHANGE_GRACE_MS, confirmed: false })
 }
 
 /**
@@ -558,6 +574,129 @@ function isRecentlyRemovedFromMailbox(envelopeId, mailboxId) {
 		return false
 	}
 	return change.value === mailboxId
+}
+
+/**
+ * Phase 4 of the unified optimistic-update plan (see
+ * /home/ktogias/.claude/plans/generic-hugging-fern.md): a thrown error
+ * from an action's own network call does not necessarily mean the real
+ * change never landed server-side -- a client-side timeout, or the
+ * browser killing an in-flight request when the tab is backgrounded,
+ * can both fire an error while the request actually completed. Every
+ * grace-guarded action used to revert unconditionally on any error;
+ * this confirms against a fresh, authoritative single-envelope fetch
+ * first, generalizing the same reasoning deleteMessage()/
+ * deleteThread() already apply in their own bespoke "403 means already
+ * deleted, that's success" check.
+ *
+ * Deliberately calls the raw, imported fetchEnvelope() (a real network
+ * request, no cache), not the this.fetchEnvelope() store ACTION (which
+ * returns a cached value if one exists -- exactly what reconciliation
+ * must not trust here).
+ *
+ * @param {object} options
+ * @param {object} options.envelope the envelope the action targeted
+ * @param {(authoritative: object|undefined) => boolean} options.hasLanded
+ * given the authoritative fetch result (undefined if the message is
+ * genuinely gone), decide whether the change this action wanted is
+ * already true server-side.
+ * @param {() => void} options.revert called only once reconciliation
+ * confirms the change genuinely did not land.
+ * @return {Promise<boolean>} true if confirmed landed (revert was NOT
+ * called) or if reconciliation itself couldn't be completed (fails
+ * open -- safer to trust the optimistic UI than compound an already-
+ * uncertain situation with a possibly-wrong revert); false if reverted.
+ */
+async function reconcileOrRevert({ envelope, hasLanded, revert }) {
+	let authoritative
+	try {
+		authoritative = await fetchEnvelope(envelope.accountId, envelope.databaseId)
+	} catch (error) {
+		logger.debug('could not reconcile after a failed action -- trusting the optimistic state', { error })
+		return true
+	}
+	if (hasLanded(authoritative)) {
+		return true
+	}
+	revert()
+	return false
+}
+
+// How far ahead of an entry's own expiry the sweep below considers it
+// "due soon" -- must comfortably clear the gap between two
+// syncWatchedMailboxes() ticks (10-30s, see startWatchedMailboxSync()
+// in App.vue) so no entry's window can close between one sweep and the
+// next without ever being checked. Generous on purpose: checking a
+// couple of ticks early just means a slightly earlier active
+// confirmation, not a wrong one -- unlike expiring an entry's
+// protection too early, which has no such safety margin at all.
+const NEAR_EXPIRY_SWEEP_WINDOW_MS = 45 * 1000
+
+/**
+ * Phase 4's other half: the passive confirmation in
+ * withRecentFlagOverrides()/withRecentTagOverrides() (a normal sync
+ * merge happening to observe the server agreeing) covers the common
+ * case for free, but says nothing about an entry nothing ever synced
+ * again before its own grace window closes -- e.g. a mailbox nobody's
+ * looking at right now. Rather than silently trust the optimistic
+ * value forever once the window lapses (today's behavior everywhere
+ * before this), this actively confirms any not-yet-confirmed entry
+ * once it's close to expiring, and lets whatever the server actually
+ * says flow through the normal addEnvelopesMutation()/
+ * removeEnvelopeMutation() pipeline -- the same one every other
+ * authoritative update already goes through, rather than trying to
+ * independently reconstruct "revert to what, exactly" long after the
+ * fact for an action this code otherwise has no memory of.
+ *
+ * Piggybacks on the existing watched-mailbox poller tick
+ * (syncWatchedMailboxes()) instead of its own timer -- this is
+ * low-priority, infrequent background housekeeping, not something
+ * that needs (or deserves) its own polling loop alongside the one
+ * that already exists.
+ *
+ * @param {object} store the Pinia store instance (this from within an action)
+ */
+export async function reconcileNearExpiryLocalChanges(store) {
+	const dueSoon = Date.now() + NEAR_EXPIRY_SWEEP_WINDOW_MS
+	const idsDue = []
+	for (const [envelopeId, perEnvelope] of recentLocalChanges) {
+		for (const change of perEnvelope.values()) {
+			if (!change.confirmed && change.expiresAt <= dueSoon) {
+				idsDue.push(envelopeId)
+				break
+			}
+		}
+	}
+
+	for (const id of idsDue) {
+		const envelope = store.getEnvelope(id)
+		if (!envelope) {
+			// Nothing local left watching this id (already removed by
+			// something else, or never actually loaded into the store) --
+			// nothing to reconcile against.
+			continue
+		}
+		try {
+			// eslint-disable-next-line no-await-in-loop -- deliberately
+			// sequential: low-priority background housekeeping, not
+			// worth its own concurrency budget.
+			const authoritative = await fetchEnvelope(envelope.accountId, id)
+			// This IS the reconciliation -- clear every remaining grace-
+			// window entry for this envelope first, so the answer just
+			// fetched actually lands instead of being immediately
+			// re-overridden by withRecentFlagOverrides()/
+			// withRecentTagOverrides() reading the very (still
+			// unexpired) entries this active check exists to settle.
+			recentLocalChanges.delete(id)
+			if (authoritative === undefined) {
+				store.removeEnvelopeMutation({ id })
+			} else {
+				store.addEnvelopesMutation({ envelopes: [authoritative] })
+			}
+		} catch (error) {
+			logger.debug('could not actively reconcile a near-expiry local change', { id, error })
+		}
+	}
 }
 
 /**
@@ -1937,6 +2076,14 @@ export default function mainStoreActions() {
 				return
 			}
 
+			// Fire-and-forget, deliberately outside handleHttpAuthErrors()
+			// below -- this is unrelated background housekeeping (see its
+			// own doc comment), not part of this tick's actual sync work,
+			// and must never fail or delay the real sync tick.
+			reconcileNearExpiryLocalChanges(this).catch((error) => {
+				logger.debug('reconcileNearExpiryLocalChanges failed for this tick', { error })
+			})
+
 			return handleHttpAuthErrors(async () => {
 				const mailboxTargets = this.getAccounts
 					.filter((a) => !a.isUnified && !isDisabled(a))
@@ -2304,12 +2451,14 @@ export default function mainStoreActions() {
 				} catch (error) {
 					logger.error('Could not toggle message flagged state', { error })
 
-					// Revert change
-					this.flagEnvelopeMutation({
+					const landed = await reconcileOrRevert({
 						envelope,
-						flag: 'flagged',
-						value: oldState,
+						hasLanded: (authoritative) => authoritative?.flags?.flagged === !oldState,
+						revert: () => this.flagEnvelopeMutation({ envelope, flag: 'flagged', value: oldState }),
 					})
+					if (landed) {
+						return
+					}
 
 					throw error
 				}
@@ -2428,21 +2577,30 @@ export default function mainStoreActions() {
 				this.refreshFlagPredicateBucketsForEnvelope(envelope)
 			} catch (error) {
 				logger.error('Could not toggle message importance', { error })
-				this.flagEnvelopeMutation({
+
+				const landed = await reconcileOrRevert({
 					envelope,
-					flag: 'important',
-					value: oldFlagState,
+					hasLanded: (authoritative) => authoritative?.flags?.important === important,
+					revert: () => {
+						this.flagEnvelopeMutation({ envelope, flag: 'important', value: oldFlagState })
+						if (optimisticTagMutationApplied) {
+							// Undo via the same mutation, not a raw snapshot
+							// restore -- re-records a fresh
+							// recentLocalChanges 'tags' entry holding the
+							// correct (reverted) value, same as
+							// flagEnvelopeMutation()'s own revert above, so
+							// a legitimate later sync isn't fought by a
+							// stale entry still holding the attempted-but-
+							// failed value.
+							applyTagMutation(!important)
+							reclassify()
+						}
+					},
 				})
-				if (optimisticTagMutationApplied) {
-					// Undo via the same mutation, not a raw snapshot
-					// restore -- re-records a fresh recentLocalChanges
-					// 'tags' entry holding the correct (reverted) value,
-					// same as flagEnvelopeMutation()'s own revert above,
-					// so a legitimate later sync isn't fought by a stale
-					// entry still holding the attempted-but-failed value.
-					applyTagMutation(!important)
-					reclassify()
+				if (landed) {
+					return
 				}
+
 				throw error
 			}
 		},
@@ -2482,12 +2640,14 @@ export default function mainStoreActions() {
 				} catch (error) {
 					logger.error('could not toggle message seen state', { error })
 
-					// Revert change
-					this.flagEnvelopeMutation({
+					const landed = await reconcileOrRevert({
 						envelope,
-						flag: 'seen',
-						value: oldState,
+						hasLanded: (authoritative) => authoritative?.flags?.seen === newState,
+						revert: () => this.flagEnvelopeMutation({ envelope, flag: 'seen', value: oldState }),
 					})
+					if (landed) {
+						return
+					}
 
 					throw error
 				}
@@ -2544,21 +2704,28 @@ export default function mainStoreActions() {
 				} catch (error) {
 					logger.error('could not toggle message junk state', { error })
 
-					if (removeEnvelope) {
-						this.addEnvelopesMutation({ envelopes: [envelope], bypassRemovalSuppression: true })
+					// Reconciled on the flag alone -- the primary,
+					// always-attempted change. If it landed, the junk
+					// state is correct even if the separate move-to-junk-
+					// mailbox step below failed on its own (a partial-
+					// success state better left as is than fully reverted
+					// over an auxiliary step); only revert (and, if this
+					// was a removal, re-add the envelope) when the flag
+					// itself genuinely never landed.
+					const landed = await reconcileOrRevert({
+						envelope,
+						hasLanded: (authoritative) => authoritative?.flags?.$junk === !oldState,
+						revert: () => {
+							if (removeEnvelope) {
+								this.addEnvelopesMutation({ envelopes: [envelope], bypassRemovalSuppression: true })
+							}
+							this.flagEnvelopeMutation({ envelope, flag: '$junk', value: oldState })
+							this.flagEnvelopeMutation({ envelope, flag: '$notjunk', value: !oldState })
+						},
+					})
+					if (landed) {
+						return
 					}
-
-					// Revert change
-					this.flagEnvelopeMutation({
-						envelope,
-						flag: '$junk',
-						value: oldState,
-					})
-					this.flagEnvelopeMutation({
-						envelope,
-						flag: '$notjunk',
-						value: !oldState,
-					})
 
 					throw error
 				}
@@ -3079,8 +3246,17 @@ export default function mainStoreActions() {
 					await ThreadService.moveThread(envelope.databaseId, destMailboxId)
 					logger.debug('thread moved')
 				} catch (e) {
-					this.addEnvelopesMutation({ envelopes: [envelope], bypassRemovalSuppression: true })
 					logger.error('could not move thread', { error: e })
+
+					const landed = await reconcileOrRevert({
+						envelope,
+						hasLanded: (authoritative) => authoritative?.mailboxId === destMailboxId,
+						revert: () => this.addEnvelopesMutation({ envelopes: [envelope], bypassRemovalSuppression: true }),
+					})
+					if (landed) {
+						return
+					}
+
 					throw e
 				}
 			})

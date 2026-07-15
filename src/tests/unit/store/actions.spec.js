@@ -15,7 +15,7 @@ import * as NotificationService from '../../../service/NotificationService.js'
 import * as ThreadService from '../../../service/ThreadService.js'
 import { PAGE_SIZE, UNIFIED_INBOX_ID } from '../../../store/constants.js'
 import useMainStore from '../../../store/mainStore.js'
-import { computeLockRetryDelayMs, mapWithConcurrencyLimit, resetRecentLocalChangesForTests, resetSharedNetworkLimiterForTests } from '../../../store/mainStore/actions.js'
+import { computeLockRetryDelayMs, mapWithConcurrencyLimit, reconcileNearExpiryLocalChanges, resetRecentLocalChangesForTests, resetSharedNetworkLimiterForTests } from '../../../store/mainStore/actions.js'
 import { normalizedEnvelopeListId } from '../../../util/normalization.js'
 import { wait } from '../../../util/wait.js'
 
@@ -1248,6 +1248,35 @@ describe('Vuex store actions', () => {
 			await expect(store.toggleEnvelopeFlagged(envelope)).rejects.toThrow('network error')
 
 			expect(MessageService.syncEnvelopes).not.toHaveBeenCalled()
+		})
+
+		// Phase 4 of the unified optimistic-update plan (see
+		// /home/ktogias/.claude/plans/generic-hugging-fern.md): a thrown
+		// network error doesn't always mean the change never landed --
+		// a client-side timeout can fire an error for a request that
+		// actually completed server-side. Confirmed here against
+		// toggleEnvelopeFlagged() specifically; the same
+		// reconcileOrRevert() helper is wired the same way into
+		// toggleEnvelopeSeen()/toggleEnvelopeJunk()/setEnvelopeImportant()/
+		// moveThread().
+		it('does not revert or rethrow if reconciliation confirms the flag actually landed despite the error', async () => {
+			MessageService.setEnvelopeFlags.mockRejectedValue(new Error('timed out'))
+			MessageService.fetchEnvelope.mockResolvedValue({ flags: { flagged: true } })
+			const envelope = { databaseId: 1, mailboxId: 11, accountId: 13, flags: { flagged: false } }
+
+			await store.toggleEnvelopeFlagged(envelope)
+
+			expect(envelope.flags.flagged).toBe(true)
+		})
+
+		it('still reverts and rethrows if reconciliation confirms the flag genuinely never landed', async () => {
+			MessageService.setEnvelopeFlags.mockRejectedValue(new Error('network error'))
+			MessageService.fetchEnvelope.mockResolvedValue({ flags: { flagged: false } })
+			const envelope = { databaseId: 1, mailboxId: 11, accountId: 13, flags: { flagged: false } }
+
+			await expect(store.toggleEnvelopeFlagged(envelope)).rejects.toThrow('network error')
+
+			expect(envelope.flags.flagged).toBe(false)
 		})
 
 		it('setEnvelopeImportant triggers a refresh after a successful toggle', async () => {
@@ -3626,6 +3655,130 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	// Phase 4 of the unified optimistic-update plan (see
+	// /home/ktogias/.claude/plans/generic-hugging-fern.md): moveThread()'s
+	// own revert-on-failure (re-adding the removed envelope) now confirms
+	// against an authoritative fetch first, same reasoning as the flag-
+	// based actions tested elsewhere in this file.
+	describe('moveThread: reconciles before reverting on a failed move', () => {
+		it('does not re-add the envelope if reconciliation confirms the move actually landed', async () => {
+			ThreadService.moveThread.mockRejectedValue(new Error('timed out'))
+			MessageService.fetchEnvelope.mockResolvedValue({ mailboxId: 2 })
+			const envelope = { databaseId: 1, accountId: 13, mailboxId: 1 }
+			const account13 = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({ account: account13, mailbox: { name: 'INBOX', databaseId: 1, accountId: 13 } })
+
+			await store.moveThread({ envelope, destMailboxId: 2 })
+
+			expect(store.envelopes[1]).toBeUndefined()
+		})
+
+		it('re-adds the envelope if reconciliation confirms the move genuinely never landed', async () => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			ThreadService.moveThread.mockRejectedValue(new Error('network error'))
+			MessageService.fetchEnvelope.mockResolvedValue({ mailboxId: 1 })
+			const account = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({ account, mailbox: { name: 'INBOX', databaseId: 1, accountId: 13 } })
+			const envelope = { databaseId: 1, accountId: 13, mailboxId: 1, dateInt: 1, flags: {}, tags: [] }
+			store.addEnvelopesMutation({ envelopes: [envelope], addToUnifiedMailboxes: false })
+
+			await expect(store.moveThread({ envelope, destMailboxId: 2 })).rejects.toThrow('network error')
+
+			expect(store.envelopes[1]).toBeDefined()
+		})
+	})
+
+	// Phase 4's other half (see the same plan file): a normal sync merge
+	// happening to observe the server agreeing confirms an entry for
+	// free (tested implicitly throughout the recentLocalChanges/tags
+	// tests above), but nothing else ever independently checks a
+	// still-unconfirmed entry before its own grace window closes. This
+	// active sweep does, piggybacked onto syncWatchedMailboxes()'s own
+	// tick rather than tested through that whole call chain.
+	describe('reconcileNearExpiryLocalChanges: active confirmation before a grace window closes', () => {
+		beforeEach(() => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			const account = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: { name: 'INBOX', databaseId: 11, accountId: 13, specialRole: 'inbox' },
+			})
+		})
+
+		it('actively confirms a not-yet-confirmed entry once it is near expiry, and applies the authoritative answer', async () => {
+			vi.useFakeTimers()
+			try {
+				store.addEnvelopesMutation({
+					envelopes: [{ databaseId: 950, mailboxId: 11, dateInt: 1, flags: { flagged: false }, tags: [] }],
+					addToUnifiedMailboxes: false,
+				})
+				store.flagEnvelopeMutation({ envelope: store.envelopes[950], flag: 'flagged', value: true })
+
+				// Nothing ever independently confirmed this one (no sync
+				// merge happened to observe it) -- past RECENT_FLAG_CHANGE_GRACE_MS
+				// minus the sweep's own "due soon" window, so it's now due
+				// for an active check.
+				vi.advanceTimersByTime(80 * 1000)
+
+				// The server, it turns out, never actually got the change.
+				MessageService.fetchEnvelope.mockResolvedValue({ databaseId: 950, mailboxId: 11, flags: { flagged: false }, tags: [] })
+
+				await reconcileNearExpiryLocalChanges(store)
+
+				expect(MessageService.fetchEnvelope.mock.calls.some((call) => call[1] === 950)).toBe(true)
+				expect(store.envelopes[950].flags.flagged).toBe(false)
+			} finally {
+				vi.useRealTimers()
+			}
+		})
+
+		it('does not actively check an entry a normal sync already confirmed', async () => {
+			vi.useFakeTimers()
+			try {
+				store.addEnvelopesMutation({
+					envelopes: [{ databaseId: 951, mailboxId: 11, dateInt: 1, flags: { flagged: false }, tags: [] }],
+					addToUnifiedMailboxes: false,
+				})
+				store.flagEnvelopeMutation({ envelope: store.envelopes[951], flag: 'flagged', value: true })
+
+				// A routine sync merge independently observes the server
+				// already agreeing -- marks the entry confirmed for free.
+				store.updateEnvelopeMutation({
+					envelope: { databaseId: 951, mailboxId: 11, flags: { flagged: true }, tags: [] },
+				})
+
+				vi.advanceTimersByTime(80 * 1000)
+
+				await reconcileNearExpiryLocalChanges(store)
+
+				expect(MessageService.fetchEnvelope).not.toHaveBeenCalled()
+			} finally {
+				vi.useRealTimers()
+			}
+		})
+
+		it('does not check an entry that is not near expiry yet', async () => {
+			vi.useFakeTimers()
+			try {
+				store.addEnvelopesMutation({
+					envelopes: [{ databaseId: 952, mailboxId: 11, dateInt: 1, flags: { flagged: false }, tags: [] }],
+					addToUnifiedMailboxes: false,
+				})
+				store.flagEnvelopeMutation({ envelope: store.envelopes[952], flag: 'flagged', value: true })
+
+				// Freshly set -- nowhere near its own 120s expiry yet.
+				await reconcileNearExpiryLocalChanges(store)
+
+				expect(MessageService.fetchEnvelope).not.toHaveBeenCalled()
+			} finally {
+				vi.useRealTimers()
+			}
+		})
+	})
+
 	// Moved out of UndoableActionMixin.js's own component-local data()
 	// specifically so it's shared state, not per-component-instance --
 	// see pendingRemovals' own comment in mainStore.js for the live bug
@@ -4616,6 +4769,23 @@ describe('Vuex store actions', () => {
 			// The re-add itself must not have thrown and swallowed the
 			// real error.
 			expect(store.envelopes[envelope.databaseId]).toBeDefined()
+		})
+
+		// Phase 4 (see /home/ktogias/.claude/plans/generic-hugging-fern.md):
+		// reconciliation here is deliberately scoped to the $junk flag
+		// alone, the primary always-attempted change -- not the separate
+		// move-to-junk-mailbox step, which can legitimately fail on its
+		// own without meaning the junk marking itself didn't work.
+		it('treats the junk marking as landed (no revert, no rethrow) if the flag confirms despite the move failing', async () => {
+			MessageService.setEnvelopeFlags.mockResolvedValue({})
+			MessageService.moveMessage.mockRejectedValue(new Error('move failed'))
+			MessageService.fetchEnvelope.mockResolvedValue({ flags: { $junk: true, $notjunk: false } })
+			const envelope = envelopeInInbox()
+			store.envelopes[envelope.databaseId] = envelope
+
+			await store.toggleEnvelopeJunk({ envelope, removeEnvelope: true })
+
+			expect(envelope.flags.$junk).toBe(true)
 		})
 	})
 
