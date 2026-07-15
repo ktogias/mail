@@ -126,6 +126,7 @@ import {
 } from '../../util/priorityInbox.js'
 import { wait } from '../../util/wait.js'
 import {
+	ENVELOPE_LIST_BASELINE_SIZE,
 	FOLLOW_UP_MAILBOX_ID,
 	FOLLOW_UP_TAG_LABEL,
 	IMPORTANT_TAG_LABEL,
@@ -1512,11 +1513,30 @@ export default function mainStoreActions() {
 		setCurrentViewMailboxIdMutation(mailboxId) {
 			this.currentViewMailboxId = mailboxId
 		},
+		// See currentOpenThreadId in mainStore.js's state() -- mirrored
+		// from Thread.vue's own route watcher, the same way
+		// setCurrentViewMailboxIdMutation() above is mirrored from
+		// MailboxThread.vue.
+		setCurrentOpenThreadIdMutation(threadId) {
+			this.currentOpenThreadId = threadId
+		},
 		// See lastOpenedFromList in mainStore.js's state() for the full
 		// reasoning. mailboxId/query together are exactly what
 		// getEnvelopes() needs to reconstruct the same list later.
 		setLastOpenedFromListMutation({ mailboxId, query }) {
 			this.lastOpenedFromList = { mailboxId, query }
+		},
+		// See listsWithActiveSelection in mainStore.js's state(). Reported
+		// by EnvelopeList.vue's own watcher on its (still component-local)
+		// `selection` array -- this store only ever needs to know
+		// whether a list has ANY active selection, not which ids.
+		setListHasSelectionMutation({ mailboxId, query, hasSelection }) {
+			const key = mailboxId + '::' + normalizedEnvelopeListId(query)
+			if (hasSelection) {
+				Vue.set(this.listsWithActiveSelection, key, true)
+			} else {
+				Vue.delete(this.listsWithActiveSelection, key)
+			}
 		},
 		envelopeFetchStartedMutation({ mailboxId, query }) {
 			const key = mailboxId + '::' + normalizedEnvelopeListId(query)
@@ -2133,6 +2153,15 @@ export default function mainStoreActions() {
 			reconcileNearExpiryLocalChanges(this).catch((error) => {
 				logger.debug('reconcileNearExpiryLocalChanges failed for this tick', { error })
 			})
+
+			// A genuine reactive "a watched-mailbox tick just happened"
+			// signal, reused (not previously true) as exactly that:
+			// updateSyncTimestamp() was already called, but only from
+			// Mailbox.vue's own per-instance sync(), never from this
+			// app-wide poller -- so nothing could reliably piggyback on
+			// this tick's own cadence before. IdleTailTrimMixin.js
+			// watches this instead of running its own separate interval.
+			this.updateSyncTimestamp()
 
 			return handleHttpAuthErrors(async () => {
 				const mailboxTargets = this.getAccounts
@@ -2823,6 +2852,24 @@ export default function mainStoreActions() {
 			})
 		},
 		async fetchThread(id, { speculative = false } = {}) {
+			// speculative only: unlike a genuine open (which must always
+			// stay fresh -- new replies, flag changes), a hover/viewport/
+			// neighbor prefetch gains nothing from re-requesting a thread
+			// this client already fully knows. "Fully known" means both
+			// the member-id list itself (envelopes[id].thread, only ever
+			// populated by a previous fetchThread() success) and every
+			// one of those members' own envelope data are present --
+			// there's no separate thread-object cache, "the thread" is
+			// just that id array plus the referenced this.envelopes
+			// entries. A non-speculative call always falls through to a
+			// real fetch below, unconditionally.
+			if (speculative) {
+				const memberIds = this.envelopes[id]?.thread
+				if (memberIds && memberIds.every((memberId) => this.envelopes[memberId] !== undefined)) {
+					return memberIds.map((memberId) => this.envelopes[memberId])
+				}
+			}
+
 			if (pendingThreadFetches.has(id)) {
 				return pendingThreadFetches.get(id)
 			}
@@ -4161,6 +4208,33 @@ export default function mainStoreActions() {
 				if (previouslyKnown === undefined || !isEqual(previouslyKnown.flags, nextFlags)) {
 					this.reclassifyFlagBucketsMutation({ envelope, sourceMailbox: mailbox, includeUnified: addToUnifiedMailboxes, excludeListId: listId })
 				}
+
+				// Genuinely new mail only (not a changed-flags resync of
+				// something already known) -- both of these are about a
+				// NEW message landing in a thread, not this envelope's
+				// own flags changing.
+				if (previouslyKnown === undefined && envelope.threadRootId) {
+					// fetchThread()'s new speculative cache-short-circuit
+					// (see there) removed the incidental refresh every
+					// hover/viewport prefetch used to provide for free --
+					// without this, a thread's cached member list
+					// (envelopes[x].thread) would never learn about a
+					// new reply until the thread is genuinely re-opened.
+					this.invalidateThreadMemberCacheMutation({ accountId: mailbox.accountId, threadRootId: envelope.threadRootId })
+
+					// Narrowly scoped to the thread that's open right
+					// now -- the one case with a genuinely strong
+					// interest signal and no existing coverage (a
+					// collapsed reply's body is otherwise only fetched on
+					// expand or once actually scrolled into view). See
+					// the plan's own reasoning for why this deliberately
+					// isn't extended to every previously-interacted-with
+					// thread.
+					const openThreadRoot = this.envelopes[this.currentOpenThreadId]?.threadRootId
+					if (openThreadRoot && envelope.threadRootId === openThreadRoot) {
+						this.fetchMessage(envelope.databaseId, { speculative: true }).catch(() => {})
+					}
+				}
 			})
 
 			workingLists.forEach((working, targetMailbox) => {
@@ -4634,6 +4708,61 @@ export default function mainStoreActions() {
 			}
 			Vue.set(this.mailboxes[FOLLOW_UP_MAILBOX_ID], 'envelopeLists', filteredLists)
 		},
+		// Idle-and-unselected tail trimming: a deep scroll excursion the
+		// user has moved on from (no scroll activity near it for
+		// IDLE_TRIM_MS, see IdleTailTrimMixin.js) leaves its DOM/component
+		// instances and its share of every routine sync tick's own
+		// per-bucket work (see syncWatchedMailboxes()) lingering
+		// indefinitely otherwise. Only ever trims the tail -- the user's
+		// own described usage pattern is "occasionally scroll deep, then
+		// return to and stay at the head, where new mail lands" -- so the
+		// head is never touched, and scrolling back down later simply
+		// re-runs the existing forward pagination (fetchNextEnvelopes)
+		// from the now-shorter list's own cursor, exactly as if loading
+		// it fresh the first time.
+		trimIdleEnvelopeListTailMutation({ mailboxId, query }) {
+			const mailbox = this.mailboxes[mailboxId]
+			const listId = normalizedEnvelopeListId(query)
+			const list = mailbox?.envelopeLists[listId]
+			if (!list || list.length <= ENVELOPE_LIST_BASELINE_SIZE) {
+				return
+			}
+			// Skip the whole list, not just the tail, if anything in it
+			// is currently selected -- simpler and safer than a precise
+			// per-id check, and this should be rare given the list was
+			// already idle for several minutes. See
+			// listsWithActiveSelection in mainStore.js's state().
+			if (this.listsWithActiveSelection[mailboxId + '::' + listId]) {
+				return
+			}
+
+			const keepIds = list.slice(0, ENVELOPE_LIST_BASELINE_SIZE)
+			const tailIds = list.slice(ENVELOPE_LIST_BASELINE_SIZE)
+			Vue.set(mailbox.envelopeLists, listId, keepIds)
+
+			// The heavier per-envelope caches (this.messages -- full
+			// bodies, this.envelopes -- metadata) are only released once
+			// nothing else currently loaded still references the id --
+			// the same message can legitimately still be visible via a
+			// different mailbox's own bucket or the unified/priority-
+			// inbox fan-out. dropStaleIds() elsewhere already tolerates a
+			// list id with no corresponding this.envelopes entry, so
+			// nothing assumes these caches are permanent once populated.
+			const stillReferenced = new Set()
+			for (const mb of Object.values(this.mailboxes)) {
+				for (const ids of Object.values(mb.envelopeLists)) {
+					ids.forEach((id) => stillReferenced.add(id))
+				}
+			}
+
+			tailIds.forEach((id) => {
+				if (stillReferenced.has(id) || id === this.currentOpenThreadId) {
+					return
+				}
+				Vue.delete(this.messages, id)
+				Vue.delete(this.envelopes, id)
+			})
+		},
 		addMessageMutation({ message }) {
 			Vue.set(this.messages, message.databaseId, message)
 		},
@@ -4694,6 +4823,30 @@ export default function mainStoreActions() {
 
 			// Store the references
 			Vue.set(this.envelopes[id], 'thread', thread.map((e) => e.databaseId))
+		},
+		// A new reply's own sync response never updates an EXISTING
+		// thread's already-cached member list (this.envelopes[x].thread,
+		// only ever written by addEnvelopeThreadMutation() above, on a
+		// real fetchThread() success) -- before fetchThread()'s own
+		// speculative cache-short-circuit existed, this went unnoticed
+		// because every speculative call re-fetched anyway, incidentally
+		// keeping it fresh. Called from addEnvelopesMutation()'s
+		// genuinely-new-envelope branch. Clears rather than repopulates
+		// deliberately -- see the plan's own reasoning: the one consumer
+		// outside Thread.vue's always-fresh open
+		// (threadStillMatchesFlagPredicate) already degrades safely when
+		// `.thread` is missing, so a hand-rolled local splice would only
+		// risk guessing wrong about server-side thread-grouping/dedup
+		// subtleties for no real benefit.
+		invalidateThreadMemberCacheMutation({ accountId, threadRootId }) {
+			if (!threadRootId) {
+				return
+			}
+			this.getEnvelopesByThreadRootId(accountId, threadRootId).forEach((envelope) => {
+				if (envelope.thread !== undefined) {
+					Vue.delete(envelope, 'thread')
+				}
+			})
 		},
 		removeMessageMutation({ id }) {
 			Vue.delete(this.messages, id)

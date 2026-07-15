@@ -65,6 +65,7 @@ import { matchError } from '../errors/match.js'
 import NoTrashMailboxConfiguredError
 	from '../errors/NoTrashMailboxConfiguredError.js'
 import logger from '../logger.js'
+import IdleTailTrimMixin from '../mixins/IdleTailTrimMixin.js'
 import UndoableActionMixin from '../mixins/UndoableActionMixin.js'
 import useMainStore from '../store/mainStore.js'
 import { mailboxHasRights } from '../util/acl.js'
@@ -82,7 +83,7 @@ export default {
 		SectionTitle,
 	},
 
-	mixins: [UndoableActionMixin],
+	mixins: [UndoableActionMixin, IdleTailTrimMixin],
 
 	props: {
 		groupEnvelopes: {

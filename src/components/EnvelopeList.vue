@@ -389,6 +389,18 @@ export default {
 					env.flags.selected = false
 				})
 		},
+
+		// Reported to the store so the idle-tail-trim mutation (see
+		// trimIdleEnvelopeListTailMutation()) can skip a list while it has
+		// an active selection, without needing selection itself (still
+		// component-local, unchanged here) to move into the store.
+		selection(newVal) {
+			this.mainStore.setListHasSelectionMutation({
+				mailboxId: this.mailbox.databaseId,
+				query: this.searchQuery,
+				hasSelection: newVal.length > 0,
+			})
+		},
 	},
 
 	mounted() {
@@ -397,6 +409,14 @@ export default {
 
 	beforeDestroy() {
 		dragEventBus.off('envelopes-dropped', this.unselectAll)
+		// Don't leave a stale "has selection" marker behind for a list
+		// this instance no longer renders -- it would block that list's
+		// idle-tail-trim forever.
+		this.mainStore.setListHasSelectionMutation({
+			mailboxId: this.mailbox.databaseId,
+			query: this.searchQuery,
+			hasSelection: false,
+		})
 	},
 
 	methods: {

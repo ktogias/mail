@@ -663,4 +663,76 @@ describe('Mailbox', () => {
 			vi.useRealTimers()
 		}
 	})
+
+	describe('IdleTailTrimMixin: idle-and-unselected tail trimming', () => {
+		// Real scroll-position math is meaningless in jsdom (zero real
+		// layout -- scrollHeight/clientHeight are always 0), so these
+		// tests stub isScrolledNearIdleTailTrimBoundary() directly and
+		// exercise only the idle-timer/tick-driven decision logic, same
+		// pragmatic approach already used elsewhere in this test suite
+		// for scroll/layout-dependent behavior.
+		it('trims once idle for long enough and not scrolled near the boundary, triggered by a sync tick', async () => {
+			const view = mountMailbox()
+			vi.spyOn(view.vm, 'isScrolledNearIdleTailTrimBoundary').mockReturnValue(false)
+			vi.spyOn(store, 'trimIdleEnvelopeListTailMutation')
+			view.vm.lastScrollActivityAt = Date.now() - 13 * 60 * 1000 // past IDLE_TRIM_MS (12 min)
+
+			store.updateSyncTimestamp()
+			await view.vm.$nextTick()
+
+			expect(store.trimIdleEnvelopeListTailMutation).toHaveBeenCalledWith({
+				mailboxId: mailbox.databaseId,
+				query: undefined,
+			})
+		})
+
+		it('does not trim while still within the idle threshold', async () => {
+			const view = mountMailbox()
+			vi.spyOn(view.vm, 'isScrolledNearIdleTailTrimBoundary').mockReturnValue(false)
+			vi.spyOn(store, 'trimIdleEnvelopeListTailMutation')
+			view.vm.lastScrollActivityAt = Date.now() - 60 * 1000 // well under 12 min
+
+			store.updateSyncTimestamp()
+			await view.vm.$nextTick()
+
+			expect(store.trimIdleEnvelopeListTailMutation).not.toHaveBeenCalled()
+		})
+
+		it('does not trim when scrolled near where the boundary would fall, even if idle long enough', async () => {
+			const view = mountMailbox()
+			vi.spyOn(view.vm, 'isScrolledNearIdleTailTrimBoundary').mockReturnValue(true)
+			vi.spyOn(store, 'trimIdleEnvelopeListTailMutation')
+			view.vm.lastScrollActivityAt = Date.now() - 13 * 60 * 1000
+
+			store.updateSyncTimestamp()
+			await view.vm.$nextTick()
+
+			expect(store.trimIdleEnvelopeListTailMutation).not.toHaveBeenCalled()
+		})
+
+		it('a scroll event refreshes lastScrollActivityAt, resetting the idle clock', () => {
+			const view = mountMailbox()
+			const longAgo = Date.now() - 13 * 60 * 1000
+			view.vm.lastScrollActivityAt = longAgo
+
+			view.vm.onIdleTailTrimScrollActivity()
+
+			expect(view.vm.lastScrollActivityAt).toBeGreaterThan(longAgo)
+		})
+
+		it('also checks immediately when the tab is backgrounded, not just on the next sync tick', () => {
+			const view = mountMailbox()
+			vi.spyOn(view.vm, 'isScrolledNearIdleTailTrimBoundary').mockReturnValue(false)
+			vi.spyOn(store, 'trimIdleEnvelopeListTailMutation')
+			view.vm.lastScrollActivityAt = Date.now() - 13 * 60 * 1000
+			vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
+
+			view.vm.onIdleTailTrimVisibilityChange()
+
+			expect(store.trimIdleEnvelopeListTailMutation).toHaveBeenCalledWith({
+				mailboxId: mailbox.databaseId,
+				query: undefined,
+			})
+		})
+	})
 })

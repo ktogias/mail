@@ -185,6 +185,13 @@ export default {
 
 	watch: {
 		$route(to, from) {
+			// Mirrored unconditionally, even when the guard below skips
+			// resetThread() -- store-level consumers (the idle-tail-trim
+			// cache GC, the open-thread proactive prefetch, see
+			// actions.js) need this correct on every route change, not
+			// just the ones that actually change threads.
+			this.mainStore.setCurrentOpenThreadIdMutation(parseInt(to.params.threadId, 10) || undefined)
+
 			if (
 				from.name === to.name
 				&& from.params.mailboxId === to.params.mailboxId
@@ -200,12 +207,18 @@ export default {
 	},
 
 	created() {
+		this.mainStore.setCurrentOpenThreadIdMutation(this.threadId || undefined)
 		this.resetThread()
 		window.addEventListener('keydown', this.handleKeyDown)
 		document.addEventListener('visibilitychange', this.onVisibilityChange)
 	},
 
 	beforeDestroy() {
+		// This pane is v-if-gated (MailboxThread.vue), so a real
+		// destroy here genuinely means no thread is open anymore --
+		// clear it so store-level consumers don't keep treating a
+		// closed thread as still on screen.
+		this.mainStore.setCurrentOpenThreadIdMutation(undefined)
 		window.removeEventListener('keydown', this.handleKeyDown)
 		document.removeEventListener('visibilitychange', this.onVisibilityChange)
 	},

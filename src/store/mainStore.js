@@ -50,6 +50,28 @@ export default defineStore('main', {
 			// Used for view-aware decisions: sync the open mailbox
 			// first, keep refreshing an open priority inbox.
 			currentViewMailboxId: undefined,
+			// The envelope id of the currently open thread/message (the
+			// route's own :threadId, mirrored the same way
+			// currentViewMailboxId is -- see Thread.vue's own route
+			// watcher). Lets store-level logic (the idle-tail-trim cache
+			// GC, the open-thread proactive prefetch) know what's
+			// genuinely on screen right now without needing to read the
+			// router directly.
+			currentOpenThreadId: undefined,
+			// Which mailbox+query lists currently have a non-empty
+			// multi-select active, keyed by `${mailboxId}::${listId}` --
+			// reported by EnvelopeList.vue's own watcher on its
+			// (still component-local) `selection` array. The idle-tail-
+			// trim mutation consults this before evicting a list's tail,
+			// so an in-progress bulk selection is never yanked out from
+			// under the user mid-action. Deliberately a per-list boolean,
+			// not a mirror of the actual selected ids: the trim is "skip
+			// the whole list if anything in it is selected" (same
+			// simplification the trim mutation's own comment already
+			// makes for the tail specifically), not a precise per-id
+			// check, so a full migration of `selection` itself into the
+			// store was unnecessary.
+			listsWithActiveSelection: {},
 			// Which list (mailboxId + query) the most recent click into a
 			// thread actually came from -- set by Envelope.vue's own
 			// onClick(), the only place that unambiguously knows this

@@ -678,6 +678,82 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	describe('addEnvelopesMutation: new mail in an existing thread invalidates its cached member list and, if open, proactively prefetches the body', () => {
+		beforeEach(() => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			const account = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: { id: 'INBOX', name: 'INBOX', databaseId: 11, accountId: 13, specialRole: 'inbox' },
+			})
+		})
+
+		const newReply = (databaseId, threadRootId, mailboxId = 11) => ({
+			databaseId,
+			mailboxId,
+			uid: databaseId,
+			dateInt: databaseId * 1000,
+			threadRootId,
+			flags: { seen: false },
+			tags: {},
+		})
+
+		it('clears a stale cached .thread on another envelope sharing the new message\'s threadRootId', () => {
+			store.envelopes[70] = { databaseId: 70, mailboxId: 11, accountId: 13, threadRootId: 'thread-a', thread: [70] }
+
+			store.addEnvelopesMutation({ envelopes: [newReply(71, 'thread-a')] })
+
+			expect(store.envelopes[70].thread).toBeUndefined()
+		})
+
+		it('leaves an unrelated thread\'s cached .thread untouched', () => {
+			store.envelopes[80] = { databaseId: 80, mailboxId: 11, accountId: 13, threadRootId: 'thread-b', thread: [80] }
+
+			store.addEnvelopesMutation({ envelopes: [newReply(81, 'thread-a')] })
+
+			expect(store.envelopes[80].thread).toEqual([80])
+		})
+
+		it('does not touch anything for an already-known envelope (a flags/changed resync, not genuinely new mail)', () => {
+			store.envelopes[70] = { databaseId: 70, mailboxId: 11, accountId: 13, threadRootId: 'thread-a', thread: [70] }
+			store.envelopes[71] = { databaseId: 71, mailboxId: 11, accountId: 13, threadRootId: 'thread-a', flags: { seen: false } }
+
+			store.addEnvelopesMutation({ envelopes: [newReply(71, 'thread-a')] })
+
+			expect(store.envelopes[70].thread).toEqual([70])
+		})
+
+		it('proactively, speculatively prefetches the new message\'s body when its thread is the one currently open', async () => {
+			store.envelopes[70] = { databaseId: 70, mailboxId: 11, accountId: 13, threadRootId: 'thread-a' }
+			store.setCurrentOpenThreadIdMutation(70)
+			MessageService.fetchMessage.mockResolvedValue({ databaseId: 71 })
+
+			store.addEnvelopesMutation({ envelopes: [newReply(71, 'thread-a')] })
+			await Promise.resolve()
+			await Promise.resolve()
+
+			expect(MessageService.fetchMessage).toHaveBeenCalledWith(71, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+		})
+
+		it('does not prefetch when the new message belongs to a different thread than the one open', async () => {
+			store.envelopes[70] = { databaseId: 70, mailboxId: 11, accountId: 13, threadRootId: 'thread-a' }
+			store.setCurrentOpenThreadIdMutation(70)
+
+			store.addEnvelopesMutation({ envelopes: [newReply(91, 'thread-z')] })
+			await Promise.resolve()
+
+			expect(MessageService.fetchMessage).not.toHaveBeenCalled()
+		})
+
+		it('does not prefetch when no thread is currently open', async () => {
+			store.addEnvelopesMutation({ envelopes: [newReply(91, 'thread-z')] })
+			await Promise.resolve()
+
+			expect(MessageService.fetchMessage).not.toHaveBeenCalled()
+		})
+	})
+
 	describe('appendOrReplaceEnvelopeId: O(1) thread dedup via a Map, instead of an O(L) scan per envelope', () => {
 		// The old implementation re-scanned the whole growing list with
 		// findIndex() for every single envelope in a batch -- O(n*L) for a
@@ -4118,6 +4194,58 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	describe('fetchThread: speculative calls cache-short-circuit, non-speculative never does', () => {
+		// Unlike fetchMessage(), a thread previously had NO cache check at
+		// all -- every speculative call (hover/viewport/neighbor prefetch)
+		// re-requested an already-fully-known thread every time it fired.
+		// A non-speculative call (the real open) must keep re-fetching
+		// unconditionally, exactly as the describe block above already
+		// covers -- these tests are specifically about the NEW
+		// speculative-only short-circuit.
+		beforeEach(() => {
+			const account = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: { id: 'INBOX', name: 'INBOX', databaseId: 11, accountId: 13, specialRole: 'inbox' },
+			})
+			store.envelopes[100] = { databaseId: 100, mailboxId: 11, thread: [100, 101] }
+			store.envelopes[101] = { databaseId: 101, mailboxId: 11 }
+		})
+
+		it('does not call the service at all when every thread member is already known', async () => {
+			const result = await store.fetchThread(100, { speculative: true })
+
+			expect(MessageService.fetchThread).not.toHaveBeenCalled()
+			expect(result).toEqual([store.envelopes[100], store.envelopes[101]])
+		})
+
+		it('still fetches when the cached thread is only partially known', async () => {
+			store.envelopes[100].thread = [100, 101, 102] // 102 not in store.envelopes
+			MessageService.fetchThread.mockResolvedValue([{ databaseId: 100, mailboxId: 11 }])
+
+			await store.fetchThread(100, { speculative: true })
+
+			expect(MessageService.fetchThread).toHaveBeenCalledTimes(1)
+		})
+
+		it('still fetches when nothing is cached yet for this id', async () => {
+			MessageService.fetchThread.mockResolvedValue([{ databaseId: 200, mailboxId: 11 }])
+
+			await store.fetchThread(200, { speculative: true })
+
+			expect(MessageService.fetchThread).toHaveBeenCalledTimes(1)
+		})
+
+		it('a non-speculative call always fetches fresh, even with a fully-known cached thread', async () => {
+			MessageService.fetchThread.mockResolvedValue([{ databaseId: 100, mailboxId: 11 }])
+
+			await store.fetchThread(100)
+
+			expect(MessageService.fetchThread).toHaveBeenCalledTimes(1)
+		})
+	})
+
 	describe('cancelSpeculativeFetchesExcept: aborting stale prefetches on real navigation', () => {
 		// Confirmed live (2026-07-12, thread 926521): viewport-prefetch
 		// firing for ~20 messages scrolled past in Priority Inbox
@@ -5427,6 +5555,90 @@ describe('Vuex store actions', () => {
 			expect(store.startComposerSessionMutation).toHaveBeenCalledWith(expect.objectContaining({
 				data: expect.objectContaining({ to }),
 			}))
+		})
+	})
+
+	describe('trimIdleEnvelopeListTailMutation: idle-and-unselected tail trimming', () => {
+		beforeEach(() => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			const account = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: { id: 'INBOX', name: 'INBOX', databaseId: 11, accountId: 13, specialRole: 'inbox' },
+			})
+		})
+
+		// A little over the baseline (100) so the tail is non-empty but
+		// small, keeping each test's own setup readable.
+		const seedList = (count) => {
+			const ids = []
+			for (let i = 1; i <= count; i++) {
+				store.envelopes[i] = { databaseId: i, mailboxId: 11, accountId: 13 }
+				ids.push(i)
+			}
+			store.mailboxes[11].envelopeLists[''] = ids
+			return ids
+		}
+
+		it('trims the tail back to the baseline size', () => {
+			seedList(105)
+
+			store.trimIdleEnvelopeListTailMutation({ mailboxId: 11, query: undefined })
+
+			expect(store.mailboxes[11].envelopeLists['']).toHaveLength(100)
+			expect(store.mailboxes[11].envelopeLists['']).toEqual(Array.from({ length: 100 }, (_, i) => i + 1))
+		})
+
+		it('does nothing when the list is at or under the baseline', () => {
+			const ids = seedList(100)
+
+			store.trimIdleEnvelopeListTailMutation({ mailboxId: 11, query: undefined })
+
+			expect(store.mailboxes[11].envelopeLists['']).toEqual(ids)
+		})
+
+		it('skips the whole list, not just the tail, if anything in it is currently selected', () => {
+			const ids = seedList(105)
+			store.setListHasSelectionMutation({ mailboxId: 11, query: undefined, hasSelection: true })
+
+			store.trimIdleEnvelopeListTailMutation({ mailboxId: 11, query: undefined })
+
+			expect(store.mailboxes[11].envelopeLists['']).toEqual(ids)
+		})
+
+		it('garbage-collects this.messages/this.envelopes for a dropped id not referenced anywhere else', () => {
+			seedList(105)
+			store.messages[105] = { databaseId: 105, body: 'hello' }
+
+			store.trimIdleEnvelopeListTailMutation({ mailboxId: 11, query: undefined })
+
+			expect(store.envelopes[105]).toBeUndefined()
+			expect(store.messages[105]).toBeUndefined()
+		})
+
+		it('leaves this.envelopes/this.messages alone for a dropped id still referenced by another loaded list', () => {
+			seedList(105)
+			store.messages[105] = { databaseId: 105, body: 'hello' }
+			// e.g. the same message also visible via a different bucket/
+			// the unified fan-out.
+			store.mailboxes[11].envelopeLists['is:starred'] = [105]
+
+			store.trimIdleEnvelopeListTailMutation({ mailboxId: 11, query: undefined })
+
+			expect(store.envelopes[105]).toBeDefined()
+			expect(store.messages[105]).toBeDefined()
+		})
+
+		it('leaves this.envelopes/this.messages alone for a dropped id that is the currently open thread', () => {
+			seedList(105)
+			store.messages[105] = { databaseId: 105, body: 'hello' }
+			store.setCurrentOpenThreadIdMutation(105)
+
+			store.trimIdleEnvelopeListTailMutation({ mailboxId: 11, query: undefined })
+
+			expect(store.envelopes[105]).toBeDefined()
+			expect(store.messages[105]).toBeDefined()
 		})
 	})
 })
