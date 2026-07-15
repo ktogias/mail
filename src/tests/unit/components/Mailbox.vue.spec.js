@@ -30,9 +30,6 @@ describe('Mailbox', () => {
 	beforeEach(() => {
 		setActivePinia(createPinia())
 		store = useMainStore()
-		// Skip mounted()'s own auto-load/sync flow so each test can drive
-		// initializeCache()/loadEnvelopes() directly and in isolation.
-		store.hasFetchedInitialEnvelopes = true
 
 		account = { id: 4 }
 		store.addAccountMutation(account)
@@ -53,6 +50,13 @@ describe('Mailbox', () => {
 				account,
 				mailbox,
 				bus: { on: vi.fn(), off: vi.fn() },
+				// Skip mounted()'s own auto-load/sync flow so each test can
+				// drive initializeCache()/loadEnvelopes() directly and in
+				// isolation, same as before -- now via an explicit prop
+				// rather than the app-wide hasFetchedInitialEnvelopes flag,
+				// which real instances must no longer be able to skip this
+				// way (see Mailbox.vue's mounted()).
+				skipInitialLoad: true,
 				...propsOverride,
 			},
 			mocks: {
@@ -243,6 +247,55 @@ describe('Mailbox', () => {
 		} finally {
 			vi.useRealTimers()
 		}
+	})
+
+	it('a second simultaneously-mounted Mailbox instance still fetches its own data after the first one finishes first', async () => {
+		// Regression: hasFetchedInitialEnvelopes used to gate the WHOLE
+		// mounted() body, app-wide, not just prefetchOtherMailboxes()
+		// (see mounted()'s own comment). Priority Inbox mounts up to 4
+		// sibling Mailbox instances at once (Favorites/Follow-up/
+		// Important/Other); confirmed live that whichever section's
+		// chain happened to settle first flipped the flag before a
+		// slower sibling's own mounted() got there, permanently skipping
+		// that sibling's initial fetch -- an entire section (confirmed:
+		// "Other") silently never loaded after a hard refresh.
+		store.fetchEnvelopes = vi.fn().mockResolvedValue([])
+		store.syncEnvelopes = vi.fn().mockResolvedValue({})
+		store.getRecursiveMailboxIterator = vi.fn().mockReturnValue([])
+
+		const instanceA = shallowMount(Mailbox, {
+			propsData: { account, mailbox, bus: { on: vi.fn(), off: vi.fn() } },
+			mocks: { $route: { params: {} } },
+			store,
+			localVue,
+		})
+
+		// Let instance A's whole mounted() chain (loadEnvelopes -> sync ->
+		// prefetchOtherMailboxes -> setHasFetchedInitialEnvelopesMutation)
+		// run all the way to completion before B ever mounts -- modeling A
+		// simply being faster (e.g. an empty/cached result) than B.
+		await new Promise((resolve) => setTimeout(resolve, 0))
+		await Promise.resolve()
+		await Promise.resolve()
+		await Promise.resolve()
+
+		expect(store.hasFetchedInitialEnvelopes).toBe(true)
+		store.fetchEnvelopes.mockClear()
+
+		const instanceB = shallowMount(Mailbox, {
+			propsData: { account, mailbox, bus: { on: vi.fn(), off: vi.fn() } },
+			mocks: { $route: { params: {} } },
+			store,
+			localVue,
+		})
+
+		await new Promise((resolve) => setTimeout(resolve, 0))
+		await Promise.resolve()
+
+		expect(store.fetchEnvelopes).toHaveBeenCalled()
+
+		instanceA.destroy()
+		instanceB.destroy()
 	})
 
 	describe('loadMore() pacing guards', () => {
@@ -584,7 +637,7 @@ describe('Mailbox', () => {
 		try {
 			const bus = { on: vi.fn(), off: vi.fn() }
 			const view = shallowMount(Mailbox, {
-				propsData: { account, mailbox, bus },
+				propsData: { account, mailbox, bus, skipInitialLoad: true },
 				store,
 				localVue,
 			})

@@ -132,6 +132,22 @@ export default {
 			required: false,
 			default: false,
 		},
+
+		// Test-only escape hatch: mounted()'s own auto-load/sync (below)
+		// must always run for every real instance, in production -- that
+		// used to be gated on the app-wide hasFetchedInitialEnvelopes
+		// flag, which is now scoped to prefetchOtherMailboxes() alone
+		// (see mounted()'s own comment for why). A lot of this file's own
+		// tests rely on mounting the component and then driving
+		// loadEnvelopes()/initializeCache() by hand, in full control of
+		// exactly when and how many times each mock resolves -- this
+		// prop lets them opt out of the automatic mount-time call
+		// without resurrecting the app-wide flag's original bug.
+		skipInitialLoad: {
+			type: Boolean,
+			required: false,
+			default: false,
+		},
 	},
 
 	data() {
@@ -273,7 +289,7 @@ export default {
 	},
 
 	async mounted() {
-		if (this.mainStore.hasFetchedInitialEnvelopes) {
+		if (this.skipInitialLoad) {
 			return
 		}
 
@@ -292,19 +308,56 @@ export default {
 		// read timeout hit -- a genuine 504, not a frontend rendering
 		// issue. Deliberately short (not the full interaction-priority
 		// window): this only needs to win the race to be queued first,
-		// not to fully finish first.
+		// not to fully finish first. Applied per instance, not gated on
+		// hasFetchedInitialEnvelopes below: every simultaneously-mounting
+		// section sharing the same open thread (e.g. Priority Inbox's
+		// Favorites/Follow-up/Important/Other) should equally defer to
+		// it, and they run concurrently anyway, so this costs one ~300ms
+		// wait overall, not one per section.
 		if (this.$route.params.threadId) {
 			this.mainStore.setInteractionPriorityMutation()
 			await wait(300)
 		}
 
+		// loadEnvelopes()/sync() must run for THIS instance every single
+		// time it mounts, unconditionally -- they fetch/refresh THIS
+		// instance's own mailbox+query, which no other instance's mount
+		// ever does on its behalf. This used to be skipped outright
+		// whenever hasFetchedInitialEnvelopes was already true, on the
+		// mistaken assumption that "some Mailbox already did its initial
+		// load this session" meant THIS one's data was covered too.
+		// Priority Inbox alone mounts up to 4 sibling Mailbox instances
+		// at once (Favorites/Follow-up/Important/Other, each its own
+		// mailbox+query combination), and any account with "sort
+		// favorites separately" enabled mounts 2 in the plain mailbox
+		// view the same way -- confirmed live (and by a regression test
+		// mounting two simultaneous instances) that whichever section's
+		// chain happened to settle first flipped this flag before a
+		// slower sibling's own mounted() got there, permanently skipping
+		// that sibling's OWN initial fetch for the rest of the page's
+		// life: an entire Priority Inbox section (confirmed to be
+		// "Other") silently never loaded after a hard refresh, with
+		// nothing in the console to explain it -- exactly the
+		// intermittent, reload-triggered "whole section just isn't
+		// there" symptom this was reported as.
 		await this.loadEnvelopes()
 		logger.debug(`syncing folder ${this.mailbox.databaseId} (${this.searchQuery}) after mount`)
 		await this.sync(false)
 
-		await this.prefetchOtherMailboxes()
-
-		this.mainStore.setHasFetchedInitialEnvelopesMutation(true)
+		// prefetchOtherMailboxes(), unlike the two calls above, speculatively
+		// warms the cache for every OTHER subscribed mailbox in this same
+		// account -- every simultaneously-mounted sibling instance would
+		// enumerate and prefetch the exact same set, so this part alone is
+		// genuinely meant to run once per account per session, not once per
+		// instance. Claiming the flag synchronously, before the first
+		// `await` inside the guard, is what actually makes this race-free:
+		// nothing yields between the check and the set, so whichever
+		// instance's mounted() reaches this line first (in program order,
+		// not wall-clock time) is the only one that ever sees it as false.
+		if (!this.mainStore.hasFetchedInitialEnvelopes) {
+			this.mainStore.setHasFetchedInitialEnvelopesMutation(true)
+			await this.prefetchOtherMailboxes()
+		}
 	},
 
 	destroyed() {
