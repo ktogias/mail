@@ -2599,6 +2599,25 @@ export default function mainStoreActions() {
 					this.removeMessageMutation({ id })
 					logger.debug('message removed')
 				} catch (err) {
+					// MessagesController::destroy() returns 403 (not the
+					// more usual 404) specifically and only when the
+					// message row is already gone by the time the
+					// (deferred, up to ~10s after the click, per the undo
+					// window) delete call reaches the server -- confirmed
+					// against the controller's own DoesNotExistException
+					// catch, the only source of a 403 on this route. A
+					// message that's already deleted is exactly the
+					// outcome the user asked for: treat it as a success,
+					// not an error -- resurrecting it via
+					// addEnvelopesMutation() below and showing "Could not
+					// delete message" would be actively wrong (it WAS
+					// deleted), confirmed live as the confusing result of
+					// a duplicate delete request racing an earlier one
+					// for the same message.
+					if (err.response?.status === 403) {
+						logger.debug('message was already deleted', { id })
+						return
+					}
 					logger.error('could not delete message', { error: err })
 					const envelope = this.getEnvelope(id)
 					if (envelope) {
@@ -2851,6 +2870,17 @@ export default function mainStoreActions() {
 					await ThreadService.deleteThread(envelope.databaseId)
 					logger.debug('thread removed')
 				} catch (e) {
+					// Same reasoning as deleteMessage()'s own 403 guard
+					// above: ThreadController::delete() returns 403 only
+					// and exactly when the message is already gone by the
+					// time this (undo-window-deferred) call reaches the
+					// server -- a duplicate/stale delete racing an
+					// earlier one that already succeeded, not a real
+					// failure. Confirmed live.
+					if (e.response?.status === 403) {
+						logger.debug('thread was already deleted', { id: envelope.databaseId })
+						return
+					}
 					this.addEnvelopesMutation({ envelopes: [envelope] })
 					logger.error('could not delete thread', { error: e })
 					throw e

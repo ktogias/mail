@@ -3245,6 +3245,37 @@ describe('Vuex store actions', () => {
 			expect(store.isInteractionPriorityActive()).toBe(true)
 		})
 
+		// Reported live: a duplicate/stale delete for a message the undo
+		// window had already deferred once ended up hitting the server a
+		// second time after the first one had already succeeded --
+		// MessagesController::destroy() returns 403 (not 404) exactly and
+		// only when the message row is already gone. That's the outcome
+		// the user actually wanted; treating it as a hard failure
+		// (resurrecting the envelope, showing "Could not delete message")
+		// was actively wrong.
+		it('deleteMessage treats a 403 (already deleted) as success, not an error', async () => {
+			store.addMailboxMutation({ account: account13, mailbox: { databaseId: 11, accountId: 13, name: 'INBOX' } })
+			MessageService.deleteMessage.mockRejectedValue({ response: { status: 403 } })
+			store.addEnvelopesMutation({ envelopes: [{ databaseId: 1, mailboxId: 11, dateInt: 1, flags: {} }] })
+
+			await expect(store.deleteMessage({ id: 1 })).resolves.toBeUndefined()
+
+			// Must not resurrect the envelope the optimistic removal
+			// already (correctly) got rid of.
+			expect(store.getEnvelope(1)).toBeUndefined()
+		})
+
+		it('deleteMessage still surfaces a genuine failure (not 403)', async () => {
+			store.addMailboxMutation({ account: account13, mailbox: { databaseId: 11, accountId: 13, name: 'INBOX' } })
+			MessageService.deleteMessage.mockRejectedValue({ response: { status: 500 } })
+			store.addEnvelopesMutation({ envelopes: [{ databaseId: 1, mailboxId: 11, dateInt: 1, flags: {} }] })
+
+			// Unlike the 403 case above, a genuine failure must still
+			// reject -- so callers' own error handling (the "Could not
+			// delete message" toast) keeps firing for actual failures.
+			await expect(store.deleteMessage({ id: 1 })).rejects.toBeDefined()
+		})
+
 		// The whole Thread family (deleteThread/moveThread/snoozeThread/
 		// unSnoozeThread) was missing this call entirely -- unlike every
 		// singular-message equivalent above, syncWatchedMailboxes()'s
@@ -3261,6 +3292,23 @@ describe('Vuex store actions', () => {
 			store.deleteThread({ envelope: { databaseId: 1 } })
 
 			expect(store.isInteractionPriorityActive()).toBe(true)
+		})
+
+		// Same reasoning as deleteMessage()'s own 403 test above --
+		// ThreadController::delete() returns 403 only and exactly when
+		// the message is already gone.
+		it('deleteThread treats a 403 (already deleted) as success, not an error', async () => {
+			ThreadService.deleteThread.mockRejectedValue({ response: { status: 403 } })
+			const envelope = { databaseId: 1, mailboxId: 11, dateInt: 1, flags: {} }
+
+			await expect(store.deleteThread({ envelope })).resolves.toBeUndefined()
+		})
+
+		it('deleteThread still surfaces a genuine failure (not 403)', async () => {
+			ThreadService.deleteThread.mockRejectedValue({ response: { status: 500 } })
+			const envelope = { databaseId: 1, mailboxId: 11, dateInt: 1, flags: {} }
+
+			await expect(store.deleteThread({ envelope })).rejects.toBeDefined()
 		})
 
 		it('moveThread arms interaction priority immediately, synchronously', () => {
