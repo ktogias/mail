@@ -289,6 +289,61 @@ describe('Mailbox', () => {
 			expect(store.fetchNextEnvelopePage).toHaveBeenCalledTimes(1)
 			expect(view.vm.endReached).toBe(false)
 		})
+
+		// endReached remembers "the PREVIOUS query's list had no more
+		// pages" -- reported live: searching "unread only" inside a
+		// mailbox until scrolling reached the end (correctly setting
+		// endReached), then clearing the search left scroll-triggered
+		// pagination permanently doing nothing for the rest of the
+		// session, even though the unfiltered mailbox had plenty more
+		// older messages to load. A different query/mailbox/sort order is
+		// a different result set that may well have its own further
+		// pages, so switching any of them must clear the stale flag.
+		describe('endReached resets when the query set changes underneath it', () => {
+			beforeEach(() => {
+				store.fetchEnvelopes = vi.fn().mockResolvedValue([])
+				// The mailbox() watcher's loadEnvelopes().then() chain also
+				// calls this.sync(false) -- unmocked, it fires a real axios
+				// request that rejects unhandled in jsdom.
+				store.syncEnvelopes = vi.fn().mockResolvedValue({})
+			})
+
+			it('resets on a search query change', async () => {
+				const view = mountMailbox()
+				view.vm.endReached = true
+
+				await view.setProps({ searchQuery: 'unread:true' })
+
+				expect(view.vm.endReached).toBe(false)
+			})
+
+			it('resets on a mailbox (folder) change', async () => {
+				store.addMailboxMutation({
+					account,
+					mailbox: {
+						name: 'Sent',
+						databaseId: 39,
+						specialUse: ['sent'],
+					},
+				})
+				const view = mountMailbox()
+				view.vm.endReached = true
+
+				await view.setProps({ mailbox: store.mailboxes[39] })
+
+				expect(view.vm.endReached).toBe(false)
+			})
+
+			it('resets on a sort-order change', async () => {
+				const view = mountMailbox()
+				view.vm.endReached = true
+
+				store.savePreferenceMutation({ key: 'sort-order', value: 'oldest' })
+				await view.vm.$nextTick()
+
+				expect(view.vm.endReached).toBe(false)
+			})
+		})
 	})
 
 	describe('records list context when auto-navigating to a neighboring message', () => {

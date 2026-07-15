@@ -2961,6 +2961,41 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	describe('fetchNextEnvelopes: a loaded-but-empty list has nothing more to page past', () => {
+		// Reported live: scrolling a mailbox/priority-inbox section whose
+		// current query has zero matches (e.g. after a search, or one
+		// real mailbox among several fanned-out ones with nothing
+		// matching) logged "mailbox is empty" and rejected with "Local
+		// mailbox has no envelopes, cannot determine cursor" -- on every
+		// affected mailbox, on every scroll tick. That's a perfectly
+		// ordinary "nothing more to load", the same situation
+		// fetchNextFannedOutPage()'s own empty-cursor guard already
+		// handles gracefully one level up; this is the plain-mailbox
+		// (non-priority, non-unified) counterpart of that same fix.
+		it('resolves to [] instead of rejecting when the mailbox has no envelopes for the current query', async () => {
+			const account = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: {
+					id: 'INBOX',
+					name: 'INBOX',
+					databaseId: 21,
+					accountId: 13,
+					specialRole: 'inbox',
+				},
+			})
+
+			// Seed the (mocked-to-'') query bucket as loaded but empty --
+			// a real search/filter with zero matches, not "never fetched".
+			MessageService.fetchEnvelopes.mockResolvedValue([])
+			await store.fetchEnvelopes({ mailboxId: 21, query: 'subject:nothing-matches' })
+
+			await expect(store.fetchNextEnvelopes({ mailboxId: 21, query: 'subject:nothing-matches', quantity: 20 }))
+				.resolves.toEqual([])
+		})
+	})
+
 	describe('syncEnvelopes: virtual-mailbox fan-out is bounded and deduped', () => {
 		// Confirmed live: the isUnified/isPriorityInbox fan-out below used
 		// to be a bare Promise.all with no concurrency limit at all -- a

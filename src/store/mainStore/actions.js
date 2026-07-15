@@ -1500,8 +1500,20 @@ export default function mainStoreActions() {
 				}
 				const lastEnvelopeId = last(list)
 				if (typeof lastEnvelopeId === 'undefined') {
-					logger.error('mailbox is empty', { list })
-					return Promise.reject(new Error('Local mailbox has no envelopes, cannot determine cursor'))
+					// A loaded-but-empty list (as opposed to list === undefined
+					// above, never loaded at all) has no tail to page past --
+					// nothing more to load, by definition, same reasoning as
+					// fetchNextFannedOutPage()'s own empty-cursor guard above.
+					// This is the plain-mailbox counterpart of that same
+					// situation: e.g. a search with zero matches, or (via the
+					// priority-inbox fan-out's recursive per-constituent-
+					// mailbox call) one real mailbox with no messages
+					// matching the current query while others still do.
+					// Rejecting here used to turn a completely ordinary
+					// "nothing more here" into a console error on every
+					// affected mailbox on every scroll tick.
+					logger.debug('mailbox has no envelopes for this query, nothing more to page past', { mailboxId, query })
+					return Promise.resolve([])
 				}
 				const lastEnvelope = this.getEnvelope(lastEnvelopeId)
 				if (typeof lastEnvelope === 'undefined') {

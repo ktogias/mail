@@ -232,6 +232,20 @@ export default {
 
 	watch: {
 		mailbox() {
+			// endReached remembers "the PREVIOUS query's list had no more
+			// pages" -- switching folders, changing the search query, or
+			// changing sort order all mean a different result set is
+			// about to be fetched from scratch, which may well have more
+			// pages of its own. Without resetting it here, loadMore()'s
+			// own guard (this.endReached, below) stays permanently true
+			// from whatever query last exhausted it -- confirmed live:
+			// searching "unread only" inside a mailbox until scrolling
+			// reaches the end (correctly setting endReached), then
+			// clearing the search, left scroll-triggered pagination
+			// silently doing nothing for the rest of the session, even
+			// though the unfiltered mailbox has plenty more older
+			// messages to load.
+			this.endReached = false
 			this.loadEnvelopes()
 				.then(() => {
 					logger.debug(`syncing mailbox ${this.mailbox.databaseId} (${this.query}) after folder change`)
@@ -240,10 +254,12 @@ export default {
 		},
 
 		searchQuery() {
+			this.endReached = false
 			this.loadEnvelopes()
 		},
 
 		sortOrder() {
+			this.endReached = false
 			this.loadEnvelopes()
 		},
 	},
