@@ -5207,6 +5207,126 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	describe('setMailboxUnreadCountMutation: badge protected against a stale sync clobbering an unconfirmed toggle', () => {
+		// Regression: flagEnvelopeMutation() already adjusts mailbox.unread
+		// optimistically the instant a message is marked read/unread, but
+		// setMailboxUnreadCountMutation() (called on every routine
+		// background sync) used to overwrite that with the server's raw
+		// stats.unread unconditionally -- unlike every other field this
+		// file protects with a grace window. A sync response computed
+		// before this client's own still-in-flight toggle actually landed
+		// server-side silently clobbered the badge back to the stale
+		// count. Confirmed live as a visible flicker: the badge briefly
+		// reverting moments after marking a message read, then correcting
+		// itself again on the next sync after that.
+		let account
+		let mailbox
+
+		beforeEach(() => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			account = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: { id: 'INBOX', name: 'INBOX', databaseId: 11, accountId: 13, specialRole: 'inbox' },
+			})
+			mailbox = store.mailboxes[11]
+		})
+
+		it('corrects a stale server count that does not yet reflect an unconfirmed "marked read"', () => {
+			const envelope = { databaseId: 42, mailboxId: 11, flags: { seen: false } }
+			store.addEnvelopesMutation({ query: '', envelopes: [envelope] })
+			// Optimistically marks read -- flagEnvelopeMutation()'s own
+			// 'seen' branch already decremented mailbox.unread once for
+			// this; the server hasn't independently confirmed it yet.
+			store.flagEnvelopeMutation({ envelope, flag: 'seen', value: true })
+
+			// A sync computed before the read landed server-side still
+			// reports the old, higher count.
+			store.setMailboxUnreadCountMutation({ id: 11, unread: 5 })
+
+			expect(mailbox.unread).toBe(4)
+		})
+
+		it('corrects a stale server count that does not yet reflect an unconfirmed "marked unread"', () => {
+			const envelope = { databaseId: 43, mailboxId: 11, flags: { seen: true } }
+			store.addEnvelopesMutation({ query: '', envelopes: [envelope] })
+			store.flagEnvelopeMutation({ envelope, flag: 'seen', value: false })
+
+			store.setMailboxUnreadCountMutation({ id: 11, unread: 5 })
+
+			expect(mailbox.unread).toBe(6)
+		})
+
+		it('applies no correction once the change is independently confirmed by the same sync', () => {
+			const envelope = { databaseId: 44, mailboxId: 11, flags: { seen: false } }
+			store.addEnvelopesMutation({ query: '', envelopes: [envelope] })
+			store.flagEnvelopeMutation({ envelope, flag: 'seen', value: true })
+
+			// The confirming sync response processes changedMessages (via
+			// updateEnvelopeMutation(), which flips confirmed true) before
+			// setMailboxUnreadCountMutation() runs -- the server's own
+			// count already reflects the change by the time it gets here.
+			store.updateEnvelopeMutation({ envelope: { databaseId: 44, mailboxId: 11, flags: { seen: true } } })
+			store.setMailboxUnreadCountMutation({ id: 11, unread: 4 })
+
+			expect(mailbox.unread).toBe(4)
+		})
+
+		it('applies no correction for an envelope belonging to a different mailbox', () => {
+			store.addMailboxMutation({
+				account,
+				mailbox: { id: 'Archive', name: 'Archive', databaseId: 12, accountId: 13, specialRole: 'archive' },
+			})
+			const envelope = { databaseId: 45, mailboxId: 12, flags: { seen: false } }
+			store.addEnvelopesMutation({ query: '', envelopes: [envelope] })
+			store.flagEnvelopeMutation({ envelope, flag: 'seen', value: true })
+
+			store.setMailboxUnreadCountMutation({ id: 11, unread: 5 })
+
+			expect(mailbox.unread).toBe(5)
+		})
+
+		it('applies no correction once the grace window has expired', () => {
+			vi.useFakeTimers()
+			try {
+				const envelope = { databaseId: 46, mailboxId: 11, flags: { seen: false } }
+				store.addEnvelopesMutation({ query: '', envelopes: [envelope] })
+				store.flagEnvelopeMutation({ envelope, flag: 'seen', value: true })
+
+				vi.advanceTimersByTime(121 * 1000)
+				store.setMailboxUnreadCountMutation({ id: 11, unread: 5 })
+
+				expect(mailbox.unread).toBe(5)
+			} finally {
+				vi.useRealTimers()
+			}
+		})
+
+		it('never lets the corrected count go negative', () => {
+			// Marked read but unconfirmed -> correction is -1; a server
+			// count that has already dropped to 0 by some other means
+			// must not be pushed below zero by this correction.
+			const envelope = { databaseId: 47, mailboxId: 11, flags: { seen: false } }
+			store.addEnvelopesMutation({ query: '', envelopes: [envelope] })
+			store.flagEnvelopeMutation({ envelope, flag: 'seen', value: true })
+
+			store.setMailboxUnreadCountMutation({ id: 11, unread: 0 })
+
+			expect(mailbox.unread).toBe(0)
+		})
+
+		it('still resets to 0 for an explicit clear (unread omitted), bypassing correction', () => {
+			const envelope = { databaseId: 48, mailboxId: 11, flags: { seen: false } }
+			store.addEnvelopesMutation({ query: '', envelopes: [envelope] })
+			store.flagEnvelopeMutation({ envelope, flag: 'seen', value: true })
+
+			store.setMailboxUnreadCountMutation({ id: 11 })
+
+			expect(mailbox.unread).toBe(0)
+		})
+	})
+
 	describe('startComposerSession reply-to resolution', () => {
 		const account = {
 			id: 1,

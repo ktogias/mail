@@ -544,6 +544,56 @@ function recordRecentLocalChange(envelopeId, fieldKey, value) {
 }
 
 /**
+ * setMailboxUnreadCountMutation() otherwise overwrites mailbox.unread
+ * unconditionally with whatever a routine sync's stats reported -- unlike
+ * every other field this file protects, that mailbox-level aggregate had
+ * no grace-window defence at all against a sync response computed before
+ * this client's own still-in-flight 'seen' toggle actually landed
+ * server-side. flagEnvelopeMutation() already adjusts mailbox.unread
+ * optimistically the instant a message is marked read/unread (see its own
+ * 'seen' branch), but the very next background poll could silently
+ * clobber that back to the stale count for as long as the toggle's own
+ * request -- or a sync already in flight when it fired -- took to settle.
+ * Confirmed live: the sidebar badge briefly reverting to a stale count
+ * moments after marking a message read, then correcting itself again on
+ * the sync after that.
+ *
+ * Reuses recentLocalChanges rather than a new parallel structure: any
+ * envelope in this mailbox with an unconfirmed 'seen' entry is exactly
+ * one whose local, optimistic value hasn't yet been independently
+ * observed to match the server's own state (withRecentFlagOverrides()
+ * flips confirmed true the moment a sync merge agrees) -- precisely the
+ * set of messages a fresh stats.unread count might not yet reflect.
+ * Correcting by the opposite of each such envelope's optimistic value
+ * (marked read but unconfirmed -> the server likely still counts it as
+ * unread, so subtract one; marked unread but unconfirmed -> add one)
+ * keeps the badge consistent with what the user actually did until the
+ * change is independently confirmed (this stops applying on its own,
+ * same tick updateEnvelopeMutation() processes the confirming sync) or
+ * its own grace window expires.
+ *
+ * @param {string|number} mailboxId
+ * @param {object} envelopes
+ * @return {number}
+ */
+function pendingUnreadCorrectionForMailbox(mailboxId, envelopes) {
+	const now = Date.now()
+	let correction = 0
+	for (const [envelopeId, perEnvelope] of recentLocalChanges) {
+		const change = perEnvelope.get('seen')
+		if (!change || change.confirmed || change.expiresAt <= now) {
+			continue
+		}
+		const envelope = envelopes[envelopeId]
+		if (!envelope || envelope.mailboxId !== mailboxId) {
+			continue
+		}
+		correction += change.value ? -1 : 1
+	}
+	return correction
+}
+
+/**
  * Whether this envelope was deliberately, fully removed from this exact
  * mailbox (delete/archive-move/junk-move -- see removeEnvelopeMutation()'s
  * own 'removedFromMailbox' bookkeeping) within the last grace window --
@@ -4677,7 +4727,14 @@ export default function mainStoreActions() {
 			id,
 			unread,
 		}) {
-			Vue.set(this.mailboxes[id], 'unread', unread ?? 0)
+			// undefined means an explicit reset (clearMailbox()), not a
+			// fresh server-reported count -- nothing to correct against.
+			if (unread === undefined) {
+				Vue.set(this.mailboxes[id], 'unread', 0)
+				return
+			}
+			const corrected = Math.max(unread + pendingUnreadCorrectionForMailbox(id, this.envelopes), 0)
+			Vue.set(this.mailboxes[id], 'unread', corrected)
 		},
 		setScheduledSendingDisabledMutation(value) {
 			this.isScheduledSendingDisabled = value
