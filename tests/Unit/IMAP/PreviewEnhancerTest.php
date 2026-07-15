@@ -26,7 +26,6 @@ use Psr\Log\LoggerInterface;
 
 class PreviewEnhancerTest extends TestCase {
 
-
 	/** @var IMAPClientFactory|MockObject */
 	private $imapClientFactory;
 	/** @var ImapMapper|MockObject */

@@ -74,7 +74,6 @@ class ImapMessageFetcher {
 	) {
 	}
 
-
 	/**
 	 * Configure the fetcher to fetch the body of the message.
 	 *
@@ -170,7 +169,6 @@ class ImapMessageFetcher {
 				if (is_null($fullTextFetch)) {
 					throw new DoesNotExistException("This email ($this->uid) can't be found. Probably it was deleted from the server recently. Please reload.");
 				}
-
 
 				$decryptionResult = $this->smimeService->decryptDataFetch($fullTextFetch, $this->userId);
 				$isSigned = $decryptionResult->isSigned();

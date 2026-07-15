@@ -226,7 +226,6 @@ class AccountService {
 		return $this->mapper->getAllAccounts();
 	}
 
-
 	/**
 	 * @param string $currentUserId
 	 * @param int $accountId

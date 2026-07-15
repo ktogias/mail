@@ -27,6 +27,7 @@
 					@shortkey.native="onShortcut">
 					<template v-if="!mailbox.isPriorityInbox">
 						<div
+							v-if="sortFavorites"
 							v-show="hasFavoriteEnvelopes"
 							class="app-content-list-item">
 							<SectionTitle
@@ -49,6 +50,7 @@
 							</NcPopover>
 						</div>
 						<Mailbox
+							v-if="sortFavorites"
 							v-show="hasFavoriteEnvelopes"
 							:load-more-label="t('mail', 'Load more favorites')"
 							:account="account"
@@ -79,6 +81,7 @@
 
 					<template v-else>
 						<div
+							v-if="sortFavorites"
 							v-show="hasFavoriteEnvelopes"
 							class="app-content-list-item">
 							<SectionTitle
@@ -101,6 +104,7 @@
 							</NcPopover>
 						</div>
 						<Mailbox
+							v-if="sortFavorites"
 							v-show="hasFavoriteEnvelopes"
 							:load-more-label="t('mail', 'Load more favorites')"
 							:account="unifiedAccount"
@@ -374,7 +378,7 @@ export default {
 		},
 
 		sortFavorites() {
-			return this.mainStore.getPreference('sort-favorites', 'false') === 'true'
+			return this.mainStore.getPreference('sort-favorites', 'false') === 'true' && this.$route.params.filter !== 'starred'
 		},
 
 		hasFavoriteEnvelopes() {
@@ -488,9 +492,14 @@ export default {
 				// the same class of leak documented elsewhere in this file
 				// (see appendToSearch()'s own comment), just triggered by
 				// toggling this preference live instead of by mounting.
+				// Upstream fixed the same bug independently (569dfa45c);
+				// kept its more defensive else-branch below (optional
+				// chaining plus trimming back to undefined) over this
+				// fork's original, which could throw on an unset
+				// searchQuery and left a stray empty string behind.
 				this.searchQuery = this.searchQuery ? (this.searchQuery + ' not:starred') : 'not:starred'
-			} else if (this.searchQuery.includes('not:starred')) {
-				this.searchQuery = this.searchQuery.replace('not:starred', '')
+			} else if (this.searchQuery?.includes('not:starred')) {
+				this.searchQuery = this.searchQuery.replace('not:starred', '').trim() || undefined
 			}
 		},
 
@@ -600,7 +609,10 @@ export default {
 				return this.searchQuery
 			}
 
-			if (this.searchQuery === undefined) {
+			// Upstream's !this.searchQuery (catches '' and null too, not
+			// just undefined) is more defensive than this fork's original
+			// strict-equality check; adopted it on merge.
+			if (!this.searchQuery) {
 				return str
 			}
 

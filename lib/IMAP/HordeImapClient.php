@@ -95,6 +95,12 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 		// point is mail services that require a client id at session
 		// setup) -- mirroring the same guard Horde's own login() uses
 		// for its `id` parameter.
+		//
+		// Upstream landed the same optimization independently (see
+		// 64bf79962, "perf: reduce multiple ID IMAP commands by Horde
+		// client") while this fork already had it; kept this version on
+		// merge since it's functionally identical and predates/documents
+		// the measured rationale in more detail.
 		$wasAuthenticated = $this->_isAuthenticated;
 
 		parent::login();

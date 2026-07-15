@@ -107,7 +107,6 @@ class AttachmentService implements IAttachmentService {
 		string $fileContents,
 		?string $contentId,
 		?string $disposition,
-
 	): LocalAttachment {
 		$attachment = new LocalAttachment();
 		$attachment->setUserId($userId);
@@ -224,7 +223,6 @@ class AttachmentService implements IAttachmentService {
 
 		return $this->mapper->findByLocalMessageId($userId, $message->getId());
 	}
-
 
 	/**
 	 * @param array $attachments
@@ -470,7 +468,6 @@ class AttachmentService implements IAttachmentService {
 			if ($attributes->getAttribute('permissions', 'download') === false) {
 				$this->logger->warning('Could not create attachment, no download permission for file: ' . $fileName);
 				return false;
-
 			}
 		}
 		return true;

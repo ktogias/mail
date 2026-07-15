@@ -19,6 +19,7 @@ import useMainStore from './store/mainStore.js'
 
 export default {
 	name: 'App',
+
 	computed: {
 		...mapStores(useMainStore),
 		...mapState(useMainStore, [
@@ -147,6 +148,7 @@ export default {
 			const attentionTier = () => {
 				if (document.visibilityState === 'hidden') {
 					return 'hidden'
+				}
 				}
 				return (Date.now() - this.lastActivity) > IDLE_AFTER_MS ? 'visibleIdle' : 'visibleActive'
 			}

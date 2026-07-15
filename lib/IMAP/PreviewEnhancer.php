@@ -92,7 +92,6 @@ class PreviewEnhancer {
 			return $messages;
 		}
 
-
 		try {
 			$data = $this->imapMapper->getBodyStructureData(
 				$client,
