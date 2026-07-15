@@ -5,7 +5,7 @@
 
 import { getCalendarHome } from '../../service/caldavService.js'
 import toCalendar from '../../util/calendar.js'
-import { FOLLOW_UP_TAG_LABEL } from '../constants.js'
+import { FOLLOW_UP_TAG_LABEL, IMPORTANT_TAG_LABEL } from '../constants.js'
 
 export default function mainStore() {
 	return {
@@ -23,6 +23,13 @@ export default function mainStore() {
 		},
 		getFollowUpTag: (state) => {
 			return Object.values(state.tags).find((tag) => tag.imapLabel === FOLLOW_UP_TAG_LABEL)
+		},
+		// setEnvelopeImportant() resolves this locally, synchronously, to
+		// make the important tag toggle optimistic (see its own comment)
+		// -- only known once at least one important-tagged message has
+		// been loaded this session.
+		getImportantTag: (state) => {
+			return Object.values(state.tags).find((tag) => tag.imapLabel === IMPORTANT_TAG_LABEL)
 		},
 		getFollowUpReminderEnvelopes: (state) => {
 			return Object.values(state.envelopes)

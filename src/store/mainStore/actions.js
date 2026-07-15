@@ -128,6 +128,7 @@ import { wait } from '../../util/wait.js'
 import {
 	FOLLOW_UP_MAILBOX_ID,
 	FOLLOW_UP_TAG_LABEL,
+	IMPORTANT_TAG_LABEL,
 	PAGE_SIZE,
 	PRIORITY_INBOX_ID,
 	UNIFIED_ACCOUNT_ID,
@@ -374,11 +375,10 @@ export function resetRecentLocalChangesForTests() {
 	recentLocalChanges = new Map()
 }
 
-// The IMAP keyword backing the important TAG (read by Envelope.vue's
-// isImportant() for the badge) -- see setEnvelopeImportant() below for
-// why toggling importance needs to touch this AND flag_important
-// together, not just one of the two.
-const IMPORTANT_TAG_LABEL = '$label1'
+// IMPORTANT_TAG_LABEL (imported above) is the IMAP keyword backing the
+// important TAG (read by Envelope.vue's isImportant() for the badge) --
+// see setEnvelopeImportant() below for why toggling importance needs
+// to touch this AND flag_important together, not just one of the two.
 
 /**
  * A query string containing a literal "undefined" token is never
@@ -2326,26 +2326,36 @@ export default function mainStoreActions() {
 		},
 		/**
 		 * Sets a message's importance to an explicit boolean value,
-		 * updating BOTH flag_important (via setEnvelopeFlags() -- the same
-		 * path toggleEnvelopeFlagged() uses for starring, optimistic
-		 * client-side and protected by the same recentFlagChanges window)
-		 * and the important tag (via addEnvelopeTag()/removeEnvelopeTag(),
-		 * which is what actually drives the important badge -- see
-		 * Envelope.vue's isImportant()) TOGETHER, in the one user action --
-		 * mirroring what NewMessagesClassifier already does server-side
-		 * (flagMessage() + tagMessage() in the same request).
+		 * updating BOTH flag_important (via setEnvelopeFlags()) and the
+		 * important tag (via setEnvelopeTag()/removeEnvelopeTag(), which
+		 * is what actually drives the visible badge -- see Envelope.vue's
+		 * isImportant()) TOGETHER, in the one user action -- mirroring
+		 * what NewMessagesClassifier already does server-side (
+		 * flagMessage() + tagMessage() in the same request).
 		 *
-		 * Before this, toggleEnvelopeImportant()/
-		 * markEnvelopeImportantOrUnimportant() only ever called
-		 * addEnvelopeTag()/removeEnvelopeTag(): the badge updated
-		 * instantly, but flag_important -- and therefore Priority Inbox
-		 * list membership -- didn't catch up until the next routine sync
-		 * read the IMAP keyword back, sometimes tens of seconds later.
-		 * markEnvelopeImportantOrUnimportant()'s tag-endpoint write
-		 * already sets that same IMAP keyword directly, so even if the
-		 * setEnvelopeFlags() call below fails independently, the next
-		 * sync still converges correctly from IMAP -- this only removes
-		 * the unnecessary wait for that to happen.
+		 * Genuinely optimistic end to end, not just for the flag: earlier
+		 * versions of this function set flags.important immediately but
+		 * left the tag (and therefore the badge) to update only once the
+		 * tag network call resolved -- one round trip -- and Priority
+		 * Inbox list membership to update only via the separate,
+		 * fire-and-forget refreshFlagPredicateBucketsForEnvelope() resync
+		 * below, a *second* round trip. Click -> round trip -> badge ->
+		 * round trip -> list membership, a visible, reported lag between
+		 * three things that should all happen in the same instant.
+		 *
+		 * Fixed by resolving the important tag's id locally (getImportantTag,
+		 * only possible once at least one important-tagged message has been
+		 * loaded this session -- a genuinely cold session with no local
+		 * knowledge of the tag yet falls back to the network-first
+		 * behavior below, same as before) and applying both the tag
+		 * mutation and reclassifyFlagBucketsMutation() -- the local,
+		 * no-network bucket classifier addEnvelopesMutation()/
+		 * updateEnvelopeMutation() already use -- synchronously, before
+		 * any network call. refreshFlagPredicateBucketsForEnvelope() stays
+		 * as a backstop for whatever the local classifier's own
+		 * deliberately-conservative ratchet couldn't decide (see
+		 * threadStillMatchesFlagPredicate()), not the primary mechanism
+		 * anymore.
 		 *
 		 * Shared by both existing entry points for this action so neither
 		 * can regress to touching only one of the two independently again.
@@ -2361,32 +2371,78 @@ export default function mainStoreActions() {
 				return
 			}
 
-			const oldState = envelope.flags.important
+			const oldFlagState = envelope.flags.important
 			this.flagEnvelopeMutation({
 				envelope,
 				flag: 'important',
 				value: important,
 			})
 
+			const importantTag = this.getImportantTag
+			const applyTagMutation = (targetImportant) => {
+				if (targetImportant) {
+					this.addEnvelopeTagMutation({ envelope, tagId: importantTag.id })
+				} else {
+					this.removeEnvelopeTagMutation({ envelope, tagId: importantTag.id })
+				}
+			}
+			const reclassify = () => {
+				const mailbox = this.mailboxes[envelope.mailboxId]
+				if (mailbox) {
+					this.reclassifyFlagBucketsMutation({ envelope, sourceMailbox: mailbox })
+				}
+			}
+
+			const optimisticTagMutationApplied = !!importantTag
+			if (optimisticTagMutationApplied) {
+				applyTagMutation(important)
+				reclassify()
+			}
+
 			try {
-				await Promise.all([
+				const [, tag] = await Promise.all([
 					setEnvelopeFlags(envelope.databaseId, {
 						[IMPORTANT_TAG_LABEL]: important,
 					}),
 					important
-						? this.addEnvelopeTag({ envelope, imapLabel: IMPORTANT_TAG_LABEL })
-						: this.removeEnvelopeTag({ envelope, imapLabel: IMPORTANT_TAG_LABEL }),
+						? setEnvelopeTag(envelope.databaseId, IMPORTANT_TAG_LABEL)
+						: removeEnvelopeTag(envelope.databaseId, IMPORTANT_TAG_LABEL),
 				])
-				// Fire-and-forget, same reasoning as toggleEnvelopeFlagged()'s
-				// own call -- see refreshFlagPredicateBucketsForEnvelope().
+				if (!this.getTag(tag.id)) {
+					this.addTagMutation({ tag })
+				}
+				if (!optimisticTagMutationApplied) {
+					// Cold-start fallback: the tag wasn't known locally
+					// yet when this call started, so apply it now that
+					// the server confirmed its id.
+					if (important) {
+						this.addEnvelopeTagMutation({ envelope, tagId: tag.id })
+					} else {
+						this.removeEnvelopeTagMutation({ envelope, tagId: tag.id })
+					}
+					const mailbox = this.mailboxes[envelope.mailboxId]
+					if (mailbox) {
+						this.reclassifyFlagBucketsMutation({ envelope, sourceMailbox: mailbox })
+					}
+				}
 				this.refreshFlagPredicateBucketsForEnvelope(envelope)
 			} catch (error) {
 				logger.error('Could not toggle message importance', { error })
 				this.flagEnvelopeMutation({
 					envelope,
 					flag: 'important',
-					value: oldState,
+					value: oldFlagState,
 				})
+				if (optimisticTagMutationApplied) {
+					// Undo via the same mutation, not a raw snapshot
+					// restore -- re-records a fresh recentLocalChanges
+					// 'tags' entry holding the correct (reverted) value,
+					// same as flagEnvelopeMutation()'s own revert above,
+					// so a legitimate later sync isn't fought by a stale
+					// entry still holding the attempted-but-failed value.
+					applyTagMutation(!important)
+					reclassify()
+				}
 				throw error
 			}
 		},

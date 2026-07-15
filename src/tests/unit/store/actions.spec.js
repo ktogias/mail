@@ -1254,7 +1254,17 @@ describe('Vuex store actions', () => {
 			MessageService.setEnvelopeFlags.mockResolvedValue({})
 			MessageService.setEnvelopeTag.mockResolvedValue({ id: 909, imapLabel: '$label1' })
 			store.mailboxes[11].envelopeLists['is:pi-important'] = []
-			const envelope = { databaseId: 1, mailboxId: 11, flags: { important: false }, tags: [] }
+			// Registered via addEnvelopesMutation, not a bare object literal --
+			// a real envelope is always known to the store by the time a user
+			// can toggle its importance; a not-actually-registered one would
+			// make the now-synchronous reclassifyFlagBucketsMutation() add an
+			// id to envelopeLists that this.envelopes itself doesn't know
+			// about, an unrealistic state no production code path can reach.
+			store.addEnvelopesMutation({
+				envelopes: [{ databaseId: 1, mailboxId: 11, dateInt: 1, flags: { important: false }, tags: [] }],
+				addToUnifiedMailboxes: false,
+			})
+			const envelope = store.envelopes[1]
 
 			await store.setEnvelopeImportant(envelope, true)
 
@@ -3365,6 +3375,55 @@ describe('Vuex store actions', () => {
 			await expect(store.toggleEnvelopeImportant(envelope)).rejects.toThrow('network error')
 
 			expect(envelope.flags.important).toBe(false)
+		})
+
+		// Phase 3 of the unified optimistic-update plan (see
+		// /home/ktogias/.claude/plans/generic-hugging-fern.md): once the
+		// important tag's id is already known locally (as it is here --
+		// store.tags[importantTag.id] is seeded up front, same as the
+		// "already-important" test above), the badge (tags) and Priority
+		// Inbox list membership (reclassifyFlagBucketsMutation) must both
+		// update in the same synchronous tick as the click, not wait on
+		// either network call to resolve -- the exact "click -> round
+		// trip -> badge -> round trip -> list membership" lag reported
+		// live.
+		it('updates the tag and reclassifies list membership synchronously, before any network call resolves', async () => {
+			store.tags[importantTag.id] = importantTag
+			const account13 = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: { name: 'INBOX', databaseId: 11, accountId: 13, specialRole: 'inbox' },
+			})
+			const envelope = seedEnvelope(false, [])
+			envelope.mailboxId = 11
+			store.mailboxes[11].envelopeLists['is:pi-important'] = []
+
+			const reclassifySpy = vi.spyOn(store, 'reclassifyFlagBucketsMutation')
+			// Never-resolving promises: if the tag/list update depended on
+			// either settling, this assertion would run before either
+			// mutation had a chance to happen.
+			MessageService.setEnvelopeFlags.mockReturnValue(new Promise(() => {}))
+			MessageService.setEnvelopeTag.mockReturnValue(new Promise(() => {}))
+
+			store.toggleEnvelopeImportant(envelope)
+			await Promise.resolve() // let the synchronous portion run before the still-pending awaits
+
+			expect(envelope.tags).toContain(importantTag.id)
+			expect(reclassifySpy).toHaveBeenCalled()
+			expect(store.mailboxes[11].envelopeLists['is:pi-important']).toContain(42)
+		})
+
+		it('reverts both the flag and the tag together if the network calls fail, once the tag was applied optimistically', async () => {
+			store.tags[importantTag.id] = importantTag
+			const envelope = seedEnvelope(false, [])
+			MessageService.setEnvelopeFlags.mockRejectedValue(new Error('network error'))
+			MessageService.setEnvelopeTag.mockRejectedValue(new Error('network error'))
+
+			await expect(store.toggleEnvelopeImportant(envelope)).rejects.toThrow('network error')
+
+			expect(envelope.flags.important).toBe(false)
+			expect(envelope.tags).not.toContain(importantTag.id)
 		})
 	})
 
