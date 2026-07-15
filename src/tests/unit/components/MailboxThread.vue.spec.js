@@ -219,7 +219,7 @@ describe('MailboxThread', () => {
 			expect(wrapper.vm.searchQuery).toBe('not:starred')
 		})
 
-		it('removes not:starred again when the preference is turned back off', async () => {
+		it('removes not:starred again when the preference is turned back off, normalizing back to undefined rather than an empty string', async () => {
 			store.savePreferenceMutation({ key: 'sort-favorites', value: 'true' })
 			const wrapper = mountThread()
 			expect(wrapper.vm.searchQuery).toBe('not:starred')
@@ -227,7 +227,7 @@ describe('MailboxThread', () => {
 			store.savePreferenceMutation({ key: 'sort-favorites', value: 'false' })
 			await wrapper.vm.$nextTick()
 
-			expect(wrapper.vm.searchQuery).toBe('')
+			expect(wrapper.vm.searchQuery).toBeUndefined()
 		})
 	})
 })

@@ -58,6 +58,14 @@ export default {
 		this.mainStore.hasCurrentUserPrincipalAndCollectionsMutation(true)
 	},
 
+	beforeDestroy() {
+		clearTimeout(this.watchedMailboxSyncTimeout)
+		window.removeEventListener('mousemove', this.onUserActivity)
+		window.removeEventListener('keydown', this.onUserActivity)
+		window.removeEventListener('touchstart', this.onUserActivity)
+		document.removeEventListener('visibilitychange', this.onVisibilityChange)
+	},
+
 	methods: {
 		reload() {
 			window.location.reload()
@@ -149,29 +157,28 @@ export default {
 				if (document.visibilityState === 'hidden') {
 					return 'hidden'
 				}
-				}
 				return (Date.now() - this.lastActivity) > IDLE_AFTER_MS ? 'visibleIdle' : 'visibleActive'
 			}
 
 			const nextTickDelay = () => {
 				const busy = this.mainStore.serverBusy
 				switch (attentionTier()) {
-				case 'hidden': {
-					const decay = Math.min(1.5 ** this.mainStore.unengagedNotificationBursts, 4)
-					return busy
-						? jitter(180_000, 120_000) * decay
-						: jitter(60_000, 60_000) * decay
-				}
-				case 'visibleIdle':
-					return busy
-						? jitter(90_000, 60_000)
-						: jitter(60_000, 30_000)
-				default: // visibleActive -- deliberately unchanged from the
+					case 'hidden': {
+						const decay = Math.min(1.5 ** this.mainStore.unengagedNotificationBursts, 4)
+						return busy
+							? jitter(180_000, 120_000) * decay
+							: jitter(60_000, 60_000) * decay
+					}
+					case 'visibleIdle':
+						return busy
+							? jitter(90_000, 60_000)
+							: jitter(60_000, 30_000)
+					default: // visibleActive -- deliberately unchanged from the
 					// pre-tiering cadence, so this change's measured effect
 					// is attributable to the hidden/idle tiers alone.
-					return busy
-						? jitter(40_000, 20_000)
-						: jitter(20_000, 10_000)
+						return busy
+							? jitter(40_000, 20_000)
+							: jitter(20_000, 10_000)
 				}
 			}
 
@@ -235,14 +242,6 @@ export default {
 			clearTimeout(this.watchedMailboxSyncTimeout)
 			this.watchedMailboxSyncTimeout = setTimeout(tick, 0)
 		},
-	},
-
-	beforeDestroy() {
-		clearTimeout(this.watchedMailboxSyncTimeout)
-		window.removeEventListener('mousemove', this.onUserActivity)
-		window.removeEventListener('keydown', this.onUserActivity)
-		window.removeEventListener('touchstart', this.onUserActivity)
-		document.removeEventListener('visibilitychange', this.onVisibilityChange)
 	},
 }
 </script>
