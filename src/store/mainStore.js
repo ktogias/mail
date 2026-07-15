@@ -29,6 +29,19 @@ export default defineStore('main', {
 			// returned yet (e.g. the priority-inbox sections during a
 			// search, which are otherwise hidden entirely).
 			envelopeFetchCounts: {},
+			// Ids currently hidden behind an undo toast (delete/
+			// archive/junk/move/snooze), shared across every
+			// simultaneously-rendered list/pane -- not per-component
+			// state. Confirmed live: a message deleted from one
+			// Priority Inbox section (say, Important) stayed fully
+			// visible in every OTHER section rendering the same
+			// message (Favorites, the open Thread reading pane, ...)
+			// for the whole ~10s undo window, since each one used to
+			// track its own separate copy of "what's pending" via
+			// UndoableActionMixin's component-local data(). See
+			// beginPendingRemoval()/endPendingRemoval()/
+			// isPendingRemoval().
+			pendingRemovals: {},
 			// The mailbox id of the currently open view ('priority',
 			// 'unified' or a real database id as a route-param string),
 			// mirrored from the router by MailboxThread -- the store

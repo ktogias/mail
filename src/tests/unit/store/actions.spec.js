@@ -3411,6 +3411,34 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	// Moved out of UndoableActionMixin.js's own component-local data()
+	// specifically so it's shared state, not per-component-instance --
+	// see pendingRemovals' own comment in mainStore.js for the live bug
+	// this fixes (a message deleted from one simultaneously-rendered
+	// Priority Inbox section stayed visible in every other one for the
+	// whole undo window).
+	describe('pendingRemovals: shared undo-hide bookkeeping', () => {
+		it('isPendingRemoval is false until begin, true after, false again after end', () => {
+			expect(store.isPendingRemoval(1)).toBe(false)
+
+			store.beginPendingRemoval([1])
+			expect(store.isPendingRemoval(1)).toBe(true)
+
+			store.endPendingRemoval([1])
+			expect(store.isPendingRemoval(1)).toBe(false)
+		})
+
+		it('tracks multiple ids independently', () => {
+			store.beginPendingRemoval([1, 2])
+			expect(store.isPendingRemoval(1)).toBe(true)
+			expect(store.isPendingRemoval(2)).toBe(true)
+
+			store.endPendingRemoval([1])
+			expect(store.isPendingRemoval(1)).toBe(false)
+			expect(store.isPendingRemoval(2)).toBe(true)
+		})
+	})
+
 	describe('fetchMessage: concurrent calls for the same id are deduped', () => {
 		// Thread.vue prefetches the clicked message's body in parallel
 		// with the thread listing; ThreadEnvelope.vue's own fetchMessage()

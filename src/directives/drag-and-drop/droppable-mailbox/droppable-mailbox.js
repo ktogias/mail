@@ -155,9 +155,17 @@ export class DroppableMailbox {
 		// real move only if it wasn't clicked, same as every other
 		// delete/archive/junk/move action in this app now gets. Unlike
 		// those, there's no list this directive owns to hide the row
-		// from immediately -- the existing draggable-envelope="pending"
-		// attribute (already set above) is this path's own "something
-		// is happening" signal for the duration of the undo window.
+		// from immediately via a v-if/v-show -- the existing
+		// draggable-envelope="pending" attribute (already set above) is
+		// this path's own local "something is happening" signal. But the
+		// dragged message can still be visible in OTHER, simultaneously-
+		// rendered lists/panes (Priority Inbox's other sections, an open
+		// Thread.vue reading pane) for the whole undo window unless they
+		// too know to hide it -- registering the same shared
+		// pendingRemovals bookkeeping every other undo-window action
+		// uses (see UndoableActionMixin.js) makes that consistent here
+		// too, not just for click-triggered moves.
+		this.mainStore.beginPendingRemoval([envelope.databaseId])
 		try {
 			await deferWithUndo({
 				message: t('mail', 'Message moved'),
@@ -174,11 +182,13 @@ export class DroppableMailbox {
 						})
 					}
 				},
+				onUndo: () => this.mainStore.endPendingRemoval([envelope.databaseId]),
 			})
 		} catch (error) {
 			logger.error('could not move messages', error)
 		} finally {
 			item.removeAttribute('draggable-envelope')
+			this.mainStore.endPendingRemoval([envelope.databaseId])
 		}
 	}
 }

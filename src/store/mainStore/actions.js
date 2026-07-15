@@ -4222,6 +4222,22 @@ export default function mainStoreActions() {
 		isInteractionPriorityActive() {
 			return Date.now() < this.interactionPriorityUntil
 		},
+		// Shared, store-level undo-hide bookkeeping -- see
+		// pendingRemovals' own comment in mainStore.js for why this
+		// replaced UndoableActionMixin.js's old component-local
+		// data(). Every simultaneously-rendered list/pane consults
+		// the same ids here, so hiding one in response to a delete/
+		// archive/junk/move/snooze click hides it everywhere at
+		// once, not just in the list the click happened in.
+		beginPendingRemoval(ids) {
+			ids.forEach((id) => Vue.set(this.pendingRemovals, id, true))
+		},
+		endPendingRemoval(ids) {
+			ids.forEach((id) => Vue.delete(this.pendingRemovals, id))
+		},
+		isPendingRemoval(id) {
+			return !!this.pendingRemovals[id]
+		},
 		setFollowUpFeatureAvailableMutation(followUpFeatureAvailable) {
 			this.followUpFeatureAvailable = followUpFeatureAvailable
 		},

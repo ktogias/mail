@@ -4,6 +4,7 @@
  */
 
 import { deferWithUndo } from '../service/UndoableAction.js'
+import useMainStore from '../store/mainStore.js'
 
 /**
  * Delete (and now archive, junk-marking and move too) had no
@@ -24,17 +25,27 @@ import { deferWithUndo } from '../service/UndoableAction.js'
  * ../service/UndoableAction.js's deferWithUndo() -- shared with the
  * drag-and-drop directive, which isn't a Vue component and can't use
  * this mixin at all.
+ *
+ * "Pending" bookkeeping itself lives in the Pinia store
+ * (pendingRemovals/beginPendingRemoval()/endPendingRemoval()/
+ * isPendingRemoval() in mainStore.js/actions.js), not here. It used to
+ * be per-component data() -- confirmed live that this was a real bug,
+ * not just a theoretical one: MailboxThread.vue mounts several
+ * Mailbox.vue instances at once (Priority Inbox's Favorites/Follow
+ * up/Important/Other sections) plus an independent Thread.vue reading
+ * pane, and a message deleted from one of them stayed fully visible in
+ * every OTHER one for the whole undo window, since each instance only
+ * ever knew about its own copy of "what's pending." Delegating to the
+ * store instead means every consumer of isPendingUndo() sees the same
+ * answer, instantly, regardless of which component instance triggered
+ * the action -- this mixin's own method names/signatures are unchanged
+ * so no caller (Mailbox.vue/EnvelopeList.vue/Thread.vue) needed to
+ * change anything.
  */
 export default {
-	data() {
-		return {
-			pendingUndoIds: {},
-		}
-	},
-
 	methods: {
 		isPendingUndo(id) {
-			return !!this.pendingUndoIds[id]
+			return useMainStore().isPendingRemoval(id)
 		},
 
 		/**
@@ -51,7 +62,8 @@ export default {
 		 * before awaiting this, not after.
 		 */
 		async performActionWithUndo({ ids, message, action }) {
-			ids.forEach((id) => this.$set(this.pendingUndoIds, id, true))
+			const store = useMainStore()
+			store.beginPendingRemoval(ids)
 
 			try {
 				await deferWithUndo({
@@ -61,14 +73,14 @@ export default {
 					// once the full window has counted down -- the whole
 					// point of undo is that clicking it should feel
 					// immediate.
-					onUndo: () => ids.forEach((id) => this.$delete(this.pendingUndoIds, id)),
+					onUndo: () => store.endPendingRemoval(ids),
 				})
 			} finally {
 				// Harmless if onUndo above (or the real action's own
 				// optimistic mutation) already removed these ids --
-				// this is just presentation-layer bookkeeping for this
-				// component, not a second source of truth.
-				ids.forEach((id) => this.$delete(this.pendingUndoIds, id))
+				// this is just presentation-layer bookkeeping, not a
+				// second source of truth.
+				store.endPendingRemoval(ids)
 			}
 		},
 	},

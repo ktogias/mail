@@ -186,6 +186,8 @@ describe('DroppableMailbox.processDroppedItem() (deferred behind an undo window,
 			getPreference: vi.fn().mockReturnValue('threaded'),
 			moveThread: vi.fn().mockResolvedValue(),
 			moveMessage: vi.fn().mockResolvedValue(),
+			beginPendingRemoval: vi.fn(),
+			endPendingRemoval: vi.fn(),
 		}
 		envelopeEl = document.createElement('div')
 		envelopeEl.setAttribute('data-envelope-id', '42')
@@ -228,6 +230,39 @@ describe('DroppableMailbox.processDroppedItem() (deferred behind an undo window,
 
 		expect(mainStore.moveThread).not.toHaveBeenCalled()
 		expect(envelopeEl.hasAttribute('draggable-envelope')).toBe(false)
+	})
+
+	// A dragged-and-dropped message could still be visible in OTHER,
+	// simultaneously-rendered lists/panes (Priority Inbox's other
+	// sections, an open Thread.vue reading pane) for the whole undo
+	// window -- the draggable-envelope="pending" attribute only hides
+	// it from this directive's own row. Registering the same shared
+	// pendingRemovals bookkeeping every other undo-window action uses
+	// closes that gap here too.
+	it('registers the dragged envelope in the shared pendingRemovals bookkeeping for the whole undo window', async () => {
+		const instance = makeInstance()
+
+		const done = instance.processDroppedItem({ databaseId: 42 })
+		expect(mainStore.beginPendingRemoval).toHaveBeenCalledWith([42])
+		expect(mainStore.endPendingRemoval).not.toHaveBeenCalled()
+
+		await vi.advanceTimersByTimeAsync(10000)
+		await done
+
+		expect(mainStore.endPendingRemoval).toHaveBeenCalledWith([42])
+	})
+
+	it('clears the shared pendingRemovals bookkeeping immediately when Undo is clicked, not just at settle', async () => {
+		const instance = makeInstance()
+
+		const done = instance.processDroppedItem({ databaseId: 42 })
+		const onUndo = showUndo.mock.calls[0][1]
+		onUndo()
+
+		expect(mainStore.endPendingRemoval).toHaveBeenCalledWith([42])
+
+		await vi.advanceTimersByTimeAsync(10000)
+		await done
 	})
 
 	it('routes through moveMessage instead of moveThread when the layout is not threaded', async () => {

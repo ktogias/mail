@@ -501,6 +501,73 @@ describe('Mailbox', () => {
 		})
 	})
 
+	// Reported live: MailboxThread.vue mounts several Mailbox instances at
+	// once (Priority Inbox's Favorites/Follow up/Important/Other
+	// sections), plus an independent Thread.vue reading pane. Deleting a
+	// message from ONE of them used to leave it fully visible in every
+	// OTHER one for the whole undo window, because UndoableActionMixin
+	// used to track "what's pending" in each component's own data() --
+	// invisible to every other instance. Fixed by moving that bookkeeping
+	// into the shared Pinia store (pendingRemovals/beginPendingRemoval()/
+	// endPendingRemoval()/isPendingRemoval()); this is the regression test
+	// that is structurally impossible to pass against the old,
+	// component-scoped implementation.
+	describe('undo-hiding is shared across every simultaneously-rendered instance, not just the one that triggered it', () => {
+		beforeEach(() => {
+			store.getEnvelopes = vi.fn().mockReturnValue([
+				{ databaseId: 1, mailboxId: 38 },
+			])
+			store.deleteThread = vi.fn().mockResolvedValue()
+			showUndo.mockClear()
+		})
+
+		it('hides a message in a second, independently-mounted Mailbox instance the instant the first one deletes it', async () => {
+			vi.useFakeTimers()
+			try {
+				const viewA = mountMailbox({}, { $route: { params: { threadId: 1 } } })
+				const viewB = mountMailbox({}, { $route: { params: { threadId: 1 } } })
+
+				expect(viewB.vm.visibleEnvelopesToShow).toEqual([{ databaseId: 1, mailboxId: 38 }])
+
+				viewA.vm.handleShortcut({ srcKey: 'del' })
+				await viewA.vm.$nextTick()
+
+				// Still mid-undo-window -- the real deleteThread() call
+				// hasn't fired yet -- but already hidden everywhere.
+				expect(store.deleteThread).not.toHaveBeenCalled()
+				expect(viewA.vm.visibleEnvelopesToShow).toEqual([])
+				expect(viewB.vm.visibleEnvelopesToShow).toEqual([])
+
+				await vi.advanceTimersByTimeAsync(10000)
+			} finally {
+				vi.useRealTimers()
+			}
+		})
+
+		it('restores visibility in every instance if Undo is clicked, not just the one that triggered it', async () => {
+			vi.useFakeTimers()
+			try {
+				const viewA = mountMailbox({}, { $route: { params: { threadId: 1 } } })
+				const viewB = mountMailbox({}, { $route: { params: { threadId: 1 } } })
+
+				viewA.vm.handleShortcut({ srcKey: 'del' })
+				await viewA.vm.$nextTick()
+				expect(viewB.vm.visibleEnvelopesToShow).toEqual([])
+
+				const onUndo = showUndo.mock.calls[0][1]
+				onUndo()
+				await viewA.vm.$nextTick()
+
+				expect(viewA.vm.visibleEnvelopesToShow).toEqual([{ databaseId: 1, mailboxId: 38 }])
+				expect(viewB.vm.visibleEnvelopesToShow).toEqual([{ databaseId: 1, mailboxId: 38 }])
+
+				await vi.advanceTimersByTimeAsync(10000)
+			} finally {
+				vi.useRealTimers()
+			}
+		})
+	})
+
 	it('cleans up its event bus listeners and background-refresh interval on destroy', () => {
 		// Regression: this cleanup lived in an unmounted() hook -- the
 		// Vue-3-style Composition API name, which Vue 2.7 only aliases
