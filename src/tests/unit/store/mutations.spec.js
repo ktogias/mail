@@ -11,6 +11,7 @@ import {
 	UNIFIED_INBOX_ID,
 } from '../../../store/constants.js'
 import useMainStore from '../../../store/mainStore.js'
+import { resetRecentLocalChangesForTests } from '../../../store/mainStore/actions.js'
 
 describe('Pinia store mutations', () => {
 	let store
@@ -18,6 +19,12 @@ describe('Pinia store mutations', () => {
 	beforeEach(() => {
 		setActivePinia(createTestingPinia({ stubActions: false }))
 		store = useMainStore()
+		// recentLocalChanges is module-level state (see its own comment),
+		// so it otherwise persists across unrelated test files reusing
+		// the same envelope/mailbox ids -- confirmed live as a stale
+		// 'removedFromMailbox' entry from a different test file silently
+		// suppressing an unrelated addEnvelopesMutation() call here.
+		resetRecentLocalChangesForTests()
 		store.$patch({
 			accountList: [],
 			accounts: {},

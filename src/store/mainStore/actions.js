@@ -344,8 +344,35 @@ const MAX_CONCURRENT_SPECULATIVE_MESSAGE_FETCHES = 2
 // comfortably clear the worst latency actually observed, same
 // "generous bound above the slowest legitimate case" reasoning as
 // FETCH_MESSAGE_TIMEOUT_MS above.
+//
+// Generalized from a flags-only map (recentFlagChanges) to also cover
+// envelope.tags (setEnvelopeImportant()'s visible badge, previously
+// unprotected -- any OTHER tag was unprotected too) and "this id was
+// just deliberately removed from a mailbox" (removeEnvelopeMutation(),
+// previously unprotected against a stale sync response resurrecting a
+// just-deleted message). One shared per-envelope Map, keyed by a
+// "field key" that's either a real flag name, the literal string
+// 'tags', or 'removedFromMailbox' -- see withRecentFlagOverrides()'s
+// own guard for why mixing these in one Map is safe (it only ever
+// touches keys that are actually present in the flags object it's
+// given, so a 'tags'/'removedFromMailbox' entry for the same envelope
+// is simply invisible to it).
 const RECENT_FLAG_CHANGE_GRACE_MS = 120 * 1000
-const recentFlagChanges = new Map()
+let recentLocalChanges = new Map()
+
+// Test-only: module-level, deliberately (must be shared across every
+// store instance and survive whichever component happened to trigger
+// the original change, not per Pinia-instance state) -- so, like
+// resetSharedNetworkLimiterForTests() above, it otherwise persists
+// across unrelated tests in the same worker process. Confirmed live in
+// this test suite: an envelope id/mailbox id pair reused across two
+// completely unrelated test files (mutations.spec.js and
+// actions.spec.js) made a stale 'removedFromMailbox' entry from one
+// silently suppress a legitimate addEnvelopesMutation() call in the
+// other, with no relation between the two tests at all.
+export function resetRecentLocalChangesForTests() {
+	recentLocalChanges = new Map()
+}
 
 // The IMAP keyword backing the important TAG (read by Envelope.vue's
 // isImportant() for the badge) -- see setEnvelopeImportant() below for
@@ -409,31 +436,128 @@ function stripMalformedUndefinedToken(query) {
  * landed. Anything NOT recently changed locally still comes straight
  * from the server.
  *
+ * recentLocalChanges' per-envelope Map may also hold non-flag entries
+ * ('tags', 'removedFromMailbox') for the same envelope -- skipped here
+ * via the `flag in incomingFlags` check, since neither of those keys
+ * is ever a real property of a flags object. Expiry/cleanup still runs
+ * for every entry regardless of kind, so this is the one place all
+ * three kinds of entry get pruned, not just flags.
+ *
  * @param {string|number} envelopeId
  * @param {object} incomingFlags
  * @return {object}
  */
 function withRecentFlagOverrides(envelopeId, incomingFlags) {
-	const perEnvelope = recentFlagChanges.get(envelopeId)
+	const perEnvelope = recentLocalChanges.get(envelopeId)
 	if (!perEnvelope) {
 		return incomingFlags
 	}
 	const now = Date.now()
 	let overridden
-	for (const [flag, change] of perEnvelope) {
+	for (const [key, change] of perEnvelope) {
 		if (change.expiresAt <= now) {
-			perEnvelope.delete(flag)
+			perEnvelope.delete(key)
 			continue
 		}
-		if (incomingFlags[flag] !== change.value) {
+		if (!(key in incomingFlags)) {
+			// A 'tags'/'removedFromMailbox' entry for this same
+			// envelope, or any other future non-flag field key --
+			// none of this function's business.
+			continue
+		}
+		if (incomingFlags[key] !== change.value) {
 			overridden = overridden || { ...incomingFlags }
-			overridden[flag] = change.value
+			overridden[key] = change.value
 		}
 	}
 	if (perEnvelope.size === 0) {
-		recentFlagChanges.delete(envelopeId)
+		recentLocalChanges.delete(envelopeId)
 	}
 	return overridden || incomingFlags
+}
+
+/**
+ * Same reasoning as withRecentFlagOverrides(), for envelope.tags --
+ * the array driving, among other things, the visible "important" badge
+ * (Envelope.vue's isImportant(), see setEnvelopeImportant() below).
+ * Unlike flags, tags is always treated as one whole-array field, not
+ * many independently-tracked ones, so there's at most one 'tags' entry
+ * per envelope to consider, holding the last locally-set array
+ * snapshot rather than a single scalar.
+ *
+ * @param {string|number} envelopeId
+ * @param {Array<string>} incomingTags
+ * @return {Array<string>}
+ */
+function withRecentTagOverrides(envelopeId, incomingTags) {
+	const perEnvelope = recentLocalChanges.get(envelopeId)
+	if (!perEnvelope) {
+		return incomingTags
+	}
+	const change = perEnvelope.get('tags')
+	if (!change) {
+		return incomingTags
+	}
+	if (change.expiresAt <= Date.now()) {
+		perEnvelope.delete('tags')
+		if (perEnvelope.size === 0) {
+			recentLocalChanges.delete(envelopeId)
+		}
+		return incomingTags
+	}
+	return isEqual(incomingTags, change.value) ? incomingTags : change.value
+}
+
+/**
+ * Records a recentLocalChanges entry for an arbitrary field key --
+ * shared bookkeeping helper used by flagEnvelopeMutation() (flag
+ * names), addEnvelopeTagMutation()/removeEnvelopeTagMutation() ('tags'),
+ * and removeEnvelopeMutation() ('removedFromMailbox').
+ *
+ * @param {string|number} envelopeId
+ * @param {string} fieldKey
+ * @param {*} value
+ */
+function recordRecentLocalChange(envelopeId, fieldKey, value) {
+	let perEnvelope = recentLocalChanges.get(envelopeId)
+	if (!perEnvelope) {
+		perEnvelope = new Map()
+		recentLocalChanges.set(envelopeId, perEnvelope)
+	}
+	perEnvelope.set(fieldKey, { value, expiresAt: Date.now() + RECENT_FLAG_CHANGE_GRACE_MS })
+}
+
+/**
+ * Whether this envelope was deliberately, fully removed from this exact
+ * mailbox (delete/archive-move/junk-move -- see removeEnvelopeMutation()'s
+ * own 'removedFromMailbox' bookkeeping) within the last grace window --
+ * consulted by addEnvelopesMutation() before letting a stale sync
+ * response resurrect it there. Scoped to the specific mailbox the
+ * removal happened in, not global: the same message legitimately
+ * reappearing in a DIFFERENT mailbox (e.g. actually landing in Trash
+ * after a move) must not be suppressed.
+ *
+ * @param {string|number} envelopeId
+ * @param {string|number} mailboxId
+ * @return {boolean}
+ */
+function isRecentlyRemovedFromMailbox(envelopeId, mailboxId) {
+	const perEnvelope = recentLocalChanges.get(envelopeId)
+	if (!perEnvelope) {
+		return false
+	}
+	const change = perEnvelope.get('removedFromMailbox')
+	if (!change) {
+		return false
+	}
+	if (change.expiresAt <= Date.now()) {
+		perEnvelope.delete('removedFromMailbox')
+		if (perEnvelope.size === 0) {
+			recentLocalChanges.delete(envelopeId)
+		}
+		return false
+	}
+	return change.value === mailboxId
 }
 
 /**
@@ -2365,7 +2489,7 @@ export default function mainStoreActions() {
 					logger.error('could not toggle message junk state', { error })
 
 					if (removeEnvelope) {
-						this.addEnvelopesMutation({ envelopes: [envelope] })
+						this.addEnvelopesMutation({ envelopes: [envelope], bypassRemovalSuppression: true })
 					}
 
 					// Revert change
@@ -2621,7 +2745,7 @@ export default function mainStoreActions() {
 					logger.error('could not delete message', { error: err })
 					const envelope = this.getEnvelope(id)
 					if (envelope) {
-						this.addEnvelopesMutation({ envelopes: [envelope] })
+						this.addEnvelopesMutation({ envelopes: [envelope], bypassRemovalSuppression: true })
 					} else {
 						logger.error('could not find envelope', { id })
 					}
@@ -2881,7 +3005,7 @@ export default function mainStoreActions() {
 						logger.debug('thread was already deleted', { id: envelope.databaseId })
 						return
 					}
-					this.addEnvelopesMutation({ envelopes: [envelope] })
+					this.addEnvelopesMutation({ envelopes: [envelope], bypassRemovalSuppression: true })
 					logger.error('could not delete thread', { error: e })
 					throw e
 				}
@@ -2899,7 +3023,7 @@ export default function mainStoreActions() {
 					await ThreadService.moveThread(envelope.databaseId, destMailboxId)
 					logger.debug('thread moved')
 				} catch (e) {
-					this.addEnvelopesMutation({ envelopes: [envelope] })
+					this.addEnvelopesMutation({ envelopes: [envelope], bypassRemovalSuppression: true })
 					logger.error('could not move thread', { error: e })
 					throw e
 				}
@@ -2916,7 +3040,7 @@ export default function mainStoreActions() {
 					await ThreadService.snoozeThread(envelope.databaseId, unixTimestamp, destMailboxId)
 					logger.debug('thread snoozed')
 				} catch (e) {
-					this.addEnvelopesMutation({ envelopes: [envelope] })
+					this.addEnvelopesMutation({ envelopes: [envelope], bypassRemovalSuppression: true })
 					logger.error('could not snooze thread', { error: e })
 					throw e
 				}
@@ -3454,6 +3578,16 @@ export default function mainStoreActions() {
 			// can't say which mailbox's list to clear.
 			replace = false,
 			replaceMailboxId,
+			// The 5 revert-on-failure call sites (deleteMessage(),
+			// toggleEnvelopeJunk(), ...) call this with the exact
+			// envelope removeEnvelopeMutation() just optimistically took
+			// out, to put it back after the real network call failed --
+			// an intentional "that removal didn't actually happen",
+			// which must bypass the stale-sync suppression below, not
+			// trigger it. Every other caller (background sync, a normal
+			// fetch) leaves this false, which is what the suppression is
+			// actually meant to guard against.
+			bypassRemovalSuppression = false,
 		}) {
 			// A list must never break on an id whose envelope is gone from
 			// this.envelopes (left behind by an incomplete removal). Reading
@@ -3483,7 +3617,12 @@ export default function mainStoreActions() {
 				const mailbox = this.mailboxes[replaceMailboxId]
 				envelopes.forEach((envelope) => {
 					this.normalizeTags(envelope)
-					Vue.set(this.envelopes, envelope.databaseId, { ...this.envelopes[envelope.databaseId] || {}, ...envelope, flags: withRecentFlagOverrides(envelope.databaseId, envelope.flags) })
+					Vue.set(this.envelopes, envelope.databaseId, {
+						...this.envelopes[envelope.databaseId] || {},
+						...envelope,
+						flags: withRecentFlagOverrides(envelope.databaseId, envelope.flags),
+						tags: withRecentTagOverrides(envelope.databaseId, envelope.tags),
+					})
 					Vue.set(envelope, 'accountId', mailbox.accountId)
 				})
 				Vue.set(mailbox.envelopeLists, listId, uniq(orderByDateInt(envelopes.map((e) => e.databaseId))))
@@ -3545,10 +3684,32 @@ export default function mainStoreActions() {
 
 			envelopes.forEach((envelope) => {
 				const mailbox = this.mailboxes[envelope.mailboxId]
+
+				// A stale sync response -- generated from server state
+				// captured before this app's own delete/archive/junk
+				// actually propagated -- must not resurrect an envelope
+				// this client just deliberately removed from this exact
+				// mailbox. Skipping the whole envelope here (not just its
+				// list membership) means it's neither re-created in
+				// this.envelopes nor re-added to any of this mailbox's
+				// lists (including the unified fan-out below, nested in
+				// the same iteration). See removeEnvelopeMutation()'s own
+				// 'removedFromMailbox' bookkeeping.
+				if (bypassRemovalSuppression) {
+					// The removal itself is being undone -- clear the
+					// marker outright, not just ignore it this once, so a
+					// later, genuinely stale sync response doesn't keep
+					// suppressing an envelope that's legitimately back.
+					recentLocalChanges.get(envelope.databaseId)?.delete('removedFromMailbox')
+				} else if (isRecentlyRemovedFromMailbox(envelope.databaseId, mailbox.databaseId)) {
+					return
+				}
+
 				this.normalizeTags(envelope)
 				const previouslyKnown = this.envelopes[envelope.databaseId]
 				const nextFlags = withRecentFlagOverrides(envelope.databaseId, envelope.flags)
-				Vue.set(this.envelopes, envelope.databaseId, { ...previouslyKnown || {}, ...envelope, flags: nextFlags })
+				const nextTags = withRecentTagOverrides(envelope.databaseId, envelope.tags)
+				Vue.set(this.envelopes, envelope.databaseId, { ...previouslyKnown || {}, ...envelope, flags: nextFlags, tags: nextTags })
 				Vue.set(envelope, 'accountId', mailbox.accountId)
 				this.appendOrReplaceEnvelopeId(workingListFor(mailbox), envelope)
 				if (addToUnifiedMailboxes) {
@@ -3823,6 +3984,7 @@ export default function mainStoreActions() {
 			this.normalizeTags(envelope)
 
 			const flags = withRecentFlagOverrides(envelope.databaseId, envelope.flags)
+			const tags = withRecentTagOverrides(envelope.databaseId, envelope.tags)
 
 			// Skip no-op updates: the server's sync response reports EVERY
 			// known message as "changed" on EVERY sync (SyncService.php still
@@ -3845,8 +4007,8 @@ export default function mainStoreActions() {
 					this.reclassifyFlagBucketsMutation({ envelope: { ...envelope, flags }, sourceMailbox: mailbox })
 				}
 			}
-			if (!isEqual(existing.tags, envelope.tags)) {
-				Vue.set(existing, 'tags', envelope.tags)
+			if (!isEqual(existing.tags, tags)) {
+				Vue.set(existing, 'tags', tags)
 			}
 		},
 		flagEnvelopeMutation({
@@ -3864,13 +4026,7 @@ export default function mainStoreActions() {
 				}
 			}
 			Vue.set(envelope.flags, flag, value)
-
-			let perEnvelope = recentFlagChanges.get(envelope.databaseId)
-			if (!perEnvelope) {
-				perEnvelope = new Map()
-				recentFlagChanges.set(envelope.databaseId, perEnvelope)
-			}
-			perEnvelope.set(flag, { value, expiresAt: Date.now() + RECENT_FLAG_CHANGE_GRACE_MS })
+			recordRecentLocalChange(envelope.databaseId, flag, value)
 		},
 		/**
 		 * hasUnseenInThread is a thread-WIDE property (see Envelope.vue's
@@ -3920,7 +4076,9 @@ export default function mainStoreActions() {
 			envelope,
 			tagId,
 		}) {
-			Vue.set(envelope, 'tags', uniq([...envelope.tags, tagId]))
+			const nextTags = uniq([...envelope.tags, tagId])
+			Vue.set(envelope, 'tags', nextTags)
+			recordRecentLocalChange(envelope.databaseId, 'tags', nextTags)
 		},
 		updateTagMutation({
 			tag,
@@ -3934,7 +4092,9 @@ export default function mainStoreActions() {
 			envelope,
 			tagId,
 		}) {
-			Vue.set(envelope, 'tags', envelope.tags.filter((id) => id !== tagId))
+			const nextTags = envelope.tags.filter((id) => id !== tagId)
+			Vue.set(envelope, 'tags', nextTags)
+			recordRecentLocalChange(envelope.databaseId, 'tags', nextTags)
 		},
 		removeEnvelopeMutation({ id, query }) {
 			const envelope = this.envelopes[id]
@@ -3987,6 +4147,13 @@ export default function mainStoreActions() {
 					})
 				return
 			}
+
+			// Genuinely leaving the mailbox (delete/archive-move/junk-move,
+			// every caller reaching this branch) -- protect against a
+			// stale, already-in-flight sync response (generated before
+			// this removal itself propagated) resurrecting it back into
+			// this same mailbox. See isRecentlyRemovedFromMailbox().
+			recordRecentLocalChange(id, 'removedFromMailbox', mailbox.databaseId)
 
 			for (const iterListId in mailbox.envelopeLists) {
 				if (!Object.hasOwn(mailbox.envelopeLists, iterListId)) {

@@ -15,7 +15,7 @@ import * as NotificationService from '../../../service/NotificationService.js'
 import * as ThreadService from '../../../service/ThreadService.js'
 import { PAGE_SIZE, UNIFIED_INBOX_ID } from '../../../store/constants.js'
 import useMainStore from '../../../store/mainStore.js'
-import { computeLockRetryDelayMs, mapWithConcurrencyLimit, resetSharedNetworkLimiterForTests } from '../../../store/mainStore/actions.js'
+import { computeLockRetryDelayMs, mapWithConcurrencyLimit, resetRecentLocalChangesForTests, resetSharedNetworkLimiterForTests } from '../../../store/mainStore/actions.js'
 import { normalizedEnvelopeListId } from '../../../util/normalization.js'
 import { wait } from '../../../util/wait.js'
 
@@ -52,6 +52,7 @@ describe('Vuex store actions', () => {
 
 		store = useMainStore()
 		resetSharedNetworkLimiterForTests()
+		resetRecentLocalChangesForTests()
 	})
 
 	afterEach(() => {
@@ -2046,6 +2047,161 @@ describe('Vuex store actions', () => {
 			} finally {
 				vi.useRealTimers()
 			}
+		})
+
+		// recentFlagChanges generalized to recentLocalChanges to also
+		// cover envelope.tags -- previously unprotected against the exact
+		// same class of stale-sync race the flags grace window above
+		// already guards against, and the field that actually drives the
+		// visible "important" badge (see setEnvelopeImportant()).
+		it('a recently-added tag survives a stale sync reporting the pre-change tags', () => {
+			const account13 = { id: 13 }
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+			})
+			store.addEnvelopesMutation({
+				envelopes: [{ databaseId: 905, mailboxId: 11, uid: 1, flags: {}, tags: [] }],
+				addToUnifiedMailboxes: false,
+			})
+
+			store.addEnvelopeTagMutation({ envelope: store.envelopes[905], tagId: 1 })
+			expect(store.envelopes[905].tags).toEqual([1])
+
+			// A stale sync response, generated before the tag PUT landed
+			// server-side, still reporting the old (empty) tags array.
+			store.updateEnvelopeMutation({
+				envelope: { databaseId: 905, mailboxId: 11, flags: {}, tags: [] },
+			})
+
+			expect(store.envelopes[905].tags).toEqual([1])
+		})
+
+		it('stops protecting a tag once the grace window has actually elapsed', () => {
+			vi.useFakeTimers()
+			try {
+				const account13 = { id: 13 }
+				store.addAccountMutation(account13)
+				store.addMailboxMutation({
+					account: account13,
+					mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+				})
+				store.addEnvelopesMutation({
+					envelopes: [{ databaseId: 906, mailboxId: 11, uid: 1, flags: {}, tags: [] }],
+					addToUnifiedMailboxes: false,
+				})
+
+				store.addEnvelopeTagMutation({ envelope: store.envelopes[906], tagId: 1 })
+
+				vi.advanceTimersByTime(130 * 1000)
+
+				store.updateEnvelopeMutation({
+					envelope: { databaseId: 906, mailboxId: 11, flags: {}, tags: [] },
+				})
+
+				// Long past the grace window: a subsequent sync reporting
+				// an empty tags array is a genuine, later server-side
+				// change (e.g. removed from another client) and must win.
+				expect(store.envelopes[906].tags).toEqual([])
+			} finally {
+				vi.useRealTimers()
+			}
+		})
+
+		// removeEnvelopeMutation()'s new 'removedFromMailbox' bookkeeping,
+		// consulted by addEnvelopesMutation()'s merge loop -- closes a gap
+		// found (not previously reported) while building the tags
+		// protection above: nothing stopped a stale sync response from
+		// resurrecting a message this client had just deleted/archived/
+		// junked away, previously guarded only by the much shorter
+		// (4s) INTERACTION_PRIORITY_WINDOW_MS pause of the whole poller.
+		it('a stale sync does not resurrect a message just removed from its mailbox', () => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			const account13 = { id: 13 }
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+			})
+			store.addEnvelopesMutation({
+				envelopes: [{ databaseId: 907, mailboxId: 11, uid: 1, flags: {}, tags: [] }],
+				addToUnifiedMailboxes: false,
+			})
+
+			store.removeEnvelopeMutation({ id: 907 })
+			expect(store.envelopes[907]).toBeUndefined()
+
+			// A stale sync response, generated before the deletion landed
+			// server-side, still reporting the message as present.
+			store.addEnvelopesMutation({
+				envelopes: [{ databaseId: 907, mailboxId: 11, uid: 1, dateInt: 1, flags: {}, tags: [] }],
+				addToUnifiedMailboxes: false,
+			})
+
+			expect(store.envelopes[907]).toBeUndefined()
+			expect(store.mailboxes[11].envelopeLists['']).not.toContain(907)
+		})
+
+		it('does not suppress the same message legitimately reappearing in a DIFFERENT mailbox', () => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			const account13 = { id: 13 }
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+			})
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: { name: 'Trash', databaseId: 12, specialRole: 'trash' },
+			})
+			store.addEnvelopesMutation({
+				envelopes: [{ databaseId: 908, mailboxId: 11, uid: 1, flags: {}, tags: [] }],
+				addToUnifiedMailboxes: false,
+			})
+
+			store.removeEnvelopeMutation({ id: 908 })
+
+			// The same message, now genuinely in a different mailbox
+			// (moved to Trash) -- must not be suppressed, since the
+			// removal marker is scoped to the mailbox it was removed
+			// from (11), not global.
+			store.addEnvelopesMutation({
+				envelopes: [{ databaseId: 908, mailboxId: 12, uid: 5, dateInt: 1, flags: {}, tags: [] }],
+				addToUnifiedMailboxes: false,
+			})
+
+			expect(store.envelopes[908]).toBeDefined()
+			expect(store.mailboxes[12].envelopeLists['']).toContain(908)
+		})
+
+		it('a deliberate revert-on-failure re-add bypasses the removal suppression', () => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			const account13 = { id: 13 }
+			store.addAccountMutation(account13)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+			})
+			const envelope = { databaseId: 909, mailboxId: 11, uid: 1, dateInt: 1, flags: {}, tags: [] }
+			store.addEnvelopesMutation({ envelopes: [envelope], addToUnifiedMailboxes: false })
+
+			// Optimistic removal, then the real network call failed --
+			// the exact pattern deleteMessage()/deleteThread()/
+			// toggleEnvelopeJunk() etc. all use to revert.
+			store.removeEnvelopeMutation({ id: 909 })
+			store.addEnvelopesMutation({ envelopes: [envelope], addToUnifiedMailboxes: false, bypassRemovalSuppression: true })
+
+			expect(store.envelopes[909]).toBeDefined()
+			expect(store.mailboxes[11].envelopeLists['']).toContain(909)
+
+			// The marker itself must be cleared, not just bypassed once --
+			// a LATER, genuinely stale sync must not suppress it either.
+			store.addEnvelopesMutation({
+				envelopes: [{ databaseId: 909, mailboxId: 11, uid: 1, dateInt: 1, flags: {}, tags: [] }],
+				addToUnifiedMailboxes: false,
+			})
+			expect(store.envelopes[909]).toBeDefined()
 		})
 
 		it('notifies a message only once even when several query buckets of the mailbox report it', async () => {
