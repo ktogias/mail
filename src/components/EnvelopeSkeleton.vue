@@ -105,7 +105,13 @@
 					</div>
 				</a>
 
-				<div class="list-item__hoverable">
+				<!-- Keep this expensive named-slot subtree genuinely lazy. The
+				     full menu contains many translated controls, and every t()
+				     sanitizes through DOMPurify. v-show used to instantiate all of
+				     it for every row even when the user never hovered that row. -->
+				<div
+					v-if="forceDisplayActions || displayActionsOnHoverFocus"
+					class="list-item__hoverable">
 					<EnvelopeSingleClickActions
 						:is-read="isRead"
 						:is-important="isImportant"
@@ -115,7 +121,6 @@
 
 					<!-- Actions -->
 					<div
-						v-show="forceDisplayActions || displayActionsOnHoverFocus"
 						class="list-item__actions"
 						@focusout="handleBlur">
 						<NcActions

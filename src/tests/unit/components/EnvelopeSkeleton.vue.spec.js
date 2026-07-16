@@ -50,6 +50,14 @@ describe('EnvelopeSkeleton: the unread indicator must not depend on hover/focus 
 		expect(indicator.classes()).not.toContain('extra--hidden')
 	})
 
+	it('does not instantiate the hidden actions subtree before hover or focus', async () => {
+		const view = mountWithIndicator()
+		await view.vm.$nextTick()
+
+		expect(view.find('.list-item__hoverable').exists()).toBe(false)
+		expect(view.find('.fake-action').exists()).toBe(false)
+	})
+
 	it('still shows the indicator once the hover-actions state is triggered (the mobile tap case)', async () => {
 		const view = mountWithIndicator()
 		await view.vm.$nextTick()
@@ -59,8 +67,24 @@ describe('EnvelopeSkeleton: the unread indicator must not depend on hover/focus 
 		await view.find('.list-item').trigger('mouseover')
 
 		expect(view.vm.displayActionsOnHoverFocus).toBe(true)
+		expect(view.find('.list-item__hoverable').exists()).toBe(true)
+		expect(view.find('.fake-action').exists()).toBe(true)
 		const indicator = view.find('.list-item-content__inner__details__extra__indicator')
 		expect(indicator.exists()).toBe(true)
 		expect(indicator.classes()).not.toContain('extra--hidden')
+	})
+
+	it('keeps lazy actions mounted on mouseleave while their menu is open', async () => {
+		const view = mountWithIndicator()
+		await view.vm.$nextTick()
+		await view.find('.list-item').trigger('mouseover')
+		view.vm.handleActionsUpdateOpen(true)
+
+		await view.find('.list-item').trigger('mouseleave')
+		expect(view.find('.list-item__hoverable').exists()).toBe(true)
+
+		view.vm.handleActionsUpdateOpen(false)
+		await view.vm.$nextTick()
+		expect(view.find('.list-item__hoverable').exists()).toBe(false)
 	})
 })

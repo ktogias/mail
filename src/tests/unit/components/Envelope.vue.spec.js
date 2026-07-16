@@ -885,36 +885,17 @@ describe('Envelope', () => {
 		})
 	})
 
-	describe('viewport prefetch', () => {
-		// Scroll-then-tap: a row sitting visible on screen for a while
-		// (not just a fast flick-scroll past it) prefetches without
-		// needing any pointer/touch interaction at all.
-		beforeEach(() => {
-			vi.useFakeTimers()
-			vi.clearAllMocks()
-			store.fetchMessage = vi.fn().mockResolvedValue({})
-			store.fetchThread = vi.fn().mockResolvedValue([])
-			ViewportPrefetchObserver.runIfViewportPrefetchSlotAvailable.mockImplementation((fn) => fn())
-		})
-
-		afterEach(() => {
-			vi.useRealTimers()
-		})
-
-		function mountEnvelope(flagOverrides = {}) {
+	describe('mailbox-row viewport behavior', () => {
+		function mountMailboxRow() {
 			return shallowMount(Envelope, {
 				mocks: { $route },
 				propsData: {
-					mailbox: {
-						specialRole: '',
-						databaseId: '3',
-						myAcls: undefined,
-					},
+					mailbox: { specialRole: '', databaseId: '3', myAcls: undefined },
 					data: {
 						accountId: 123,
 						databaseId: 999,
 						from: [{ email: 'info@test.com' }],
-						flags: { seen: false, flagged: false, $junk: false, answered: false, hasAttachments: false, draft: false, ...flagOverrides },
+						flags: { seen: false, flagged: false, $junk: false, answered: false, hasAttachments: false, draft: false },
 					},
 				},
 				store,
@@ -922,109 +903,23 @@ describe('Envelope', () => {
 			})
 		}
 
-		it('registers its own element for viewport visibility on mount', () => {
-			const view = mountEnvelope()
-
-			expect(ViewportPrefetchObserver.observeViewportVisibility).toHaveBeenCalledWith(view.vm.$el, expect.any(Function))
-		})
-
-		it('prefetches once continuously visible past the settle delay', async () => {
-			mountEnvelope()
-			const onIntersect = ViewportPrefetchObserver.observeViewportVisibility.mock.calls[0][1]
-
-			onIntersect(true)
-			expect(store.fetchMessage).not.toHaveBeenCalled()
-
-			await vi.advanceTimersByTimeAsync(300)
-
-			expect(store.fetchMessage).toHaveBeenCalledWith(999, { speculative: true })
-			expect(store.fetchThread).toHaveBeenCalledWith(999, { speculative: true })
-		})
-
-		it('keeps its concurrency-gate slot held until both the message and thread fetches settle', async () => {
-			// Regression: the callback used to fire both fetches without
-			// returning them ("fire and forget"), so
-			// runIfViewportPrefetchSlotAvailable's own "await fn()"
-			// resolved on the next microtask regardless of whether the
-			// requests were still in flight -- the 2-concurrent cap never
-			// actually held anything back. Confirmed live: a fast scroll
-			// through Priority Inbox produced far more than 2 concurrent
-			// speculative body fetches. The callback must return a promise
-			// that only settles once the underlying fetches do.
-			let resolveFetchMessage
-			let resolveFetchThread
-			store.fetchMessage = vi.fn().mockReturnValue(new Promise((resolve) => {
-				resolveFetchMessage = resolve
-			}))
-			store.fetchThread = vi.fn().mockReturnValue(new Promise((resolve) => {
-				resolveFetchThread = resolve
-			}))
-
-			let callbackResult
-			ViewportPrefetchObserver.runIfViewportPrefetchSlotAvailable.mockImplementation((fn) => {
-				callbackResult = fn()
-				return callbackResult
-			})
-
-			mountEnvelope()
-			const onIntersect = ViewportPrefetchObserver.observeViewportVisibility.mock.calls[0][1]
-			onIntersect(true)
-			await vi.advanceTimersByTimeAsync(300)
-
-			expect(callbackResult).toBeInstanceOf(Promise)
-
-			let settled = false
-			callbackResult.then(() => {
-				settled = true
-			})
-			await Promise.resolve()
-			expect(settled).toBe(false)
-
-			resolveFetchMessage({})
-			resolveFetchThread([])
-			await callbackResult
-
-			expect(settled).toBe(true)
-		})
-
-		it('does not prefetch if the row leaves the viewport before the settle delay elapses', async () => {
-			mountEnvelope()
-			const onIntersect = ViewportPrefetchObserver.observeViewportVisibility.mock.calls[0][1]
-
-			onIntersect(true)
-			onIntersect(false)
-			await vi.advanceTimersByTimeAsync(500)
-
-			expect(store.fetchMessage).not.toHaveBeenCalled()
-		})
-
-		it('does not observe drafts, which open the composer instead of a thread', () => {
-			mountEnvelope({ draft: true })
+		it('does not start speculative body/thread work merely because a row crossed the viewport', () => {
+			mountMailboxRow()
 
 			expect(ViewportPrefetchObserver.observeViewportVisibility).not.toHaveBeenCalled()
 		})
 
-		it('respects the shared concurrency gate rather than fetching unconditionally', async () => {
-			ViewportPrefetchObserver.runIfViewportPrefetchSlotAvailable.mockImplementation(() => {
-				// Simulate the gate being at capacity -- the real
-				// implementation just skips silently in this case.
-			})
-			mountEnvelope()
-			const onIntersect = ViewportPrefetchObserver.observeViewportVisibility.mock.calls[0][1]
-
-			onIntersect(true)
-			await vi.advanceTimersByTimeAsync(300)
-
-			expect(store.fetchMessage).not.toHaveBeenCalled()
-		})
-
-		it('unobserves its element on destroy', () => {
-			const view = mountEnvelope()
-			const el = view.vm.$el
+		it('removes the exact global resize listener when the row is destroyed', () => {
+			const addSpy = vi.spyOn(window, 'addEventListener')
+			const removeSpy = vi.spyOn(window, 'removeEventListener')
+			const view = mountMailboxRow()
+			const resizeListener = addSpy.mock.calls.find(([event]) => event === 'resize')[1]
 
 			view.destroy()
 
-			expect(ViewportPrefetchObserver.unobserveViewportVisibility).toHaveBeenCalledWith(el)
+			expect(removeSpy).toHaveBeenCalledWith('resize', resizeListener)
+			addSpy.mockRestore()
+			removeSpy.mockRestore()
 		})
 	})
 })

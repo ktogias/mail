@@ -577,7 +577,6 @@ import { DraggableEnvelopeDirective } from '../directives/drag-and-drop/draggabl
 import logger from '../logger.js'
 import AttachmentMixin from '../mixins/AttachmentMixin.js'
 import HoverPrefetchMixin from '../mixins/HoverPrefetchMixin.js'
-import ViewportPrefetchMixin from '../mixins/ViewportPrefetchMixin.js'
 import { buildRecipients as buildReplyRecipients } from '../ReplyBuilder.js'
 import { FOLLOW_UP_TAG_LABEL } from '../store/constants.js'
 import useMainStore from '../store/mainStore.js'
@@ -638,7 +637,7 @@ export default {
 		draggableEnvelope: DraggableEnvelopeDirective,
 	},
 
-	mixins: [AttachmentMixin, HoverPrefetchMixin, ViewportPrefetchMixin],
+	mixins: [AttachmentMixin, HoverPrefetchMixin],
 
 	props: {
 		withReply: {
@@ -1023,34 +1022,13 @@ export default {
 	mounted() {
 		this.onWindowResize()
 		window.addEventListener('resize', this.onWindowResize)
-
-		// Drafts open the composer, not a thread view -- nothing here to
-		// prefetch. Mirrors onEnvelopeMouseEnter()/onEnvelopeTouchStart().
-		if (!this.draft) {
-			// registerViewportPrefetch()'s 2-concurrent cap only holds this
-			// callback's *slot* open for as long as the promise it returns
-			// is pending -- fire-and-forgetting the fetches here (the
-			// previous shape, with no return) let the callback resolve on
-			// the next microtask regardless of whether the requests were
-			// actually still in flight, so the cap never held anything back
-			// in practice. Confirmed live: a fast scroll through Priority
-			// Inbox produced far more than 2 concurrent speculative body
-			// fetches, several genuine cache-misses at 10-40s each,
-			// saturating the 3-worker mailwrite pool ahead of the user's
-			// actual click.
-			this.registerViewportPrefetch(() => {
-				return Promise.all([
-					this.mainStore.fetchMessage(this.data.databaseId, { speculative: true }).catch(() => {}),
-					this.mainStore.fetchThread(this.data.databaseId, { speculative: true }).catch(() => {}),
-				])
-			})
-		}
 	},
 
 	beforeDestroy() {
-		// NOT beforeUnmount(): see nextcloud-mail-vue2-unmount-hook-names
-		// memory / commit 45144e3fd.
-		this.unregisterViewportPrefetch()
+		// Every rendered row owns one global resize listener. Without the
+		// exact matching removal, trimmed/destroyed rows remain reachable
+		// from window and every later resize performs their DOM measurements.
+		window.removeEventListener('resize', this.onWindowResize)
 	},
 
 	methods: {
