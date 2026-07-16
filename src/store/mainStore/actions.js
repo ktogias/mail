@@ -2142,6 +2142,13 @@ export default function mainStoreActions() {
 			const passwordIsUnavailable = this.getPreference('password-is-unavailable', false)
 			const isDisabled = (account) => passwordIsUnavailable && !!account.provisioningId
 
+			// A genuine reactive "a watched-mailbox tick just happened"
+			// signal. Keep this before the interaction-priority early return:
+			// idle tail trimming is cheap local housekeeping and must still get
+			// a chance to run while the user keeps working at the list head,
+			// even though the expensive network sync correctly stands aside.
+			this.updateSyncTimestamp()
+
 			// A direct user action (opening a message, switching folders,
 			// starring/deleting/flagging, ...) is in progress or just
 			// happened -- give it the FPM pool and the main thread instead
@@ -2160,15 +2167,6 @@ export default function mainStoreActions() {
 			reconcileNearExpiryLocalChanges(this).catch((error) => {
 				logger.debug('reconcileNearExpiryLocalChanges failed for this tick', { error })
 			})
-
-			// A genuine reactive "a watched-mailbox tick just happened"
-			// signal, reused (not previously true) as exactly that:
-			// updateSyncTimestamp() was already called, but only from
-			// Mailbox.vue's own per-instance sync(), never from this
-			// app-wide poller -- so nothing could reliably piggyback on
-			// this tick's own cadence before. IdleTailTrimMixin.js
-			// watches this instead of running its own separate interval.
-			this.updateSyncTimestamp()
 
 			return handleHttpAuthErrors(async () => {
 				const mailboxTargets = this.getAccounts
@@ -4736,7 +4734,7 @@ export default function mainStoreActions() {
 			const listId = normalizedEnvelopeListId(query)
 			const list = mailbox?.envelopeLists[listId]
 			if (!list || list.length <= ENVELOPE_LIST_BASELINE_SIZE) {
-				return
+				return { trimmedCount: 0, constituentTrimmedCount: 0 }
 			}
 			// Skip the whole list, not just the tail, if anything in it
 			// is currently selected -- simpler and safer than a precise
@@ -4744,12 +4742,52 @@ export default function mainStoreActions() {
 			// already idle for several minutes. See
 			// listsWithActiveSelection in mainStore.js's state().
 			if (this.listsWithActiveSelection[mailboxId + '::' + listId]) {
-				return
+				return { trimmedCount: 0, constituentTrimmedCount: 0 }
 			}
 
 			const keepIds = list.slice(0, ENVELOPE_LIST_BASELINE_SIZE)
 			const tailIds = list.slice(ENVELOPE_LIST_BASELINE_SIZE)
+			const droppedIds = new Set(tailIds)
 			Vue.set(mailbox.envelopeLists, listId, keepIds)
+
+			// Unified/Priority pagination is backed by real per-account
+			// mailbox buckets. Trimming only the virtual array removes DOM
+			// rows, but those feeder arrays otherwise remain unbounded, keep
+			// all dropped envelope/body caches referenced, and are still sent
+			// wholesale to every routine sync. Keep the virtual head's source
+			// ids in each feeder. If a feeder contributes nothing to the
+			// global head, preserve its first known row as a pagination anchor
+			// so fetchNextEnvelopes() can continue from it normally.
+			let constituentTrimmedCount = 0
+			if (mailbox.isUnified || mailbox.isPriorityInbox) {
+				const keepIdSet = new Set(keepIds)
+				Object.values(this.mailboxes)
+					.filter((candidate) => !candidate.isUnified
+						&& !candidate.isPriorityInbox
+						&& candidate.specialRole === mailbox.specialRole
+						&& candidate.envelopeLists[listId] !== undefined)
+					.forEach((candidate) => {
+						const candidateList = candidate.envelopeLists[listId]
+						if (this.listsWithActiveSelection[candidate.databaseId + '::' + listId]) {
+							return
+						}
+						const candidateKeepIds = candidateList.filter((id) => keepIdSet.has(id))
+						if (candidateKeepIds.length === 0 && candidateList.length > 0) {
+							candidateKeepIds.push(candidateList[0])
+						}
+						if (candidateKeepIds.length < candidateList.length) {
+							const removed = candidateList.length - candidateKeepIds.length
+							const candidateMailboxId = candidate.databaseId
+							const candidateKeepIdSet = new Set(candidateKeepIds)
+							candidateList
+								.filter((id) => !candidateKeepIdSet.has(id))
+								.forEach((id) => droppedIds.add(id))
+							Vue.set(candidate.envelopeLists, listId, candidateKeepIds)
+							constituentTrimmedCount += removed
+							logger.info(`idle-tail trim removed ${removed} feeder envelopes from mailbox ${candidateMailboxId} (${listId})`)
+						}
+					})
+			}
 
 			// The heavier per-envelope caches (this.messages -- full
 			// bodies, this.envelopes -- metadata) are only released once
@@ -4766,13 +4804,19 @@ export default function mainStoreActions() {
 				}
 			}
 
-			tailIds.forEach((id) => {
+			droppedIds.forEach((id) => {
 				if (stillReferenced.has(id) || id === this.currentOpenThreadId) {
 					return
 				}
 				Vue.delete(this.messages, id)
 				Vue.delete(this.envelopes, id)
 			})
+
+			logger.info(`idle-tail trim reduced mailbox ${mailboxId} (${listId}) from ${list.length} to ${keepIds.length} envelopes`, {
+				trimmedCount: tailIds.length,
+				constituentTrimmedCount,
+			})
+			return { trimmedCount: tailIds.length, constituentTrimmedCount }
 		},
 		addMessageMutation({ message }) {
 			Vue.set(this.messages, message.databaseId, message)

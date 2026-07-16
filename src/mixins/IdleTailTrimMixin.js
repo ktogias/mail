@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-import { IDLE_TRIM_MS } from '../store/constants.js'
+import { ENVELOPE_LIST_BASELINE_SIZE, IDLE_TRIM_MS } from '../store/constants.js'
 import useMainStore from '../store/mainStore.js'
 
 // A cheap, approximate stand-in for "is the user currently scrolled near
@@ -43,7 +43,10 @@ const SCROLL_ACTIVITY_WRITE_THROTTLE_MS = 5000
 export default {
 	data() {
 		return {
-			lastScrollActivityAt: Date.now(),
+			// Activity at the tail boundary, not generic activity anywhere in
+			// the shared scroller. The user can keep working and scrolling at
+			// the head without keeping a long-forgotten tail alive forever.
+			lastTailActivityAt: Date.now(),
 			idleTailTrimScrollContainer: undefined,
 		}
 	},
@@ -76,9 +79,12 @@ export default {
 
 	methods: {
 		onIdleTailTrimScrollActivity() {
+			if (!this.isScrolledNearIdleTailTrimBoundary()) {
+				return
+			}
 			const now = Date.now()
-			if (now - this.lastScrollActivityAt > SCROLL_ACTIVITY_WRITE_THROTTLE_MS) {
-				this.lastScrollActivityAt = now
+			if (now - this.lastTailActivityAt > SCROLL_ACTIVITY_WRITE_THROTTLE_MS) {
+				this.lastTailActivityAt = now
 			}
 		},
 
@@ -106,29 +112,78 @@ export default {
 			return document.scrollingElement ?? undefined
 		},
 
-		// Cheap, approximate: skip entirely if we can't determine
-		// position at all (the idle timer + selection check below are
-		// still a real safety net on their own) rather than blocking the
-		// trim indefinitely just because no scrollable ancestor was found.
+		// Locate the rendered row at the keep/drop boundary for THIS
+		// Mailbox instance. Priority Inbox stacks several Mailbox instances
+		// inside one shared scroller, so distance from the shared scroller's
+		// bottom says nothing about whether this particular section's tail
+		// is visible. Envelope.vue already exposes stable data-envelope-id
+		// attributes, so no extra DOM marker or row-height assumption is
+		// needed here.
+		findIdleTailTrimBoundaryElement() {
+			const boundaryCandidates = this.envelopes.slice(ENVELOPE_LIST_BASELINE_SIZE - 1)
+			if (boundaryCandidates.length === 0) {
+				return undefined
+			}
+			const renderedRows = this.$el.querySelectorAll('[data-envelope-id]')
+			const rowsById = new Map(Array.from(renderedRows)
+				.map((row) => [row.getAttribute('data-envelope-id'), row]))
+			return boundaryCandidates
+				.map((envelope) => rowsById.get(String(envelope.databaseId)))
+				.find((row) => row !== undefined)
+		},
+
+		// True means trimming now could remove content at or above the
+		// viewport. False means the baseline boundary is comfortably below
+		// the viewport (or isn't rendered, as with a collapsed manual
+		// section), so removing the tail cannot disturb what the user sees.
 		isScrolledNearIdleTailTrimBoundary() {
 			const container = this.idleTailTrimScrollContainer
 			if (!container) {
 				return false
 			}
-			const distanceFromBottom = container.scrollHeight - (container.scrollTop + container.clientHeight)
-			return distanceFromBottom < TRIM_SAFETY_MARGIN_PX
+			const boundary = this.findIdleTailTrimBoundaryElement()
+			if (!boundary) {
+				return false
+			}
+
+			const containerRect = container === document.scrollingElement
+				? { top: 0, bottom: window.innerHeight }
+				: container.getBoundingClientRect()
+			const mailboxRect = this.$el.getBoundingClientRect()
+			const boundaryRect = boundary.getBoundingClientRect()
+
+			// This whole section is above the viewport. Removing its tail
+			// would shift later visible sections upward, which this one-way
+			// trim deliberately never tries to compensate for.
+			if (mailboxRect.bottom <= containerRect.top) {
+				return true
+			}
+
+			return boundaryRect.top <= containerRect.bottom + TRIM_SAFETY_MARGIN_PX
 		},
 
 		maybeTrimIdleTail() {
-			if (Date.now() - this.lastScrollActivityAt < IDLE_TRIM_MS) {
+			if (Date.now() - this.lastTailActivityAt < IDLE_TRIM_MS) {
 				return
 			}
 			if (this.isScrolledNearIdleTailTrimBoundary()) {
 				return
 			}
-			this.idleTailTrimStore.trimIdleEnvelopeListTailMutation({
+
+			// Removing dozens or hundreds of off-screen rows should be a
+			// direct release, not dozens or hundreds of transition-group leave
+			// animations and short-lived detached nodes.
+			this.skipListTransition = true
+			const result = this.idleTailTrimStore.trimIdleEnvelopeListTailMutation({
 				mailboxId: this.mailbox.databaseId,
 				query: this.searchQuery,
+			})
+			if (!result?.trimmedCount) {
+				this.skipListTransition = false
+				return
+			}
+			this.$nextTick(() => {
+				this.skipListTransition = false
 			})
 		},
 	},

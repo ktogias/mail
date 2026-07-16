@@ -3675,15 +3675,17 @@ describe('Vuex store actions', () => {
 			expect(store.isInteractionPriorityActive()).toBe(true)
 		})
 
-		it('syncWatchedMailboxes skips the whole tick while interaction priority is active', async () => {
+		it('syncWatchedMailboxes skips network work but still signals local housekeeping while interaction priority is active', async () => {
 			store.addMailboxMutation({
 				account: account13,
 				mailbox: { name: 'INBOX', databaseId: 5, specialRole: 'inbox' },
 			})
 			store.setInteractionPriorityMutation()
+			const timestampSpy = vi.spyOn(store, 'updateSyncTimestamp')
 
 			await store.syncWatchedMailboxes()
 
+			expect(timestampSpy).toHaveBeenCalledOnce()
 			expect(MessageService.syncEnvelopes).not.toHaveBeenCalled()
 		})
 
@@ -5763,6 +5765,71 @@ describe('Vuex store actions', () => {
 
 			expect(store.envelopes[105]).toBeDefined()
 			expect(store.messages[105]).toBeDefined()
+		})
+
+		it('trims Priority Inbox constituent buckets and releases their dropped lookahead caches', () => {
+			const account17 = { id: 17, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account17)
+			store.addMailboxMutation({
+				account: account17,
+				mailbox: { id: 'INBOX', name: 'INBOX', databaseId: 12, accountId: 17, specialRole: 'inbox' },
+			})
+
+			const query = 'is:pi-other'
+			normalizedEnvelopeListId.mockImplementation((value) => value ?? '')
+			const virtualIds = []
+			const mailbox11Ids = []
+			const mailbox12Ids = []
+			for (let i = 1; i <= 120; i++) {
+				const mailboxId = i % 2 === 0 ? 12 : 11
+				store.envelopes[i] = { databaseId: i, mailboxId, accountId: mailboxId === 11 ? 13 : 17 }
+				virtualIds.push(i)
+				if (mailboxId === 11) {
+					mailbox11Ids.push(i)
+				} else {
+					mailbox12Ids.push(i)
+				}
+			}
+			// Constituent pagination can hold lookahead rows that have not
+			// yet been appended to the virtual page.
+			store.envelopes[121] = { databaseId: 121, mailboxId: 11, accountId: 13 }
+			store.messages[121] = { databaseId: 121, body: 'lookahead' }
+			mailbox11Ids.push(121)
+			store.mailboxes.priority.envelopeLists[query] = virtualIds
+			store.mailboxes[11].envelopeLists[query] = mailbox11Ids
+			store.mailboxes[12].envelopeLists[query] = mailbox12Ids
+
+			const result = store.trimIdleEnvelopeListTailMutation({ mailboxId: 'priority', query })
+
+			expect(result).toEqual({ trimmedCount: 20, constituentTrimmedCount: 21 })
+			expect(store.mailboxes.priority.envelopeLists[query]).toEqual(virtualIds.slice(0, 100))
+			expect(store.mailboxes[11].envelopeLists[query]).toEqual(mailbox11Ids.filter((id) => id <= 100))
+			expect(store.mailboxes[12].envelopeLists[query]).toEqual(mailbox12Ids.filter((id) => id <= 100))
+			expect(store.envelopes[121]).toBeUndefined()
+			expect(store.messages[121]).toBeUndefined()
+		})
+
+		it('keeps one pagination anchor for a constituent absent from the virtual head', () => {
+			const account17 = { id: 17, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account17)
+			store.addMailboxMutation({
+				account: account17,
+				mailbox: { id: 'INBOX', name: 'INBOX', databaseId: 12, accountId: 17, specialRole: 'inbox' },
+			})
+
+			const query = 'is:pi-other'
+			normalizedEnvelopeListId.mockImplementation((value) => value ?? '')
+			const virtualIds = seedList(105)
+			store.mailboxes.priority.envelopeLists[query] = virtualIds
+			store.envelopes[201] = { databaseId: 201, mailboxId: 12, accountId: 17 }
+			store.envelopes[202] = { databaseId: 202, mailboxId: 12, accountId: 17 }
+			store.mailboxes[12].envelopeLists[query] = [201, 202]
+
+			store.trimIdleEnvelopeListTailMutation({ mailboxId: 'priority', query })
+
+			expect(store.mailboxes[12].envelopeLists[query]).toEqual([201])
+			expect(store.envelopes[201]).toBeDefined()
+			expect(store.envelopes[202]).toBeUndefined()
 		})
 	})
 })

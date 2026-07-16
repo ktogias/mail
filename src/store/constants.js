@@ -11,10 +11,9 @@ export const PRIORITY_INBOX_ID = 'priority'
 export const FOLLOW_UP_MAILBOX_ID = 'follow-up'
 export const PAGE_SIZE = 20
 // How long a mailbox list's tail can sit scrolled-past-and-forgotten before
-// it's eligible for idle trimming (see IdleTailTrimMixin.js) -- long enough
-// that a genuine "I'm reading something deep in the list right now" session
-// is never mistaken for idle, short enough that a merely-visited-once-then-
-// abandoned deep scroll doesn't linger for the rest of the day.
+// it's eligible for idle trimming (see IdleTailTrimMixin.js). Activity at the
+// head deliberately does not reset this clock: returning there and continuing
+// normal mailbox work is the exact case where the old deep tail should expire.
 export const IDLE_TRIM_MS = 12 * 60 * 1000
 // How many envelopes an idle-trimmed list keeps at its head. Well above a
 // typical viewport (roughly 15-20 rows) so ordinary scrolling never bumps

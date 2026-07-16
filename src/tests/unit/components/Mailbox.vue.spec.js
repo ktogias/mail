@@ -675,7 +675,7 @@ describe('Mailbox', () => {
 			const view = mountMailbox()
 			vi.spyOn(view.vm, 'isScrolledNearIdleTailTrimBoundary').mockReturnValue(false)
 			vi.spyOn(store, 'trimIdleEnvelopeListTailMutation')
-			view.vm.lastScrollActivityAt = Date.now() - 13 * 60 * 1000 // past IDLE_TRIM_MS (12 min)
+			view.vm.lastTailActivityAt = Date.now() - 13 * 60 * 1000 // past IDLE_TRIM_MS (12 min)
 
 			store.updateSyncTimestamp()
 			await view.vm.$nextTick()
@@ -690,7 +690,7 @@ describe('Mailbox', () => {
 			const view = mountMailbox()
 			vi.spyOn(view.vm, 'isScrolledNearIdleTailTrimBoundary').mockReturnValue(false)
 			vi.spyOn(store, 'trimIdleEnvelopeListTailMutation')
-			view.vm.lastScrollActivityAt = Date.now() - 60 * 1000 // well under 12 min
+			view.vm.lastTailActivityAt = Date.now() - 60 * 1000 // well under 12 min
 
 			store.updateSyncTimestamp()
 			await view.vm.$nextTick()
@@ -702,7 +702,7 @@ describe('Mailbox', () => {
 			const view = mountMailbox()
 			vi.spyOn(view.vm, 'isScrolledNearIdleTailTrimBoundary').mockReturnValue(true)
 			vi.spyOn(store, 'trimIdleEnvelopeListTailMutation')
-			view.vm.lastScrollActivityAt = Date.now() - 13 * 60 * 1000
+			view.vm.lastTailActivityAt = Date.now() - 13 * 60 * 1000
 
 			store.updateSyncTimestamp()
 			await view.vm.$nextTick()
@@ -710,21 +710,33 @@ describe('Mailbox', () => {
 			expect(store.trimIdleEnvelopeListTailMutation).not.toHaveBeenCalled()
 		})
 
-		it('a scroll event refreshes lastScrollActivityAt, resetting the idle clock', () => {
+		it('a scroll event near the tail refreshes lastTailActivityAt, resetting the idle clock', () => {
 			const view = mountMailbox()
+			vi.spyOn(view.vm, 'isScrolledNearIdleTailTrimBoundary').mockReturnValue(true)
 			const longAgo = Date.now() - 13 * 60 * 1000
-			view.vm.lastScrollActivityAt = longAgo
+			view.vm.lastTailActivityAt = longAgo
 
 			view.vm.onIdleTailTrimScrollActivity()
 
-			expect(view.vm.lastScrollActivityAt).toBeGreaterThan(longAgo)
+			expect(view.vm.lastTailActivityAt).toBeGreaterThan(longAgo)
+		})
+
+		it('scrolling at the head does not keep the forgotten tail alive', () => {
+			const view = mountMailbox()
+			vi.spyOn(view.vm, 'isScrolledNearIdleTailTrimBoundary').mockReturnValue(false)
+			const longAgo = Date.now() - 13 * 60 * 1000
+			view.vm.lastTailActivityAt = longAgo
+
+			view.vm.onIdleTailTrimScrollActivity()
+
+			expect(view.vm.lastTailActivityAt).toBe(longAgo)
 		})
 
 		it('also checks immediately when the tab is backgrounded, not just on the next sync tick', () => {
 			const view = mountMailbox()
 			vi.spyOn(view.vm, 'isScrolledNearIdleTailTrimBoundary').mockReturnValue(false)
 			vi.spyOn(store, 'trimIdleEnvelopeListTailMutation')
-			view.vm.lastScrollActivityAt = Date.now() - 13 * 60 * 1000
+			view.vm.lastTailActivityAt = Date.now() - 13 * 60 * 1000
 			vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
 
 			view.vm.onIdleTailTrimVisibilityChange()
