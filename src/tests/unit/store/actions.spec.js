@@ -4436,6 +4436,130 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	describe('fetchThread: caps concurrent speculative (prefetch) requests app-wide', () => {
+		// Same guard as fetchMessage(), but for the thread half of every
+		// row prefetch. fetchThread() is usually cheaper than a body miss,
+		// but hover/touch/viewport all trigger it too; without a store-level
+		// cap, fixing body fan-out still left an unbounded speculative
+		// thread fan-out under fast pointer/scroll movement.
+		beforeEach(() => {
+			const account = { id: 13 }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+			})
+		})
+
+		it('allows up to the cap (2) concurrent speculative fetches', async () => {
+			let resolveFirst
+			let resolveSecond
+			MessageService.fetchThread
+				.mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve }))
+				.mockReturnValueOnce(new Promise((resolve) => { resolveSecond = resolve }))
+
+			const firstCall = store.fetchThread(90110, { speculative: true })
+			const secondCall = store.fetchThread(90111, { speculative: true })
+
+			expect(MessageService.fetchThread).toHaveBeenCalledTimes(2)
+
+			resolveFirst([{ databaseId: 90110, mailboxId: 11 }])
+			resolveSecond([{ databaseId: 90111, mailboxId: 11 }])
+			await firstCall
+			await secondCall
+		})
+
+		it('skips a third speculative fetch once the cap is reached, without calling the service', async () => {
+			let resolveFirst
+			let resolveSecond
+			MessageService.fetchThread
+				.mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve }))
+				.mockReturnValueOnce(new Promise((resolve) => { resolveSecond = resolve }))
+
+			const firstCall = store.fetchThread(90112, { speculative: true })
+			const secondCall = store.fetchThread(90113, { speculative: true })
+
+			const result = await store.fetchThread(90114, { speculative: true })
+
+			expect(result).toBeUndefined()
+			expect(MessageService.fetchThread).toHaveBeenCalledTimes(2)
+
+			resolveFirst([{ databaseId: 90112, mailboxId: 11 }])
+			resolveSecond([{ databaseId: 90113, mailboxId: 11 }])
+			await firstCall
+			await secondCall
+		})
+
+		it('frees a slot once a speculative fetch settles, letting the next one through', async () => {
+			let resolveFirst
+			let resolveSecond
+			MessageService.fetchThread
+				.mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve }))
+				.mockReturnValueOnce(new Promise((resolve) => { resolveSecond = resolve }))
+
+			const firstCall = store.fetchThread(90115, { speculative: true })
+			const secondCall = store.fetchThread(90116, { speculative: true })
+
+			resolveFirst([{ databaseId: 90115, mailboxId: 11 }])
+			await firstCall
+
+			MessageService.fetchThread.mockResolvedValueOnce([{ databaseId: 90117, mailboxId: 11 }])
+			const thirdResult = await store.fetchThread(90117, { speculative: true })
+
+			expect(thirdResult).toEqual([
+				expect.objectContaining({ databaseId: 90117, mailboxId: 11 }),
+			])
+
+			resolveSecond([{ databaseId: 90116, mailboxId: 11 }])
+			await secondCall
+		})
+
+		it('never caps a non-speculative (real) fetch, even with every speculative slot full', async () => {
+			let resolveFirst
+			let resolveSecond
+			MessageService.fetchThread
+				.mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve }))
+				.mockReturnValueOnce(new Promise((resolve) => { resolveSecond = resolve }))
+
+			const firstCall = store.fetchThread(90118, { speculative: true })
+			const secondCall = store.fetchThread(90119, { speculative: true })
+
+			MessageService.fetchThread.mockResolvedValueOnce([{ databaseId: 90120, mailboxId: 11 }])
+			const realResult = await store.fetchThread(90120)
+
+			expect(realResult).toEqual([
+				expect.objectContaining({ databaseId: 90120, mailboxId: 11 }),
+			])
+
+			resolveFirst([{ databaseId: 90118, mailboxId: 11 }])
+			resolveSecond([{ databaseId: 90119, mailboxId: 11 }])
+			await firstCall
+			await secondCall
+		})
+
+		it('dedupes a same-id speculative call before applying the cap', async () => {
+			let resolveFirst
+			let resolveSecond
+			MessageService.fetchThread
+				.mockReturnValueOnce(new Promise((resolve) => { resolveFirst = resolve }))
+				.mockReturnValueOnce(new Promise((resolve) => { resolveSecond = resolve }))
+
+			const firstCall = store.fetchThread(90121, { speculative: true })
+			const secondCall = store.fetchThread(90122, { speculative: true })
+			const duplicateFirstCall = store.fetchThread(90121, { speculative: true })
+
+			expect(MessageService.fetchThread).toHaveBeenCalledTimes(2)
+
+			resolveFirst([{ databaseId: 90121, mailboxId: 11 }])
+			resolveSecond([{ databaseId: 90122, mailboxId: 11 }])
+			const [first, duplicateFirst] = await Promise.all([firstCall, duplicateFirstCall])
+			await secondCall
+
+			expect(duplicateFirst).toEqual(first)
+			expect(MessageService.fetchThread).toHaveBeenCalledTimes(2)
+		})
+	})
+
 	describe('syncEnvelopes: malformed response retry', () => {
 		// Regression: confirmed live -- a sync response missing
 		// newMessages/changedMessages crashed with a raw TypeError and

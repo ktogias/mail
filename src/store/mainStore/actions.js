@@ -320,6 +320,13 @@ const speculativeThreadFetchControllers = new Map()
 // speculative window still fetches normally, for real, the instant it's
 // actually opened" philosophy as the (now-redundant) viewport-specific cap.
 const MAX_CONCURRENT_SPECULATIVE_MESSAGE_FETCHES = 2
+// Same cap shape for speculative fetchThread() calls. Thread requests are
+// usually cheaper than body fetches, but they still occupy a request slot and
+// still get triggered by the same hover/touch/viewport paths; leaving them
+// uncapped meant a fast pass over many rows could replace the now-fixed body
+// fan-out with an unbounded thread fan-out. Real opens and same-id dedup are
+// unaffected.
+const MAX_CONCURRENT_SPECULATIVE_THREAD_FETCHES = 2
 
 // toggleEnvelopeSeen()/toggleEnvelopeJunk()/markEnvelopeFavoriteOrUnfavorite()
 // all optimistically set a flag via flagEnvelopeMutation() and await their
@@ -2872,6 +2879,10 @@ export default function mainStoreActions() {
 
 			if (pendingThreadFetches.has(id)) {
 				return pendingThreadFetches.get(id)
+			}
+
+			if (speculative && speculativeThreadFetchControllers.size >= MAX_CONCURRENT_SPECULATIVE_THREAD_FETCHES) {
+				return undefined
 			}
 
 			// speculative=true (HoverPrefetchMixin/ViewportPrefetchMixin
