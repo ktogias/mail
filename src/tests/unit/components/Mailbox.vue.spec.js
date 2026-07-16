@@ -794,6 +794,56 @@ describe('Mailbox', () => {
 			}
 		})
 
+		it('stops retrying the returned-tail timer after a bounded number of blocked attempts', async () => {
+			vi.useFakeTimers()
+			try {
+				const view = mountMailbox()
+				view.vm.stopInterval()
+				vi.spyOn(view.vm, 'isScrolledNearIdleTailTrimBoundary').mockReturnValue(false)
+				vi.spyOn(view.vm, 'envelopes', 'get').mockReturnValue(new Array(101).fill({}))
+				// A selected tail row keeps blocking the trim every time.
+				vi.spyOn(store, 'trimIdleEnvelopeListTailMutation').mockReturnValue({ trimmedCount: 0 })
+				view.vm.idleTailWasVisited = true
+
+				view.vm.onIdleTailTrimScrollActivity()
+				// 3 bounded attempts, each spaced RETURNED_TAIL_TRIM_MS apart.
+				await vi.advanceTimersByTimeAsync(3 * (60 * 1000) + 150)
+
+				expect(store.trimIdleEnvelopeListTailMutation).toHaveBeenCalledTimes(3)
+				expect(view.vm.idleTailReturnTrimTimer).toBeUndefined()
+
+				// A 4th window passing confirms no further local retry --
+				// the poller fallback (maybeTrimIdleTail(), a separate,
+				// already-tested path) is what's left to eventually trim it.
+				await vi.advanceTimersByTimeAsync(60 * 1000)
+
+				expect(store.trimIdleEnvelopeListTailMutation).toHaveBeenCalledTimes(3)
+				view.destroy()
+			} finally {
+				vi.useRealTimers()
+			}
+		})
+
+		it('resets the return-trim attempt budget on a fresh visit to the tail', async () => {
+			vi.useFakeTimers()
+			try {
+				const view = mountMailbox()
+				view.vm.stopInterval()
+				view.vm.idleTailReturnTrimAttempts = 2
+
+				vi.spyOn(view.vm, 'isScrolledNearIdleTailTrimBoundary').mockReturnValue(true)
+				vi.spyOn(view.vm, 'envelopes', 'get').mockReturnValue(new Array(101).fill({}))
+
+				view.vm.onIdleTailTrimScrollActivity()
+				await vi.advanceTimersByTimeAsync(150)
+
+				expect(view.vm.idleTailReturnTrimAttempts).toBe(0)
+				view.destroy()
+			} finally {
+				vi.useRealTimers()
+			}
+		})
+
 		it('does not run the returned-tail timer while the boundary is near the viewport', async () => {
 			vi.useFakeTimers()
 			try {

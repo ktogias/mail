@@ -24,6 +24,16 @@ const TRIM_SAFETY_MARGIN_PX = 300
 // the page unusable well before twelve minutes have elapsed.
 export const RETURNED_TAIL_TRIM_MS = 60 * 1000
 
+// A tail row can stay selected indefinitely (selected, then the user simply
+// never comes back to that list). Without a cap, scheduleIdleTailReturnTrim()
+// would retry itself forever at this fast cadence for a condition that may
+// never change. Give it a bounded number of fast tries, then stop: the
+// already-running IDLE_TRIM_MS poller check (maybeTrimIdleTail(), gated on
+// the exact same selection state, evaluated on every sync tick regardless of
+// this timer) remains the permanent fallback -- no need for two perpetual
+// retry loops watching the same blocked condition.
+const MAX_RETURN_TRIM_ATTEMPTS = 3
+
 // scroll fires on every frame of a drag/momentum scroll -- there's no
 // need for anything finer than "roughly when did scrolling last happen",
 // given this is checked against a many-minutes-long idle threshold.
@@ -61,6 +71,7 @@ export default {
 			idleTailWasVisited: false,
 			idleTailReturnTrimTimer: undefined,
 			idleTailScrollCheckTimer: undefined,
+			idleTailReturnTrimAttempts: 0,
 		}
 	},
 
@@ -110,6 +121,7 @@ export default {
 			}
 			if (this.envelopes.length > ENVELOPE_LIST_BASELINE_SIZE) {
 				this.idleTailWasVisited = true
+				this.idleTailReturnTrimAttempts = 0
 				this.clearIdleTailReturnTrimTimer()
 			}
 			const now = Date.now()
@@ -151,9 +163,17 @@ export default {
 				if (!this.idleTailWasVisited || this.isScrolledNearIdleTailTrimBoundary()) {
 					return
 				}
-				if (!this.trimIdleTailNow() && this.envelopes.length > ENVELOPE_LIST_BASELINE_SIZE) {
-					// A selected tail row can temporarily pin the list. Retry
-					// locally instead of waiting for another scroll or poll tick.
+				if (this.trimIdleTailNow()) {
+					return
+				}
+				// A selected tail row can temporarily pin the list. Retry
+				// locally instead of waiting for another scroll or poll tick,
+				// but only a bounded number of times -- see
+				// MAX_RETURN_TRIM_ATTEMPTS above for why this doesn't retry
+				// forever.
+				this.idleTailReturnTrimAttempts += 1
+				if (this.envelopes.length > ENVELOPE_LIST_BASELINE_SIZE
+					&& this.idleTailReturnTrimAttempts < MAX_RETURN_TRIM_ATTEMPTS) {
 					this.scheduleIdleTailReturnTrim()
 				}
 			}, RETURNED_TAIL_TRIM_MS)
@@ -242,6 +262,7 @@ export default {
 				return false
 			}
 			this.idleTailWasVisited = false
+			this.idleTailReturnTrimAttempts = 0
 			this.clearIdleTailReturnTrimTimer()
 			this.$nextTick(() => {
 				this.skipListTransition = false
