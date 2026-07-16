@@ -5724,9 +5724,30 @@ describe('Vuex store actions', () => {
 			expect(store.mailboxes[11].envelopeLists['']).toEqual(ids)
 		})
 
-		it('skips the whole list, not just the tail, if anything in it is currently selected', () => {
+		it('keeps the whole list when a selected row is inside the tail', () => {
 			const ids = seedList(105)
-			store.setListHasSelectionMutation({ mailboxId: 11, query: undefined, hasSelection: true })
+			store.setListSelectionMutation({ mailboxId: 11, query: undefined, selectedIds: [105] })
+
+			store.trimIdleEnvelopeListTailMutation({ mailboxId: 11, query: undefined })
+
+			expect(store.mailboxes[11].envelopeLists['']).toEqual(ids)
+		})
+
+		it('still trims the tail when the only selected row is in the kept head', () => {
+			seedList(105)
+			store.setListSelectionMutation({ mailboxId: 11, query: undefined, selectedIds: [1] })
+
+			store.trimIdleEnvelopeListTailMutation({ mailboxId: 11, query: undefined })
+
+			expect(store.mailboxes[11].envelopeLists['']).toHaveLength(100)
+			expect(store.mailboxes[11].envelopeLists['']).toContain(1)
+		})
+
+		it('combines selections reported by multiple grouped-list owners', () => {
+			const ids = seedList(105)
+			store.setListSelectionMutation({ mailboxId: 11, query: undefined, ownerId: 1, selectedIds: [1] })
+			store.setListSelectionMutation({ mailboxId: 11, query: undefined, ownerId: 2, selectedIds: [105] })
+			store.setListSelectionMutation({ mailboxId: 11, query: undefined, ownerId: 1, selectedIds: [] })
 
 			store.trimIdleEnvelopeListTailMutation({ mailboxId: 11, query: undefined })
 

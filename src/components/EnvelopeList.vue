@@ -176,7 +176,6 @@
 import { showError } from '@nextcloud/dialogs'
 import { NcActionButton as ActionButton, NcActions as Actions, NcButton, NcDialog } from '@nextcloud/vue'
 import { mapStores } from 'pinia'
-import { differenceWith } from 'ramda'
 import AlertOctagonIcon from 'vue-material-design-icons/AlertOctagonOutline.vue'
 import IconSelect from 'vue-material-design-icons/CloseThick.vue'
 import EmailRead from 'vue-material-design-icons/EmailOpenOutline.vue'
@@ -382,23 +381,23 @@ export default {
 	watch: {
 		sortedEnvelops(newVal, oldVal) {
 			// Unselect vanished envelopes
-			const newIds = newVal.map((env) => env.databaseId)
-			this.selection = this.selection.filter((id) => newIds.includes(id))
-			differenceWith((a, b) => a.databaseId === b.databaseId, oldVal, newVal)
+			const newIds = new Set(newVal.map((env) => env.databaseId))
+			this.selection = this.selection.filter((id) => newIds.has(id))
+			oldVal
+				.filter((env) => !newIds.has(env.databaseId))
 				.forEach((env) => {
 					env.flags.selected = false
 				})
 		},
 
 		// Reported to the store so the idle-tail-trim mutation (see
-		// trimIdleEnvelopeListTailMutation()) can skip a list while it has
-		// an active selection, without needing selection itself (still
-		// component-local, unchanged here) to move into the store.
+		// trimIdleEnvelopeListTailMutation()) can protect selected tail rows.
 		selection(newVal) {
-			this.mainStore.setListHasSelectionMutation({
+			this.mainStore.setListSelectionMutation({
 				mailboxId: this.mailbox.databaseId,
 				query: this.searchQuery,
-				hasSelection: newVal.length > 0,
+				ownerId: this._uid,
+				selectedIds: newVal,
 			})
 		},
 	},
@@ -409,13 +408,12 @@ export default {
 
 	beforeDestroy() {
 		dragEventBus.off('envelopes-dropped', this.unselectAll)
-		// Don't leave a stale "has selection" marker behind for a list
-		// this instance no longer renders -- it would block that list's
-		// idle-tail-trim forever.
-		this.mainStore.setListHasSelectionMutation({
+		// Don't leave stale selected ids behind for a destroyed list.
+		this.mainStore.setListSelectionMutation({
 			mailboxId: this.mailbox.databaseId,
 			query: this.searchQuery,
-			hasSelection: false,
+			ownerId: this._uid,
+			selectedIds: [],
 		})
 	},
 

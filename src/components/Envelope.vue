@@ -31,7 +31,7 @@
 		@toggle-important="onToggleImportant"
 		@toggle-seen="onToggleSeen"
 		@update:menuOpen="closeMoreAndSnoozeOptions"
-		@mouseenter.native="onEnvelopeMouseEnter"
+		@mousemove.native="onEnvelopeMouseMove"
 		@mouseleave.native="onEnvelopeMouseLeave"
 		@touchstart.native.passive="onEnvelopeTouchStart"
 		@touchmove.native.passive="cancelHoverPrefetch">
@@ -1182,7 +1182,7 @@ export default {
 			}
 		},
 
-		onEnvelopeMouseEnter() {
+		onEnvelopeMouseMove() {
 			// Drafts open the composer, not a thread view -- nothing here
 			// to prefetch. Mirrors link()'s own draft check above.
 			if (this.draft) {
@@ -1199,7 +1199,7 @@ export default {
 		},
 
 		onEnvelopeTouchStart() {
-			// Touch's equivalent of onEnvelopeMouseEnter() -- see
+			// Touch's equivalent of onEnvelopeMouseMove() -- see
 			// TOUCH_PREFETCH_DELAY_MS in HoverPrefetchMixin.js for why this
 			// needs its own much shorter delay instead of reusing the
 			// mouse one.

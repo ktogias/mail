@@ -1533,16 +1533,24 @@ export default function mainStoreActions() {
 		setLastOpenedFromListMutation({ mailboxId, query }) {
 			this.lastOpenedFromList = { mailboxId, query }
 		},
-		// See listsWithActiveSelection in mainStore.js's state(). Reported
-		// by EnvelopeList.vue's own watcher on its (still component-local)
-		// `selection` array -- this store only ever needs to know
-		// whether a list has ANY active selection, not which ids.
-		setListHasSelectionMutation({ mailboxId, query, hasSelection }) {
+		// See selectedEnvelopeIdsByList in mainStore.js's state().
+		setListSelectionMutation({ mailboxId, query, ownerId = 'default', selectedIds }) {
 			const key = mailboxId + '::' + normalizedEnvelopeListId(query)
-			if (hasSelection) {
-				Vue.set(this.listsWithActiveSelection, key, true)
+			const ownerKey = String(ownerId)
+			if (selectedIds.length > 0) {
+				if (!this.selectedEnvelopeIdsByList[key]) {
+					Vue.set(this.selectedEnvelopeIdsByList, key, {})
+				}
+				Vue.set(this.selectedEnvelopeIdsByList[key], ownerKey, [...selectedIds])
 			} else {
-				Vue.delete(this.listsWithActiveSelection, key)
+				const selections = this.selectedEnvelopeIdsByList[key]
+				if (!selections) {
+					return
+				}
+				Vue.delete(selections, ownerKey)
+				if (Object.keys(selections).length === 0) {
+					Vue.delete(this.selectedEnvelopeIdsByList, key)
+				}
 			}
 		},
 		envelopeFetchStartedMutation({ mailboxId, query }) {
@@ -4736,17 +4744,13 @@ export default function mainStoreActions() {
 			if (!list || list.length <= ENVELOPE_LIST_BASELINE_SIZE) {
 				return { trimmedCount: 0, constituentTrimmedCount: 0 }
 			}
-			// Skip the whole list, not just the tail, if anything in it
-			// is currently selected -- simpler and safer than a precise
-			// per-id check, and this should be rare given the list was
-			// already idle for several minutes. See
-			// listsWithActiveSelection in mainStore.js's state().
-			if (this.listsWithActiveSelection[mailboxId + '::' + listId]) {
-				return { trimmedCount: 0, constituentTrimmedCount: 0 }
-			}
-
 			const keepIds = list.slice(0, ENVELOPE_LIST_BASELINE_SIZE)
 			const tailIds = list.slice(ENVELOPE_LIST_BASELINE_SIZE)
+			const selectedIds = Object.values(this.selectedEnvelopeIdsByList[mailboxId + '::' + listId] ?? {}).flat()
+			const tailIdSet = new Set(tailIds)
+			if (selectedIds.some((id) => tailIdSet.has(id))) {
+				return { trimmedCount: 0, constituentTrimmedCount: 0 }
+			}
 			const droppedIds = new Set(tailIds)
 			Vue.set(mailbox.envelopeLists, listId, keepIds)
 
@@ -4768,20 +4772,21 @@ export default function mainStoreActions() {
 						&& candidate.envelopeLists[listId] !== undefined)
 					.forEach((candidate) => {
 						const candidateList = candidate.envelopeLists[listId]
-						if (this.listsWithActiveSelection[candidate.databaseId + '::' + listId]) {
-							return
-						}
 						const candidateKeepIds = candidateList.filter((id) => keepIdSet.has(id))
 						if (candidateKeepIds.length === 0 && candidateList.length > 0) {
 							candidateKeepIds.push(candidateList[0])
 						}
 						if (candidateKeepIds.length < candidateList.length) {
-							const removed = candidateList.length - candidateKeepIds.length
 							const candidateMailboxId = candidate.databaseId
 							const candidateKeepIdSet = new Set(candidateKeepIds)
-							candidateList
-								.filter((id) => !candidateKeepIdSet.has(id))
-								.forEach((id) => droppedIds.add(id))
+							const candidateDropIds = candidateList.filter((id) => !candidateKeepIdSet.has(id))
+							const candidateSelectedIds = Object.values(this.selectedEnvelopeIdsByList[candidateMailboxId + '::' + listId] ?? {}).flat()
+							const candidateDropIdSet = new Set(candidateDropIds)
+							if (candidateSelectedIds.some((id) => candidateDropIdSet.has(id))) {
+								return
+							}
+							const removed = candidateDropIds.length
+							candidateDropIds.forEach((id) => droppedIds.add(id))
 							Vue.set(candidate.envelopeLists, listId, candidateKeepIds)
 							constituentTrimmedCount += removed
 							logger.info(`idle-tail trim removed ${removed} feeder envelopes from mailbox ${candidateMailboxId} (${listId})`)

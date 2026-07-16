@@ -710,26 +710,107 @@ describe('Mailbox', () => {
 			expect(store.trimIdleEnvelopeListTailMutation).not.toHaveBeenCalled()
 		})
 
-		it('a scroll event near the tail refreshes lastTailActivityAt, resetting the idle clock', () => {
-			const view = mountMailbox()
-			vi.spyOn(view.vm, 'isScrolledNearIdleTailTrimBoundary').mockReturnValue(true)
-			const longAgo = Date.now() - 13 * 60 * 1000
-			view.vm.lastTailActivityAt = longAgo
+		it('a settled scroll near the tail refreshes lastTailActivityAt, resetting the idle clock', async () => {
+			vi.useFakeTimers()
+			try {
+				const view = mountMailbox()
+				view.vm.stopInterval()
+				vi.spyOn(view.vm, 'isScrolledNearIdleTailTrimBoundary').mockReturnValue(true)
+				const longAgo = Date.now() - 13 * 60 * 1000
+				view.vm.lastTailActivityAt = longAgo
 
-			view.vm.onIdleTailTrimScrollActivity()
+				view.vm.onIdleTailTrimScrollActivity()
+				await vi.advanceTimersByTimeAsync(150)
 
-			expect(view.vm.lastTailActivityAt).toBeGreaterThan(longAgo)
+				expect(view.vm.lastTailActivityAt).toBeGreaterThan(longAgo)
+				view.destroy()
+			} finally {
+				vi.useRealTimers()
+			}
 		})
 
-		it('scrolling at the head does not keep the forgotten tail alive', () => {
-			const view = mountMailbox()
-			vi.spyOn(view.vm, 'isScrolledNearIdleTailTrimBoundary').mockReturnValue(false)
-			const longAgo = Date.now() - 13 * 60 * 1000
-			view.vm.lastTailActivityAt = longAgo
+		it('scrolling at the head does not keep the forgotten tail alive', async () => {
+			vi.useFakeTimers()
+			try {
+				const view = mountMailbox()
+				view.vm.stopInterval()
+				vi.spyOn(view.vm, 'isScrolledNearIdleTailTrimBoundary').mockReturnValue(false)
+				const longAgo = Date.now() - 13 * 60 * 1000
+				view.vm.lastTailActivityAt = longAgo
 
-			view.vm.onIdleTailTrimScrollActivity()
+				view.vm.onIdleTailTrimScrollActivity()
+				await vi.advanceTimersByTimeAsync(150)
 
-			expect(view.vm.lastTailActivityAt).toBe(longAgo)
+				expect(view.vm.lastTailActivityAt).toBe(longAgo)
+				view.destroy()
+			} finally {
+				vi.useRealTimers()
+			}
+		})
+
+		it('coalesces repeated scroll events into one settled geometry check', async () => {
+			vi.useFakeTimers()
+			try {
+				const view = mountMailbox()
+				view.vm.stopInterval()
+				const boundarySpy = vi.spyOn(view.vm, 'isScrolledNearIdleTailTrimBoundary').mockReturnValue(false)
+
+				view.vm.onIdleTailTrimScrollActivity()
+				view.vm.onIdleTailTrimScrollActivity()
+				view.vm.onIdleTailTrimScrollActivity()
+				expect(boundarySpy).not.toHaveBeenCalled()
+
+				await vi.advanceTimersByTimeAsync(150)
+
+				expect(boundarySpy).toHaveBeenCalledTimes(1)
+				view.destroy()
+			} finally {
+				vi.useRealTimers()
+			}
+		})
+
+		it('trims one minute after a visited tail returns safely above the boundary', async () => {
+			vi.useFakeTimers()
+			try {
+				const view = mountMailbox()
+				view.vm.stopInterval()
+				vi.spyOn(view.vm, 'isScrolledNearIdleTailTrimBoundary').mockReturnValue(false)
+				vi.spyOn(store, 'trimIdleEnvelopeListTailMutation').mockReturnValue({ trimmedCount: 20 })
+				view.vm.idleTailWasVisited = true
+
+				view.vm.onIdleTailTrimScrollActivity()
+				expect(store.trimIdleEnvelopeListTailMutation).not.toHaveBeenCalled()
+
+				await vi.advanceTimersByTimeAsync(60 * 1000 + 150)
+
+				expect(store.trimIdleEnvelopeListTailMutation).toHaveBeenCalledWith({
+					mailboxId: mailbox.databaseId,
+					query: undefined,
+				})
+				expect(view.vm.idleTailWasVisited).toBe(false)
+				view.destroy()
+			} finally {
+				vi.useRealTimers()
+			}
+		})
+
+		it('does not run the returned-tail timer while the boundary is near the viewport', async () => {
+			vi.useFakeTimers()
+			try {
+				const view = mountMailbox()
+				view.vm.stopInterval()
+				vi.spyOn(view.vm, 'isScrolledNearIdleTailTrimBoundary').mockReturnValue(true)
+				vi.spyOn(store, 'trimIdleEnvelopeListTailMutation')
+				view.vm.idleTailWasVisited = true
+
+				view.vm.onIdleTailTrimScrollActivity()
+				await vi.advanceTimersByTimeAsync(60 * 1000 + 150)
+
+				expect(store.trimIdleEnvelopeListTailMutation).not.toHaveBeenCalled()
+				view.destroy()
+			} finally {
+				vi.useRealTimers()
+			}
 		})
 
 		it('also checks immediately when the tab is backgrounded, not just on the next sync tick', () => {

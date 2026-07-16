@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+import { getScrollEventTarget } from '../directives/infinite-scroll.js'
 import { ENVELOPE_LIST_BASELINE_SIZE, IDLE_TRIM_MS } from '../store/constants.js'
 import useMainStore from '../store/mainStore.js'
 
@@ -12,13 +13,22 @@ import useMainStore from '../store/mainStore.js'
 // checking how far the viewport's bottom edge sits from the end of the
 // currently loaded content is enough to avoid trimming out from under
 // someone scrolled deep, while still allowing a trim whenever they're
-// comfortably away from the bottom. A few screens' worth of buffer.
-const TRIM_SAFETY_MARGIN_PX = 2000
+// comfortably above it. Keep this below one compact-list viewport: a fixed
+// 2000px margin classified the 100th row as "near" even from the head on
+// some layouts, so ordinary head work could pin the tail forever.
+const TRIM_SAFETY_MARGIN_PX = 300
+
+// Once the user has genuinely visited the deep tail and returned above its
+// boundary, release it promptly. The longer IDLE_TRIM_MS remains a fallback
+// for missed scroll signals; real profiling showed the retained rows can make
+// the page unusable well before twelve minutes have elapsed.
+export const RETURNED_TAIL_TRIM_MS = 60 * 1000
 
 // scroll fires on every frame of a drag/momentum scroll -- there's no
 // need for anything finer than "roughly when did scrolling last happen",
 // given this is checked against a many-minutes-long idle threshold.
 const SCROLL_ACTIVITY_WRITE_THROTTLE_MS = 5000
+const SCROLL_POSITION_SETTLE_MS = 150
 
 /**
  * Idle-and-unselected tail trimming for a single Mailbox instance's own
@@ -27,10 +37,10 @@ const SCROLL_ACTIVITY_WRITE_THROTTLE_MS = 5000
  * the actual trim + heavier-cache-GC logic; this mixin only tracks scroll
  * activity and approximate position.
  *
- * Piggybacks on syncWatchedMailboxes()'s own tick (that action now bumps
- * mainStore.syncTimestamp every tick specifically so this can watch it)
- * rather than running a separate timer, and additionally checks
- * immediately on a Page Visibility transition to hidden -- a well-
+ * The long-idle fallback piggybacks on syncWatchedMailboxes()'s own tick.
+ * A one-shot timer handles the stronger "visited tail, then returned"
+ * signal, and Page Visibility checks immediately on transition to hidden.
+ * This is a well-
  * established pattern for freeing memory once backgrounded (see e.g.
  * Slack's own "unload teams you haven't looked at in a while"). Both
  * paths funnel through the exact same safety checks below, so
@@ -48,6 +58,9 @@ export default {
 			// the head without keeping a long-forgotten tail alive forever.
 			lastTailActivityAt: Date.now(),
 			idleTailTrimScrollContainer: undefined,
+			idleTailWasVisited: false,
+			idleTailReturnTrimTimer: undefined,
+			idleTailScrollCheckTimer: undefined,
 		}
 	},
 
@@ -75,12 +88,29 @@ export default {
 	beforeDestroy() {
 		this.idleTailTrimScrollContainer?.removeEventListener('scroll', this.onIdleTailTrimScrollActivity)
 		document.removeEventListener('visibilitychange', this.onIdleTailTrimVisibilityChange)
+		this.clearIdleTailScrollCheckTimer()
+		this.clearIdleTailReturnTrimTimer()
 	},
 
 	methods: {
 		onIdleTailTrimScrollActivity() {
+			this.clearIdleTailScrollCheckTimer()
+			this.idleTailScrollCheckTimer = setTimeout(() => {
+				this.idleTailScrollCheckTimer = undefined
+				this.evaluateIdleTailScrollPosition()
+			}, SCROLL_POSITION_SETTLE_MS)
+		},
+
+		evaluateIdleTailScrollPosition() {
 			if (!this.isScrolledNearIdleTailTrimBoundary()) {
+				if (this.idleTailWasVisited) {
+					this.scheduleIdleTailReturnTrim()
+				}
 				return
+			}
+			if (this.envelopes.length > ENVELOPE_LIST_BASELINE_SIZE) {
+				this.idleTailWasVisited = true
+				this.clearIdleTailReturnTrimTimer()
 			}
 			const now = Date.now()
 			if (now - this.lastTailActivityAt > SCROLL_ACTIVITY_WRITE_THROTTLE_MS) {
@@ -88,28 +118,53 @@ export default {
 			}
 		},
 
+		clearIdleTailScrollCheckTimer() {
+			if (this.idleTailScrollCheckTimer !== undefined) {
+				clearTimeout(this.idleTailScrollCheckTimer)
+				this.idleTailScrollCheckTimer = undefined
+			}
+		},
+
 		onIdleTailTrimVisibilityChange() {
 			if (document.visibilityState === 'hidden') {
+				if (this.idleTailWasVisited && !this.isScrolledNearIdleTailTrimBoundary()) {
+					this.trimIdleTailNow()
+					return
+				}
 				this.maybeTrimIdleTail()
 			}
 		},
 
-		// Walks up from the list's own root element to find the real
-		// scrolling ancestor (the shared `.app-content-list` container --
-		// see the priority-inbox/page-mode investigation elsewhere in
-		// this codebase for why this is an ancestor, not something this
-		// component owns) -- deliberately not pulling in a library like
-		// `scrollparent` just for this one small, mechanical lookup.
-		findIdleTailTrimScrollContainer(el) {
-			let node = el?.parentElement
-			while (node) {
-				const overflowY = window.getComputedStyle(node).overflowY
-				if (overflowY === 'auto' || overflowY === 'scroll') {
-					return node
-				}
-				node = node.parentElement
+		clearIdleTailReturnTrimTimer() {
+			if (this.idleTailReturnTrimTimer !== undefined) {
+				clearTimeout(this.idleTailReturnTrimTimer)
+				this.idleTailReturnTrimTimer = undefined
 			}
-			return document.scrollingElement ?? undefined
+		},
+
+		scheduleIdleTailReturnTrim() {
+			if (this.idleTailReturnTrimTimer !== undefined) {
+				return
+			}
+			this.idleTailReturnTrimTimer = setTimeout(() => {
+				this.idleTailReturnTrimTimer = undefined
+				if (!this.idleTailWasVisited || this.isScrolledNearIdleTailTrimBoundary()) {
+					return
+				}
+				if (!this.trimIdleTailNow() && this.envelopes.length > ENVELOPE_LIST_BASELINE_SIZE) {
+					// A selected tail row can temporarily pin the list. Retry
+					// locally instead of waiting for another scroll or poll tick.
+					this.scheduleIdleTailReturnTrim()
+				}
+			}, RETURNED_TAIL_TRIM_MS)
+		},
+
+		// Walks up from the list's own root element to find the real
+		// scrolling ancestor (the shared `.app-content-list` container).
+		// Reuse the exact lookup that the pagination sentinel uses, so the
+		// two mechanisms cannot silently attach to different scroll roots.
+		findIdleTailTrimScrollContainer(el) {
+			return el ? getScrollEventTarget(el) : undefined
 		},
 
 		// Locate the rendered row at the keep/drop boundary for THIS
@@ -146,7 +201,7 @@ export default {
 				return false
 			}
 
-			const containerRect = container === document.scrollingElement
+			const containerRect = container === window
 				? { top: 0, bottom: window.innerHeight }
 				: container.getBoundingClientRect()
 			const mailboxRect = this.$el.getBoundingClientRect()
@@ -170,6 +225,10 @@ export default {
 				return
 			}
 
+			this.trimIdleTailNow()
+		},
+
+		trimIdleTailNow() {
 			// Removing dozens or hundreds of off-screen rows should be a
 			// direct release, not dozens or hundreds of transition-group leave
 			// animations and short-lived detached nodes.
@@ -180,11 +239,14 @@ export default {
 			})
 			if (!result?.trimmedCount) {
 				this.skipListTransition = false
-				return
+				return false
 			}
+			this.idleTailWasVisited = false
+			this.clearIdleTailReturnTrimTimer()
 			this.$nextTick(() => {
 				this.skipListTransition = false
 			})
+			return true
 		},
 	},
 }

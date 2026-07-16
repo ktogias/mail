@@ -58,20 +58,14 @@ export default defineStore('main', {
 			// genuinely on screen right now without needing to read the
 			// router directly.
 			currentOpenThreadId: undefined,
-			// Which mailbox+query lists currently have a non-empty
-			// multi-select active, keyed by `${mailboxId}::${listId}` --
-			// reported by EnvelopeList.vue's own watcher on its
-			// (still component-local) `selection` array. The idle-tail-
-			// trim mutation consults this before evicting a list's tail,
-			// so an in-progress bulk selection is never yanked out from
-			// under the user mid-action. Deliberately a per-list boolean,
-			// not a mirror of the actual selected ids: the trim is "skip
-			// the whole list if anything in it is selected" (same
-			// simplification the trim mutation's own comment already
-			// makes for the tail specifically), not a precise per-id
-			// check, so a full migration of `selection` itself into the
-			// store was unnecessary.
-			listsWithActiveSelection: {},
+			// Component-local selections mirrored by mailbox+query list and
+			// component owner. Grouped mailboxes render several EnvelopeList
+			// instances for one key, so one instance must not clear another's
+			// selection when it updates or unmounts.
+			// The idle-tail trim only needs ids to distinguish a selected
+			// head row (safe to keep while dropping the tail) from a selected
+			// tail row (must pin the list). EnvelopeList still owns behavior.
+			selectedEnvelopeIdsByList: {},
 			// Which list (mailboxId + query) the most recent click into a
 			// thread actually came from -- set by Envelope.vue's own
 			// onClick(), the only place that unambiguously knows this

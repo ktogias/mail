@@ -817,10 +817,10 @@ describe('Envelope', () => {
 			})
 		}
 
-		it('prefetches the message and thread after hovering past the debounce delay', async () => {
+		it('prefetches the message and thread after pointer movement settles past the debounce delay', async () => {
 			const view = mountEnvelope()
 
-			view.vm.onEnvelopeMouseEnter()
+			view.vm.onEnvelopeMouseMove()
 			expect(store.fetchMessage).not.toHaveBeenCalled()
 
 			await vi.advanceTimersByTimeAsync(200)
@@ -832,7 +832,7 @@ describe('Envelope', () => {
 		it('does not prefetch when the pointer leaves before the delay elapses', async () => {
 			const view = mountEnvelope()
 
-			view.vm.onEnvelopeMouseEnter()
+			view.vm.onEnvelopeMouseMove()
 			view.vm.onEnvelopeMouseLeave()
 			await vi.advanceTimersByTimeAsync(500)
 
@@ -842,10 +842,20 @@ describe('Envelope', () => {
 		it('does not prefetch drafts, which open the composer instead of a thread', async () => {
 			const view = mountEnvelope({ draft: true })
 
-			view.vm.onEnvelopeMouseEnter()
+			view.vm.onEnvelopeMouseMove()
 			await vi.advanceTimersByTimeAsync(500)
 
 			expect(store.fetchMessage).not.toHaveBeenCalled()
+		})
+
+		it('does not prefetch when scrolling moves a row under a stationary pointer', async () => {
+			const view = mountEnvelope()
+
+			await view.trigger('mouseenter')
+			await vi.advanceTimersByTimeAsync(500)
+
+			expect(store.fetchMessage).not.toHaveBeenCalled()
+			expect(store.fetchThread).not.toHaveBeenCalled()
 		})
 
 		it('prefetches on touchstart past the (shorter) touch delay', async () => {
