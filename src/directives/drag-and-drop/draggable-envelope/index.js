@@ -4,25 +4,29 @@
  */
 import { DraggableEnvelope } from './draggable-envelope.js'
 
-let instances = []
+// A directive instance belongs to exactly one row element. The previous
+// module-global array made every componentUpdated hook schedule a timer that
+// walked and updated every loaded row: N row updates became N x N work, while
+// the array also kept removed rows alive until unbind filtered it. WeakMap
+// gives direct ownership without itself retaining detached elements.
+const instancesByElement = new WeakMap()
 
 function onBind(el, binding) {
 	const instance = new DraggableEnvelope(el, binding.value)
-	instances.push(instance)
+	instancesByElement.set(el, instance)
 }
 
 function onUpdate(el, binding) {
-	const options = binding.value
-	setTimeout(() => {
-		instances.forEach((instance) => {
-			instance.options.selectedEnvelopes = options.selectedEnvelopes
-			instance.update(el, instance)
-		})
-	})
+	instancesByElement.get(el)?.update(binding.value)
 }
 
 function onUnbind(el) {
-	instances = instances.filter((instance) => instance.el !== el)
+	const instance = instancesByElement.get(el)
+	if (instance === undefined) {
+		return
+	}
+	instance.removeListeners(el)
+	instancesByElement.delete(el)
 }
 
 export const DraggableEnvelopeDirective = {

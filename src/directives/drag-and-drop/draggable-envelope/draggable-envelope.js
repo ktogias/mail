@@ -9,7 +9,14 @@ export class DraggableEnvelope {
 	constructor(el, options) {
 		this.el = el
 		this.options = options
-		this.registerListeners.bind(this)(el)
+
+		// Keep the exact references registered on the element. Calling
+		// bind() again in removeListeners() creates a different function
+		// and leaves the original listener (and this instance) retained.
+		this._onDragStart = this.onDragStart.bind(this)
+		this._onDragEnd = this.onDragEnd.bind(this)
+
+		this.registerListeners(el)
 		this.setInitialAttributes()
 	}
 
@@ -18,18 +25,18 @@ export class DraggableEnvelope {
 		this.el.classList.add('draggable-envelope')
 	}
 
-	update(el, instance) {
-		this.options = instance.options
+	update(options) {
+		this.options = options
 	}
 
 	registerListeners(el) {
-		el.addEventListener('dragstart', this.onDragStart.bind(this))
-		el.addEventListener('dragend', this.onDragEnd.bind(this))
+		el.addEventListener('dragstart', this._onDragStart)
+		el.addEventListener('dragend', this._onDragEnd)
 	}
 
 	removeListeners(el) {
-		el.removeEventListener('dragstart', this.onDragStart)
-		el.removeEventListener('dragend', this.onDragEnd)
+		el.removeEventListener('dragstart', this._onDragStart)
+		el.removeEventListener('dragend', this._onDragEnd)
 	}
 
 	onDragStart(event) {
