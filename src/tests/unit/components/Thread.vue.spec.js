@@ -408,6 +408,75 @@ describe('Thread', () => {
 		expect(envelopes[0].mailboxId).toBe(23)
 	})
 
+	describe('dedupeFolderCopies: one thread entry per real email (Message-ID)', () => {
+		// On Gmail, INBOX / "All Mail" / Important are folder views of one
+		// message, each synced as its own row with independently-refreshed
+		// flags. Confirmed live: unmarking the INBOX copy left a stale
+		// still-flagged [Gmail]/Important copy rendered as a seemingly
+		// separate, still-important "second message".
+		function mountThreadFor(threadId, envelopes, mailboxes) {
+			store.getEnvelope = vi.fn().mockImplementation((id) => envelopes.find((e) => e.databaseId === id))
+			store.getEnvelopesByThreadRootId = vi.fn().mockReturnValue(envelopes)
+			store.getMailboxes = vi.fn().mockReturnValue(mailboxes)
+			store.getMailbox = vi.fn().mockImplementation((id) => mailboxes.find((mb) => mb.databaseId === id))
+			return shallowMount(Thread, {
+				mocks: { $route: { params: { threadId } } },
+				store,
+				localVue,
+			})
+		}
+
+		const inbox = { databaseId: 10, name: 'INBOX', specialRole: 'inbox' }
+		const importantFolder = { databaseId: 11, name: '[Gmail]/Important', specialRole: '', specialUse: ['important'] }
+		const plainFolder = { databaseId: 12, name: 'Work', specialRole: '', specialUse: [] }
+
+		function copy(databaseId, mailboxId, messageId, extra = {}) {
+			return { accountId: 100, threadRootId: 'root', databaseId, mailboxId, messageId, from: [], to: [], cc: [], flags: {}, ...extra }
+		}
+
+		it('collapses same-Message-ID folder copies into one entry, preferring the opened copy', () => {
+			const view = mountThreadFor(1001, [
+				copy(1001, 10, '<one@test>', { flags: { important: false } }),
+				copy(1002, 11, '<one@test>', { flags: { important: true } }), // stale Important-folder copy
+			], [inbox, importantFolder])
+
+			expect(view.vm.thread).toHaveLength(1)
+			expect(view.vm.thread[0].databaseId).toBe(1001)
+		})
+
+		it('prefers the inbox copy when the opened row is not among the duplicates', () => {
+			// Opened id 2001 is its own distinct message; the OTHER email
+			// exists in a plain folder and the inbox -- inbox wins.
+			const view = mountThreadFor(2001, [
+				copy(2001, 10, '<opened@test>'),
+				copy(2002, 12, '<dup@test>'),
+				copy(2003, 10, '<dup@test>'),
+			], [inbox, plainFolder])
+
+			expect(view.vm.thread).toHaveLength(2)
+			const dup = view.vm.thread.find((e) => e.messageId === '<dup@test>')
+			expect(dup.databaseId).toBe(2003)
+		})
+
+		it('keeps genuinely different messages of the thread separate', () => {
+			const view = mountThreadFor(3001, [
+				copy(3001, 10, '<a@test>'),
+				copy(3002, 10, '<b@test>'),
+			], [inbox])
+
+			expect(view.vm.thread).toHaveLength(2)
+		})
+
+		it('keeps rows without a messageId as-is (nothing to group on)', () => {
+			const view = mountThreadFor(4001, [
+				copy(4001, 10, undefined),
+				copy(4002, 10, undefined),
+			], [inbox])
+
+			expect(view.vm.thread).toHaveLength(2)
+		})
+	})
+
 	describe('initiallyExpandedEnvelopeId', () => {
 		it('opens on the first (oldest) unread message instead of always the clicked/newest one', () => {
 			const view = shallowMount(Thread, {

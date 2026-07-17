@@ -139,9 +139,9 @@ export default {
 			}
 
 			if (limitEnvelopesToCurrentMailbox) {
-				return envelopes.filter((envelope) => envelope.mailboxId === currentMailbox.databaseId)
+				return this.dedupeFolderCopies(envelopes.filter((envelope) => envelope.mailboxId === currentMailbox.databaseId))
 			} else {
-				return envelopes.filter((envelope) => !mailboxesToIgnore.includes(envelope.mailboxId))
+				return this.dedupeFolderCopies(envelopes.filter((envelope) => !mailboxesToIgnore.includes(envelope.mailboxId)))
 			}
 		},
 
@@ -224,6 +224,58 @@ export default {
 	},
 
 	methods: {
+		// The same physical email can exist as one row per folder within
+		// the account -- on Gmail, INBOX / "All Mail" / Important are
+		// folder VIEWS of one message, each synced as its own copy with
+		// its own, independently-refreshed flags. Without dedup the
+		// thread view rendered the same email several times, and after a
+		// flag toggle the untouched copies kept their stale flags --
+		// confirmed live: unmarking the INBOX copy left a still-flagged
+		// [Gmail]/Important copy rendered as a seemingly separate,
+		// still-important "second message" while the whole thread had
+		// correctly moved to Other. Keep exactly one row per Message-ID:
+		// the copy the user actually opened wins (their actions must
+		// target the row they clicked), then the inbox copy, then a
+		// plain folder over special views, with a deterministic
+		// tie-break. Rows without a messageId cannot be grouped and are
+		// kept as-is.
+		dedupeFolderCopies(envelopes) {
+			const rank = (envelope) => {
+				if (envelope.databaseId === this.threadId) {
+					return 0
+				}
+				const mailbox = this.mainStore.getMailbox(envelope.mailboxId)
+				if (mailbox?.specialRole === 'inbox') {
+					return 1
+				}
+				if (!mailbox?.specialRole && (mailbox?.specialUse ?? []).length === 0) {
+					return 2
+				}
+				return 3
+			}
+
+			const seen = new Map()
+			const result = []
+			for (const envelope of envelopes) {
+				if (!envelope.messageId) {
+					result.push(envelope)
+					continue
+				}
+				const existingIndex = seen.get(envelope.messageId)
+				if (existingIndex === undefined) {
+					seen.set(envelope.messageId, result.length)
+					result.push(envelope)
+					continue
+				}
+				const existing = result[existingIndex]
+				if (rank(envelope) < rank(existing)
+					|| (rank(envelope) === rank(existing) && envelope.databaseId < existing.databaseId)) {
+					result[existingIndex] = envelope
+				}
+			}
+			return result
+		},
+
 		async updateSummary() {
 			if (this.thread.length <= 2 || !this.enabledThreadSummary) {
 				return
