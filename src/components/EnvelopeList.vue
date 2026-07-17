@@ -146,6 +146,14 @@
 				<AddIcon :size="16" />
 				{{ loadMoreLabel }}
 			</div>
+			<div
+				v-if="collapseButton && !loadingMore"
+				:key="'list-show-less-' + searchQuery"
+				class="load-more"
+				@click="$emit('collapse')">
+				<MinusIcon :size="16" />
+				{{ t('mail', 'Show less') }}
+			</div>
 			<div id="load-more-mail-messages" key="loadingMore" :class="{ 'icon-loading-small': loadingMore }" />
 		</transition-group>
 
@@ -182,6 +190,7 @@ import EmailRead from 'vue-material-design-icons/EmailOpenOutline.vue'
 import EmailUnread from 'vue-material-design-icons/EmailOutline.vue'
 import ImportantIcon from 'vue-material-design-icons/LabelVariant.vue'
 import ImportantOutlineIcon from 'vue-material-design-icons/LabelVariantOutline.vue'
+import MinusIcon from 'vue-material-design-icons/Minus.vue'
 import OpenInNewIcon from 'vue-material-design-icons/OpenInNew.vue'
 import AddIcon from 'vue-material-design-icons/Plus.vue'
 import ShareIcon from 'vue-material-design-icons/ShareOutline.vue'
@@ -209,6 +218,7 @@ export default {
 		EmailRead,
 		Actions,
 		AddIcon,
+		MinusIcon,
 		NcButton,
 		NcDialog,
 		ActionButton,
@@ -262,6 +272,15 @@ export default {
 		},
 
 		loadMoreButton: {
+			type: Boolean,
+			required: false,
+			default: false,
+		},
+
+		// "Show less" -- the inverse of loadMoreButton, shown by
+		// Mailbox.vue once a manual-paginate section is expanded past its
+		// initial page size. Emits 'collapse'.
+		collapseButton: {
 			type: Boolean,
 			required: false,
 			default: false,

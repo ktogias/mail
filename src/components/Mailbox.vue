@@ -42,9 +42,11 @@
 			:envelopes="visibleEnvelopesToShow"
 			:loading-more="loadingMore"
 			:load-more-button="showLoadMore"
+			:collapse-button="showCollapse"
 			:skip-transition="skipListTransition"
 			@delete="onDelete"
-			@load-more="loadMore" />
+			@load-more="loadMore"
+			@collapse="collapse" />
 	</div>
 </template>
 
@@ -134,6 +136,18 @@ export default {
 			default: false,
 		},
 
+		// Whether an expanded manual-paginate section can be shrunk back
+		// to its initial page size with a "Show less" control -- the
+		// inverse of "Load more". MailboxThread.vue was ALREADY passing
+		// this for the Favorites/Follow-up/Important sections, but no such
+		// prop existed here: once a section was expanded, the only way
+		// back to the compact view was a full page reload (reported live).
+		collapsible: {
+			type: Boolean,
+			required: false,
+			default: false,
+		},
+
 		// Test-only escape hatch: mounted()'s own auto-load/sync (below)
 		// must always run for every real instance, in production -- that
 		// used to be gated on the app-wide hasFetchedInitialEnvelopes
@@ -218,6 +232,15 @@ export default {
 
 		showLoadMore() {
 			return !this.endReached && this.paginate === 'manual'
+		},
+
+		// Only once there's genuinely something to hide: expanded, and
+		// more envelopes loaded than the initial page would show.
+		showCollapse() {
+			return this.paginate === 'manual'
+				&& this.collapsible
+				&& this.expanded
+				&& this.envelopes.length > this.initialPageSize
 		},
 
 		// A search-in-body term is the one search mode that isn't a local
@@ -510,6 +533,21 @@ export default {
 			} finally {
 				this.loadingMore = false
 			}
+		},
+
+		// The inverse of loadMore()'s expand step: shrink the section back
+		// to its initial page size. The already-fetched tail stays in the
+		// store (re-expanding is instant, and the idle-tail-trim mechanism
+		// handles its memory in due course) -- this only changes what's
+		// rendered. Collapsing removes dozens of rows at once, so the
+		// transition-group leave animation is suppressed for the same
+		// reason trimIdleTailNow() suppresses it.
+		collapse() {
+			this.skipListTransition = true
+			this.expanded = false
+			this.$nextTick(() => {
+				this.skipListTransition = false
+			})
 		},
 
 		async prefetchOtherMailboxes() {

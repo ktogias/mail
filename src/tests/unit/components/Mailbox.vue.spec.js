@@ -878,4 +878,69 @@ describe('Mailbox', () => {
 			})
 		})
 	})
+
+	describe('"Show less": collapsing an expanded manual-paginate section back to its initial page size', () => {
+		// MailboxThread.vue was already passing :collapsible="true" for
+		// the Favorites/Follow-up/Important sections, but Mailbox.vue had
+		// no such prop -- once "Load more" expanded a section, the only
+		// way back to the compact view was a full page reload.
+		function mountCollapsible(envelopeCount, { expanded = true, collapsible = true } = {}) {
+			const view = mountMailbox({
+				paginate: 'manual',
+				initialPageSize: 5,
+				collapsible,
+			})
+			const fakeEnvelopes = Array.from({ length: envelopeCount }, (_, i) => ({ databaseId: i + 1, flags: {} }))
+			vi.spyOn(view.vm, 'envelopes', 'get').mockReturnValue(fakeEnvelopes)
+			view.vm.expanded = expanded
+			return view
+		}
+
+		it('offers the collapse control once expanded past the initial page size', () => {
+			const view = mountCollapsible(12)
+
+			expect(view.vm.showCollapse).toBe(true)
+		})
+
+		it('does not offer it before the section was ever expanded', () => {
+			const view = mountCollapsible(12, { expanded: false })
+
+			expect(view.vm.showCollapse).toBe(false)
+		})
+
+		it('does not offer it when everything loaded already fits the initial page', () => {
+			const view = mountCollapsible(4)
+
+			expect(view.vm.showCollapse).toBe(false)
+		})
+
+		it('does not offer it for a section not marked collapsible', () => {
+			const view = mountCollapsible(12, { collapsible: false })
+
+			expect(view.vm.showCollapse).toBe(false)
+		})
+
+		it('collapse() shrinks the visible list back to the initial page size, suppressing the bulk-leave transition', async () => {
+			const view = mountCollapsible(12)
+			expect(view.vm.envelopesToShow).toHaveLength(12)
+
+			view.vm.collapse()
+
+			expect(view.vm.expanded).toBe(false)
+			expect(view.vm.envelopesToShow).toHaveLength(5)
+			expect(view.vm.skipListTransition).toBe(true)
+			await view.vm.$nextTick()
+			expect(view.vm.skipListTransition).toBe(false)
+		})
+
+		it('a later "Load more" simply re-expands to everything already loaded', () => {
+			const view = mountCollapsible(12)
+			view.vm.collapse()
+
+			view.vm.loadMore()
+
+			expect(view.vm.expanded).toBe(true)
+			expect(view.vm.envelopesToShow).toHaveLength(12)
+		})
+	})
 })
