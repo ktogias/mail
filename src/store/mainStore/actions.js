@@ -2525,11 +2525,25 @@ export default function mainStoreActions() {
 			return handleHttpAuthErrors(async () => {
 				// Change immediately and switch back on error
 				const oldState = envelope.flags.flagged
+				// Same shape as setEnvelopeImportant()'s own optimistic
+				// reclassify: bucket membership (Favorites in/out, the
+				// not:starred side of a compound Priority section) must
+				// move in the same instant as the star itself, not one or
+				// two round trips later. userInitiated lets the removal
+				// side apply immediately too -- see
+				// threadStillMatchesFlagPredicate().
+				const reclassify = () => {
+					const mailbox = this.mailboxes[envelope.mailboxId]
+					if (mailbox) {
+						this.reclassifyFlagBucketsMutation({ envelope, sourceMailbox: mailbox, userInitiated: true })
+					}
+				}
 				this.flagEnvelopeMutation({
 					envelope,
 					flag: 'flagged',
 					value: !oldState,
 				})
+				reclassify()
 
 				try {
 					await setEnvelopeFlags(envelope.databaseId, {
@@ -2546,7 +2560,14 @@ export default function mainStoreActions() {
 					const landed = await reconcileOrRevert({
 						envelope,
 						hasLanded: (authoritative) => authoritative?.flags?.flagged === !oldState,
-						revert: () => this.flagEnvelopeMutation({ envelope, flag: 'flagged', value: oldState }),
+						revert: () => {
+							this.flagEnvelopeMutation({ envelope, flag: 'flagged', value: oldState })
+							// The optimistic membership change above must
+							// roll back with the flag, through the same
+							// mutation, so the lists land back exactly
+							// where they were.
+							reclassify()
+						},
 					})
 					if (landed) {
 						return
@@ -2630,7 +2651,10 @@ export default function mainStoreActions() {
 			const reclassify = () => {
 				const mailbox = this.mailboxes[envelope.mailboxId]
 				if (mailbox) {
-					this.reclassifyFlagBucketsMutation({ envelope, sourceMailbox: mailbox })
+					// userInitiated: the removal side (out of Important
+					// when unmarking, out of Other when marking) applies
+					// immediately too -- see threadStillMatchesFlagPredicate().
+					this.reclassifyFlagBucketsMutation({ envelope, sourceMailbox: mailbox, userInitiated: true })
 				}
 			}
 
@@ -2661,10 +2685,7 @@ export default function mainStoreActions() {
 					} else {
 						this.removeEnvelopeTagMutation({ envelope, tagId: tag.id })
 					}
-					const mailbox = this.mailboxes[envelope.mailboxId]
-					if (mailbox) {
-						this.reclassifyFlagBucketsMutation({ envelope, sourceMailbox: mailbox })
-					}
+					reclassify()
 				}
 				this.refreshFlagPredicateBucketsForEnvelope(envelope)
 			} catch (error) {
@@ -4296,7 +4317,14 @@ export default function mainStoreActions() {
 		// it can't evaluate locally (subject:/body:/from:/etc.) is left
 		// alone, since silently guessing at an arbitrary search predicate
 		// would be worse than leaving it stale until its own real query.
-		reclassifyFlagBucketsMutation({ envelope, sourceMailbox, includeUnified = true, excludeListId = null }) {
+		//
+		// `userInitiated: true` marks a reclassification driven by the
+		// user's OWN explicit toggle (star/important), as opposed to a
+		// routine sync reporting flags -- it lets REMOVALS apply
+		// immediately even when the thread's full membership isn't known
+		// locally (see threadStillMatchesFlagPredicate()), which the
+		// sync-driven path deliberately never does.
+		reclassifyFlagBucketsMutation({ envelope, sourceMailbox, includeUnified = true, excludeListId = null, userInitiated = false }) {
 			const knownTokenPredicates = {
 				'is:starred': (flags) => flags?.flagged === true,
 				'not:starred': (flags) => flags?.flagged !== true,
@@ -4336,6 +4364,7 @@ export default function mainStoreActions() {
 								tokens,
 								knownTokenPredicates,
 								alreadyListed: list.includes(envelope.databaseId),
+								userInitiated,
 							})
 						: tokens.every((token) => knownTokenPredicates[token](envelope.flags))
 
@@ -4386,17 +4415,30 @@ export default function mainStoreActions() {
 		 * would undercut the whole point of avoiding unnecessary load.
 		 *
 		 * Otherwise -- this envelope doesn't match, and the local
-		 * knowledge isn't complete enough to rule out every other member
-		 * -- an already-listed thread is left exactly as it is; only the
-		 * bucket's own thread-aware server sync may remove it.
+		 * knowledge isn't complete enough to rule out every other member:
+		 *  - For a SYNC-driven reading (the default), an already-listed
+		 *    thread is left exactly as it is; only the bucket's own
+		 *    thread-aware server sync may remove it. This is the ratchet
+		 *    that fixed the Favorites flicker -- a routine background poll
+		 *    must never evict on partial knowledge.
+		 *  - For the user's OWN explicit toggle (`userInitiated: true`),
+		 *    the toggle direction is trusted immediately and the thread is
+		 *    removed: the common case is that the toggled message is the
+		 *    thread's only relevant member, and making the user wait
+		 *    seconds for their own click to take visible effect is worse
+		 *    than the rare mixed-thread case (an older sibling still
+		 *    matching) being wrong for one round trip -- the
+		 *    refreshFlagPredicateBucketsForEnvelope() backstop that both
+		 *    toggle actions already fire re-adds it authoritatively.
 		 *
 		 * @param root0
 		 * @param root0.envelope
 		 * @param root0.tokens
 		 * @param root0.knownTokenPredicates
 		 * @param root0.alreadyListed
+		 * @param root0.userInitiated
 		 */
-		threadStillMatchesFlagPredicate({ envelope, tokens, knownTokenPredicates, alreadyListed }) {
+		threadStillMatchesFlagPredicate({ envelope, tokens, knownTokenPredicates, alreadyListed, userInitiated = false }) {
 			const matchesTokens = (flags) => tokens.every((token) => knownTokenPredicates[token](flags))
 
 			if (!envelope.threadRootId) {
@@ -4412,6 +4454,12 @@ export default function mainStoreActions() {
 				return fullThreadIds.some((id) => matchesTokens(this.envelopes[id].flags))
 			}
 
+			if (userInitiated) {
+				// The envelope itself doesn't match (checked above), and
+				// this is the user's own toggle -- remove now, let the
+				// backstop resync correct the rare mixed-thread case.
+				return false
+			}
 			return alreadyListed
 		},
 		/**

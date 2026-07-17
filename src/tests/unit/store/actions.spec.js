@@ -1309,7 +1309,16 @@ describe('Vuex store actions', () => {
 		it('toggleEnvelopeFlagged triggers a refresh after a successful toggle', async () => {
 			MessageService.setEnvelopeFlags.mockResolvedValue({})
 			store.mailboxes[11].envelopeLists['is:starred'] = []
-			const envelope = { databaseId: 1, mailboxId: 11, flags: { flagged: false } }
+			// Registered via addEnvelopesMutation, not a bare object literal --
+			// same reasoning as the setEnvelopeImportant test below: now that
+			// toggleEnvelopeFlagged() reclassifies synchronously too, an
+			// unregistered envelope would put an id into envelopeLists that
+			// this.envelopes doesn't know, a state no production path reaches.
+			store.addEnvelopesMutation({
+				envelopes: [{ databaseId: 1, mailboxId: 11, dateInt: 1, flags: { flagged: false }, tags: [] }],
+				addToUnifiedMailboxes: false,
+			})
+			const envelope = store.envelopes[1]
 
 			await store.toggleEnvelopeFlagged(envelope)
 
@@ -1374,6 +1383,112 @@ describe('Vuex store actions', () => {
 			await store.setEnvelopeImportant(envelope, true)
 
 			expect(MessageService.syncEnvelopes.mock.calls.some((call) => call[1] === 11 && call[4] === 'is:pi-important')).toBe(true)
+		})
+	})
+
+	describe('user flag toggles move Priority Inbox list membership instantly, in BOTH directions', () => {
+		// Reported live: starring (or un-marking important) a message from
+		// the "Other" section or from an open message updated the badge
+		// instantly but the Favorites/Important section lists only caught
+		// up seconds later, once the fire-and-forget bucket resync's
+		// network round trips landed. Two gaps: toggleEnvelopeFlagged()
+		// had no synchronous reclassify at all (setEnvelopeImportant()
+		// already did), and threadStillMatchesFlagPredicate()'s
+		// deliberately-conservative removal ratchet -- correct for
+		// sync-driven readings -- also blocked the REMOVE half of the
+		// user's own explicit toggle. Both toggles now reclassify
+		// synchronously with `userInitiated: true`, which trusts the
+		// toggle direction for removals immediately; the routine
+		// sync-driven path keeps the ratchet unchanged (see the wave-1b
+		// describe above, whose eviction tests still pass untouched).
+		const importantTag = { id: 909, imapLabel: '$label1', displayName: 'Important', color: '#FF7A66' }
+
+		beforeEach(() => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			const account = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: { id: 'INBOX', name: 'INBOX', databaseId: 11, accountId: 13, specialRole: 'inbox' },
+			})
+			store.preferences['sort-order'] = 'newest'
+		})
+
+		function seedListedEnvelope(id, flags, tagIds = []) {
+			const envelope = { databaseId: id, mailboxId: 11, dateInt: id, threadRootId: `thread-${id}`, flags, tags: tagIds }
+			store.envelopes[id] = envelope
+			return envelope
+		}
+
+		it('starring from a compound Other bucket adds to is:starred AND leaves the not:starred list synchronously, before any network call resolves', async () => {
+			const envelope = seedListedEnvelope(42, { flagged: false, important: false })
+			store.mailboxes[11].envelopeLists['is:starred'] = []
+			store.mailboxes[11].envelopeLists['not:starred is:pi-other'] = [42]
+			// Never-resolving: if membership depended on the request
+			// settling, these assertions would run too early to pass.
+			MessageService.setEnvelopeFlags.mockReturnValue(new Promise(() => {}))
+
+			store.toggleEnvelopeFlagged(envelope)
+			await Promise.resolve()
+
+			expect(store.mailboxes[11].envelopeLists['is:starred']).toContain(42)
+			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-other']).not.toContain(42)
+		})
+
+		it('unstarring removes from is:starred synchronously, even when the thread\'s other members are not locally known', async () => {
+			// threadRootId is set and no envelope.thread member list is
+			// cached -- the exact case where a SYNC-driven reading must
+			// ratchet (leave it listed) but the user's own toggle must not.
+			const envelope = seedListedEnvelope(43, { flagged: true, important: false })
+			store.mailboxes[11].envelopeLists['is:starred'] = [43]
+			store.mailboxes[11].envelopeLists['not:starred is:pi-other'] = []
+			MessageService.setEnvelopeFlags.mockReturnValue(new Promise(() => {}))
+
+			store.toggleEnvelopeFlagged(envelope)
+			await Promise.resolve()
+
+			expect(store.mailboxes[11].envelopeLists['is:starred']).not.toContain(43)
+			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-other']).toContain(43)
+		})
+
+		it('restores list membership when the toggle fails and reconciliation confirms it never landed', async () => {
+			const envelope = seedListedEnvelope(44, { flagged: false, important: false }, [])
+			envelope.accountId = 13
+			store.mailboxes[11].envelopeLists['is:starred'] = []
+			store.mailboxes[11].envelopeLists['not:starred is:pi-other'] = [44]
+			MessageService.setEnvelopeFlags.mockRejectedValue(new Error('network error'))
+			MessageService.fetchEnvelope.mockResolvedValue({ flags: { flagged: false } })
+
+			await expect(store.toggleEnvelopeFlagged(envelope)).rejects.toThrow('network error')
+
+			expect(store.mailboxes[11].envelopeLists['is:starred']).not.toContain(44)
+			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-other']).toContain(44)
+		})
+
+		it('unmarking important removes from is:pi-important synchronously, before any network call resolves', async () => {
+			store.tags[importantTag.id] = importantTag
+			const envelope = seedListedEnvelope(45, { flagged: false, important: true }, [importantTag.id])
+			store.mailboxes[11].envelopeLists['not:starred is:pi-important'] = [45]
+			store.mailboxes[11].envelopeLists['not:starred is:pi-other'] = []
+			MessageService.setEnvelopeFlags.mockReturnValue(new Promise(() => {}))
+			MessageService.removeEnvelopeTag.mockReturnValue(new Promise(() => {}))
+
+			store.setEnvelopeImportant(envelope, false)
+			await Promise.resolve()
+
+			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-important']).not.toContain(45)
+			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-other']).toContain(45)
+		})
+
+		it('a sync-driven reading of the same partial-knowledge shape still ratchets (no regression of the Favorites-flicker fix)', () => {
+			seedListedEnvelope(46, { flagged: true, important: false })
+			store.mailboxes[11].envelopeLists['is:starred'] = [46]
+
+			// Same envelope, flag now off, arriving via the routine sync
+			// path (updateEnvelopeMutation) -- NOT a user toggle.
+			store.updateEnvelopeMutation({ envelope: { databaseId: 46, mailboxId: 11, threadRootId: 'thread-46', flags: { flagged: false, important: false } } })
+
+			expect(store.mailboxes[11].envelopeLists['is:starred']).toContain(46)
 		})
 	})
 
