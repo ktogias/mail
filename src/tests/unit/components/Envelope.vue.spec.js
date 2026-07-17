@@ -8,8 +8,10 @@ import { createPinia, setActivePinia } from 'pinia'
 import Envelope from '../../../components/Envelope.vue'
 import Nextcloud from '../../../mixins/Nextcloud.js'
 import useMainStore from '../../../store/mainStore.js'
+import * as ScrollActivityTracker from '../../../util/scrollActivityTracker.js'
 import * as ViewportPrefetchObserver from '../../../util/viewportPrefetchObserver.js'
 
+vi.mock('../../../util/scrollActivityTracker.js')
 vi.mock('../../../util/viewportPrefetchObserver.js')
 
 const localVue = createLocalVue()
@@ -790,6 +792,7 @@ describe('Envelope', () => {
 			vi.useFakeTimers()
 			store.fetchMessage = vi.fn().mockResolvedValue({})
 			store.fetchThread = vi.fn().mockResolvedValue([])
+			ScrollActivityTracker.isScrollingRecently.mockReturnValue(false)
 		})
 
 		afterEach(() => {
@@ -858,6 +861,37 @@ describe('Envelope', () => {
 			expect(store.fetchThread).not.toHaveBeenCalled()
 		})
 
+		it('does not arm the hover timer while the list is scrolling', async () => {
+			ScrollActivityTracker.isScrollingRecently.mockReturnValue(true)
+			const view = mountEnvelope()
+
+			view.vm.onEnvelopeMouseMove()
+			await vi.advanceTimersByTimeAsync(500)
+
+			expect(store.fetchMessage).not.toHaveBeenCalled()
+		})
+
+		it('cancels an already-ticking hover timer the moment scrolling starts', async () => {
+			const view = mountEnvelope()
+			view.vm.onEnvelopeMouseMove()
+
+			ScrollActivityTracker.isScrollingRecently.mockReturnValue(true)
+			view.vm.onEnvelopeMouseMove()
+			await vi.advanceTimersByTimeAsync(500)
+
+			expect(store.fetchMessage).not.toHaveBeenCalled()
+		})
+
+		it('does not arm the touchstart timer while the list is scrolling', async () => {
+			ScrollActivityTracker.isScrollingRecently.mockReturnValue(true)
+			const view = mountEnvelope()
+
+			view.vm.onEnvelopeTouchStart()
+			await vi.advanceTimersByTimeAsync(500)
+
+			expect(store.fetchMessage).not.toHaveBeenCalled()
+		})
+
 		it('prefetches on touchstart past the (shorter) touch delay', async () => {
 			// Mouse hover never gets a head start on touch devices -- a
 			// tap's own touchstart-to-navigation window is itself only
@@ -896,7 +930,20 @@ describe('Envelope', () => {
 	})
 
 	describe('mailbox-row viewport behavior', () => {
-		function mountMailboxRow() {
+		beforeEach(() => {
+			vi.useFakeTimers()
+			vi.clearAllMocks()
+			store.fetchMessage = vi.fn().mockResolvedValue({})
+			store.fetchThread = vi.fn().mockResolvedValue([])
+			ViewportPrefetchObserver.runIfViewportPrefetchSlotAvailable.mockImplementation((fn) => fn())
+			ScrollActivityTracker.isScrollingRecently.mockReturnValue(false)
+		})
+
+		afterEach(() => {
+			vi.useRealTimers()
+		})
+
+		function mountMailboxRow(flagOverrides = {}) {
 			return shallowMount(Envelope, {
 				mocks: { $route },
 				propsData: {
@@ -905,7 +952,7 @@ describe('Envelope', () => {
 						accountId: 123,
 						databaseId: 999,
 						from: [{ email: 'info@test.com' }],
-						flags: { seen: false, flagged: false, $junk: false, answered: false, hasAttachments: false, draft: false },
+						flags: { seen: false, flagged: false, $junk: false, answered: false, hasAttachments: false, draft: false, ...flagOverrides },
 					},
 				},
 				store,
@@ -913,10 +960,72 @@ describe('Envelope', () => {
 			})
 		}
 
-		it('does not start speculative body/thread work merely because a row crossed the viewport', () => {
-			mountMailboxRow()
+		it('registers its own element for viewport visibility on mount', () => {
+			const view = mountMailboxRow()
+
+			expect(ViewportPrefetchObserver.observeViewportVisibility).toHaveBeenCalledWith(view.vm.$el, expect.any(Function))
+		})
+
+		it('does not register a draft -- it opens the composer, not a thread', () => {
+			mountMailboxRow({ draft: true })
 
 			expect(ViewportPrefetchObserver.observeViewportVisibility).not.toHaveBeenCalled()
+		})
+
+		it('prefetches the message and thread once continuously visible past the settle delay', async () => {
+			mountMailboxRow()
+			const onIntersect = ViewportPrefetchObserver.observeViewportVisibility.mock.calls[0][1]
+
+			onIntersect(true)
+			expect(store.fetchMessage).not.toHaveBeenCalled()
+
+			await vi.advanceTimersByTimeAsync(300)
+
+			expect(store.fetchMessage).toHaveBeenCalledWith(999, { speculative: true })
+			expect(store.fetchThread).toHaveBeenCalledWith(999, { speculative: true })
+		})
+
+		it('does not prefetch if the row leaves the viewport before the settle delay elapses', async () => {
+			mountMailboxRow()
+			const onIntersect = ViewportPrefetchObserver.observeViewportVisibility.mock.calls[0][1]
+
+			onIntersect(true)
+			onIntersect(false)
+			await vi.advanceTimersByTimeAsync(500)
+
+			expect(store.fetchMessage).not.toHaveBeenCalled()
+		})
+
+		it('keeps waiting instead of firing while the list is still being scrolled, even once continuously visible past the settle delay', async () => {
+			ScrollActivityTracker.isScrollingRecently.mockReturnValue(true)
+			mountMailboxRow()
+			const onIntersect = ViewportPrefetchObserver.observeViewportVisibility.mock.calls[0][1]
+
+			onIntersect(true)
+			await vi.advanceTimersByTimeAsync(300)
+			expect(store.fetchMessage).not.toHaveBeenCalled()
+
+			// Scrolling stops -- the next re-check (still gated by the same
+			// settle delay) fires normally.
+			ScrollActivityTracker.isScrollingRecently.mockReturnValue(false)
+			await vi.advanceTimersByTimeAsync(300)
+
+			expect(store.fetchMessage).toHaveBeenCalledWith(999, { speculative: true })
+		})
+
+		it('gives up the retry loop for good once the row scrolls out of view while still waiting on scroll to settle', async () => {
+			ScrollActivityTracker.isScrollingRecently.mockReturnValue(true)
+			mountMailboxRow()
+			const onIntersect = ViewportPrefetchObserver.observeViewportVisibility.mock.calls[0][1]
+
+			onIntersect(true)
+			await vi.advanceTimersByTimeAsync(300)
+			onIntersect(false)
+
+			ScrollActivityTracker.isScrollingRecently.mockReturnValue(false)
+			await vi.advanceTimersByTimeAsync(1000)
+
+			expect(store.fetchMessage).not.toHaveBeenCalled()
 		})
 
 		it('removes the exact global resize listener when the row is destroyed', () => {
@@ -930,6 +1039,15 @@ describe('Envelope', () => {
 			expect(removeSpy).toHaveBeenCalledWith('resize', resizeListener)
 			addSpy.mockRestore()
 			removeSpy.mockRestore()
+		})
+
+		it('unobserves its element on destroy', () => {
+			const view = mountMailboxRow()
+			const el = view.vm.$el
+
+			view.destroy()
+
+			expect(ViewportPrefetchObserver.unobserveViewportVisibility).toHaveBeenCalledWith(el)
 		})
 	})
 })

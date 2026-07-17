@@ -577,10 +577,12 @@ import { DraggableEnvelopeDirective } from '../directives/drag-and-drop/draggabl
 import logger from '../logger.js'
 import AttachmentMixin from '../mixins/AttachmentMixin.js'
 import HoverPrefetchMixin from '../mixins/HoverPrefetchMixin.js'
+import ViewportPrefetchMixin from '../mixins/ViewportPrefetchMixin.js'
 import { buildRecipients as buildReplyRecipients } from '../ReplyBuilder.js'
 import { FOLLOW_UP_TAG_LABEL } from '../store/constants.js'
 import useMainStore from '../store/mainStore.js'
 import { mailboxHasRights } from '../util/acl.js'
+import { isScrollingRecently } from '../util/scrollActivityTracker.js'
 import { messageDateTime, shortRelativeDatetime } from '../util/shortRelativeDatetime.js'
 import { translateTagDisplayName } from '../util/tag.js'
 import { hiddenTags } from './tags.js'
@@ -637,7 +639,7 @@ export default {
 		draggableEnvelope: DraggableEnvelopeDirective,
 	},
 
-	mixins: [AttachmentMixin, HoverPrefetchMixin],
+	mixins: [AttachmentMixin, HoverPrefetchMixin, ViewportPrefetchMixin],
 
 	props: {
 		withReply: {
@@ -1022,6 +1024,21 @@ export default {
 	mounted() {
 		this.onWindowResize()
 		window.addEventListener('resize', this.onWindowResize)
+
+		// Drafts open the composer, not a thread view -- nothing here to
+		// prefetch. Mirrors onEnvelopeMouseMove()/onEnvelopeTouchStart().
+		// Gated the same way as those two against isScrollingRecently()
+		// inside armViewportPrefetchTimer() (ViewportPrefetchMixin.js) --
+		// a row settling into view while the list is still being scrolled
+		// past doesn't count as real intent, see scrollActivityTracker.js.
+		if (!this.draft) {
+			this.registerViewportPrefetch(() => {
+				return Promise.all([
+					this.mainStore.fetchMessage(this.data.databaseId, { speculative: true }).catch(() => {}),
+					this.mainStore.fetchThread(this.data.databaseId, { speculative: true }).catch(() => {}),
+				])
+			})
+		}
 	},
 
 	beforeDestroy() {
@@ -1029,6 +1046,7 @@ export default {
 		// exact matching removal, trimmed/destroyed rows remain reachable
 		// from window and every later resize performs their DOM measurements.
 		window.removeEventListener('resize', this.onWindowResize)
+		this.unregisterViewportPrefetch()
 	},
 
 	methods: {
@@ -1188,6 +1206,20 @@ export default {
 			if (this.draft) {
 				return
 			}
+			// mousemove already means the pointer device itself moved --
+			// content sliding under a stationary pointer during a scroll
+			// does not fire this event, fixed separately (see the mouseenter
+			// -> mousemove correction in nextcloud-mail-oauth-integration.md,
+			// 2026-07-16). This is an explicit belt-and-suspenders check on
+			// top of that, not a fix for a confirmed bug on its own: some
+			// trackpads report small genuine pointer motion while two-finger
+			// scrolling, and this keeps that case from arming a dwell timer
+			// too. Cancel rather than merely skip, in case one is already
+			// ticking from just before scrolling started.
+			if (isScrollingRecently()) {
+				this.cancelHoverPrefetch()
+				return
+			}
 			this.startHoverPrefetch(() => {
 				this.mainStore.fetchMessage(this.data.databaseId, { speculative: true }).catch(() => {})
 				this.mainStore.fetchThread(this.data.databaseId, { speculative: true }).catch(() => {})
@@ -1204,6 +1236,12 @@ export default {
 			// needs its own much shorter delay instead of reusing the
 			// mouse one.
 			if (this.draft) {
+				return
+			}
+			// A tap landing right as a fling-scroll is still decelerating
+			// isn't real intent on this particular row either -- same
+			// reasoning as onEnvelopeMouseMove() above.
+			if (isScrollingRecently()) {
 				return
 			}
 			this.startTouchPrefetch(() => {

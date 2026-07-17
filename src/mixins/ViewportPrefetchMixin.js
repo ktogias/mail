@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+import { isScrollingRecently } from '../util/scrollActivityTracker.js'
 import { observeViewportVisibility, runIfViewportPrefetchSlotAvailable, unobserveViewportVisibility } from '../util/viewportPrefetchObserver.js'
 
 // How long a row must stay continuously visible before its prefetch
@@ -26,14 +27,30 @@ export default {
 		registerViewportPrefetch(callback) {
 			observeViewportVisibility(this.$el, (isIntersecting) => {
 				if (isIntersecting) {
-					this.viewportPrefetchTimer = setTimeout(() => {
-						runIfViewportPrefetchSlotAvailable(callback)
-					}, VIEWPORT_PREFETCH_SETTLE_MS)
+					this.armViewportPrefetchTimer(callback)
 				} else if (this.viewportPrefetchTimer !== null) {
 					clearTimeout(this.viewportPrefetchTimer)
 					this.viewportPrefetchTimer = null
 				}
 			})
+		},
+
+		armViewportPrefetchTimer(callback) {
+			this.viewportPrefetchTimer = setTimeout(() => {
+				if (isScrollingRecently()) {
+					// Still visible, but the list itself is still moving --
+					// this row merely passed through view during an active
+					// scroll, not a settled pause. Keep waiting rather than
+					// firing; if it scrolls back out of view first, the
+					// isIntersecting callback above cancels this for good
+					// (naturally bounded -- either scrolling stops, or the
+					// row leaves the viewport).
+					this.armViewportPrefetchTimer(callback)
+					return
+				}
+				this.viewportPrefetchTimer = null
+				runIfViewportPrefetchSlotAvailable(callback)
+			}, VIEWPORT_PREFETCH_SETTLE_MS)
 		},
 
 		// Call from the host component's own beforeDestroy(). NOT
