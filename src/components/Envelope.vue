@@ -49,7 +49,7 @@
 					v-else-if="threadCarriesStarredOnly"
 					:size="22"
 					fill-color="#f9cf3d"
-					class="app-content-list-item-star favorite-icon-style"
+					class="app-content-list-item-star favorite-icon-style thread-context-badge--favorite"
 					:class="{ 'one-line': oneLineLayout, 'favorite-icon-style': !oneLineLayout }"
 					:title="t('mail', 'The conversation has a favorite message')" />
 				<ImportantIcon
@@ -63,7 +63,7 @@
 					v-else-if="threadCarriesImportantOnly"
 					fill-color="#00679e"
 					:size="20"
-					class="app-content-list-item-star icon-important"
+					class="app-content-list-item-star icon-important thread-context-badge--important"
 					:class="{ 'important-one-line': oneLineLayout, 'icon-important': !oneLineLayout }"
 					:title="t('mail', 'The conversation has an important message')" />
 				<JunkIcon
@@ -1655,6 +1655,26 @@ export default {
 		top: 8px;
 		opacity: 1;
 	}
+}
+
+// The ordinary list badges deliberately use a background-colored stroke for
+// contrast. On a thread-context outline that stroke becomes the dominant
+// visible line, making the category signal look white instead of yellow/blue.
+.thread-context-badge--favorite,
+.thread-context-badge--important {
+	:deep(path) {
+		stroke-width: 0 !important;
+	}
+}
+
+.thread-context-badge--favorite:deep(path) {
+	fill: #f9cf3d !important;
+	stroke: #f9cf3d !important;
+}
+
+.thread-context-badge--important:deep(path) {
+	fill: #00679e !important;
+	stroke: #00679e !important;
 }
 
 .important-one-line.app-content-list-item-star:deep() {

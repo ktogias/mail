@@ -1113,6 +1113,13 @@ describe('Envelope', () => {
 			const view = mountRow({ searchQuery: 'is:starred' })
 
 			expect(view.vm.threadCarriesStarredOnly).toBe(true)
+			expect(view.find('.thread-context-badge--favorite').exists()).toBe(true)
+		})
+
+		it('marks the thread-important outline badge for its blue context styling', () => {
+			const view = mountRow({ searchQuery: 'not:starred is:pi-important' })
+
+			expect(view.find('.thread-context-badge--important').exists()).toBe(true)
 		})
 
 		it('does not offer it when the message itself is starred, or outside an is:starred list', () => {
