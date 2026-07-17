@@ -208,7 +208,10 @@
 			</div>
 		</template>
 
-		<Thread v-if="showThread" @delete="deleteMessage" />
+		<Thread
+			v-if="showThread"
+			@delete="deleteMessage"
+			@navigate-list="onShortcut" />
 		<NoMessageSelected v-else-if="hasEnvelopes" />
 	</AppContent>
 </template>

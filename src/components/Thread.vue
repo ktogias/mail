@@ -17,6 +17,30 @@
 						{{ threadSubject }}
 					</h2>
 				</div>
+				<div v-if="listNavigation" id="mail-thread-list-navigation">
+					<ButtonVue
+						data-test="newer-message"
+						type="tertiary-no-background"
+						:aria-label="t('mail', 'Newer message')"
+						:title="t('mail', 'Newer message')"
+						:disabled="!listNavigation.hasPrevious"
+						@click="navigateList('prev')">
+						<template #icon>
+							<ChevronLeftIcon :size="20" />
+						</template>
+					</ButtonVue>
+					<ButtonVue
+						data-test="older-message"
+						type="tertiary-no-background"
+						:aria-label="t('mail', 'Older message')"
+						:title="t('mail', 'Older message')"
+						:disabled="!listNavigation.hasNext"
+						@click="navigateList('next')">
+						<template #icon>
+							<ChevronRightIcon :size="20" />
+						</template>
+					</ButtonVue>
+				</div>
 			</div>
 			<ThreadSummary v-if="showSummaryBox" :loading="summaryLoading" :summary="summaryText" />
 			<ThreadEnvelope
@@ -45,8 +69,10 @@
 <script>
 import { showError } from '@nextcloud/dialogs'
 import { loadState } from '@nextcloud/initial-state'
-import { NcAppContentDetails as AppContentDetails } from '@nextcloud/vue'
+import { NcAppContentDetails as AppContentDetails, NcButton as ButtonVue } from '@nextcloud/vue'
 import { mapStores } from 'pinia'
+import ChevronLeftIcon from 'vue-material-design-icons/ChevronLeft.vue'
+import ChevronRightIcon from 'vue-material-design-icons/ChevronRight.vue'
 import Error from './Error.vue'
 import Loading from './Loading.vue'
 import ThreadEnvelope from './ThreadEnvelope.vue'
@@ -65,6 +91,9 @@ export default {
 	components: {
 		ThreadSummary,
 		AppContentDetails,
+		ButtonVue,
+		ChevronLeftIcon,
+		ChevronRightIcon,
 		Error,
 		Loading,
 		ThreadEnvelope,
@@ -100,6 +129,27 @@ export default {
 		...mapStores(useMainStore),
 		threadId() {
 			return parseInt(this.$route.params.threadId, 10)
+		},
+
+		// This is the same context Thread.vue already uses for neighbor
+		// prefetching. It is the only reliable way to identify the source
+		// list when Priority Inbox renders several lists for one route.
+		listNavigation() {
+			const openedFrom = this.mainStore.lastOpenedFromList
+			if (!openedFrom || !this.mainStore.getMailbox(openedFrom.mailboxId)) {
+				return undefined
+			}
+
+			const list = this.mainStore.getEnvelopes(openedFrom.mailboxId, openedFrom.query)
+			const openIndex = list.findIndex((envelope) => envelope?.databaseId === this.threadId)
+			if (openIndex === -1) {
+				return undefined
+			}
+
+			return {
+				hasPrevious: list[openIndex - 1] !== undefined,
+				hasNext: list[openIndex + 1] !== undefined,
+			}
 		},
 
 		thread() {
@@ -224,6 +274,18 @@ export default {
 	},
 
 	methods: {
+		navigateList(direction) {
+			if ((direction === 'prev' && !this.listNavigation?.hasPrevious)
+				|| (direction === 'next' && !this.listNavigation?.hasNext)) {
+				return
+			}
+
+			// Mailbox.vue remains the single owner of neighbor-route
+			// navigation. MailboxThread forwards this event through the
+			// same bus payload used by the existing arrow-key shortcuts.
+			this.$emit('navigate-list', { srcKey: direction })
+		},
+
 		// The same physical email can exist as one row per folder within
 		// the account -- on Gmail, INBOX / "All Mail" / Important are
 		// folder VIEWS of one message, each synced as its own copy with
@@ -1015,6 +1077,13 @@ export default {
 			font-weight: bold;
 		}
 	}
+}
+
+#mail-thread-list-navigation {
+	display: flex;
+	flex: 0 0 auto;
+	gap: var(--default-grid-baseline);
+	margin-inline-end: var(--default-grid-baseline);
 }
 
 @media only screen and (max-width: #{variables.$breakpoint-mobile}) {

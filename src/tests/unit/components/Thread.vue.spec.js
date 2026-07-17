@@ -1010,6 +1010,62 @@ describe('Thread', () => {
 		})
 	})
 
+	describe('list navigation controls', () => {
+		function mountAt(threadId) {
+			return shallowMount(Thread, {
+				mocks: {
+					$route: { params: { mailboxId: 50, threadId } },
+				},
+				store,
+				localVue,
+				data: () => ({ loading: false }),
+			})
+		}
+
+		beforeEach(() => {
+			store.getMailbox = vi.fn().mockImplementation((id) => (id === 50 ? { databaseId: 50 } : undefined))
+			store.getEnvelopes = vi.fn().mockReturnValue([
+				{ databaseId: 8001 },
+				{ databaseId: 8002 },
+				{ databaseId: 8003 },
+			])
+			store.fetchThread = vi.fn().mockResolvedValue([])
+			store.lastOpenedFromList = { mailboxId: 50, query: 'is:starred' }
+		})
+
+		it('emits the existing shortcut payload for each available neighbor', () => {
+			const view = mountAt(8002)
+
+			expect(view.vm.listNavigation).toEqual({ hasPrevious: true, hasNext: true })
+
+			view.vm.navigateList('prev')
+			view.vm.navigateList('next')
+
+			expect(view.emitted('navigate-list')).toEqual([
+				[{ srcKey: 'prev' }],
+				[{ srcKey: 'next' }],
+			])
+		})
+
+		it('does not emit a shortcut beyond an unavailable boundary', () => {
+			const view = mountAt(8001)
+
+			expect(view.vm.listNavigation).toEqual({ hasPrevious: false, hasNext: true })
+
+			view.vm.navigateList('prev')
+
+			expect(view.emitted('navigate-list')).toBeUndefined()
+		})
+
+		it('hides controls when the thread was not opened from a loaded list', () => {
+			store.lastOpenedFromList = null
+			const view = mountAt(8002)
+
+			expect(view.vm.listNavigation).toBeUndefined()
+			expect(view.find('#mail-thread-list-navigation').exists()).toBe(false)
+		})
+	})
+
 	describe('onRequestDeleteOne/onRequestArchiveOne (ThreadEnvelope.vue requests them instead of calling the store itself)', () => {
 		// Deleting/archiving a single message from within an open thread
 		// used to call deleteMessage()/moveMessage() directly from
