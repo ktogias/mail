@@ -1028,6 +1028,71 @@ describe('Envelope', () => {
 			expect(store.fetchMessage).not.toHaveBeenCalled()
 		})
 
+		// Profiled live at ~2.5% of main-thread samples: every row ran the
+		// attachment-chip measurement (several layout-forcing DOM reads)
+		// synchronously on mount and on every resize event. Rows without
+		// attachments skip it entirely; the rest coalesce onto one
+		// animation frame.
+		it('does not schedule any attachment measurement for a row without attachments', () => {
+			const rafSpy = vi.spyOn(window, 'requestAnimationFrame')
+
+			const view = mountMailboxRow()
+			view.vm.onWindowResize()
+
+			expect(rafSpy).not.toHaveBeenCalled()
+			rafSpy.mockRestore()
+		})
+
+		it('coalesces a resize burst into one scheduled measurement for a row with attachments', async () => {
+			const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(42)
+			const view = mountMailboxRow()
+			await view.setProps({
+				data: { ...view.vm.data, attachments: [{ fileName: 'a.pdf' }] },
+			})
+			rafSpy.mockClear() // the late-arrival watcher may already have scheduled once
+
+			view.vm.attachmentMeasureRaf = null
+			view.vm.onWindowResize()
+			view.vm.onWindowResize()
+			view.vm.onWindowResize()
+
+			expect(rafSpy).toHaveBeenCalledTimes(1)
+			rafSpy.mockRestore()
+		})
+
+		it('measures once attachments arrive late (preview enhancer), so the chips still appear', async () => {
+			const rafSpy = vi.spyOn(window, 'requestAnimationFrame').mockImplementation((cb) => {
+				cb()
+				return 1
+			})
+			const view = mountMailboxRow()
+			const countSpy = vi.spyOn(view.vm, 'countPossibleAttachements').mockImplementation(() => {})
+
+			view.setProps({
+				data: { ...view.vm.data, attachments: [{ fileName: 'a.pdf' }] },
+			})
+			await view.vm.$nextTick()
+
+			expect(countSpy).toHaveBeenCalled()
+			rafSpy.mockRestore()
+		})
+
+		it('cancels a pending measurement frame on destroy', async () => {
+			vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(77)
+			const cancelSpy = vi.spyOn(window, 'cancelAnimationFrame')
+			const view = mountMailboxRow()
+			await view.setProps({
+				data: { ...view.vm.data, attachments: [{ fileName: 'a.pdf' }] },
+			})
+			view.vm.attachmentMeasureRaf = null
+			view.vm.onWindowResize()
+
+			view.destroy()
+
+			expect(cancelSpy).toHaveBeenCalledWith(77)
+			vi.restoreAllMocks()
+		})
+
 		it('removes the exact global resize listener when the row is destroyed', () => {
 			const addSpy = vi.spyOn(window, 'addEventListener')
 			const removeSpy = vi.spyOn(window, 'removeEventListener')
