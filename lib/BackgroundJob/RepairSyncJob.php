@@ -24,6 +24,13 @@ use OCP\IUserManager;
 use Psr\Log\LoggerInterface;
 
 class RepairSyncJob extends TimedJob {
+	/** @var int How many times to try taking a mailbox's sync locks */
+	public const MAX_LOCK_ATTEMPTS = 3;
+
+	/** @var int Long enough for an in-flight routine sync pass (seconds on
+	 *           the largest mailboxes) to finish and release its locks */
+	public const LOCK_RETRY_DELAY_SECONDS = 10;
+
 	public function __construct(
 		ITimeFactory $time,
 		private SyncService $syncService,
@@ -83,23 +90,50 @@ class RepairSyncJob extends TimedJob {
 				continue;
 			}
 
-			try {
-				if ($this->syncService->repairSync($account, $mailbox) > 0) {
-					$rebuildThreads = true;
+			for ($attempt = 1; $attempt <= self::MAX_LOCK_ATTEMPTS; $attempt++) {
+				try {
+					if ($this->syncService->repairSync($account, $mailbox) > 0) {
+						$rebuildThreads = true;
+					}
+					break;
+				} catch (MailboxLockedException $e) {
+					// A lock collision only means a routine sync pass of this
+					// mailbox is in flight right now. Those passes last
+					// seconds; giving up immediately would postpone this
+					// mailbox's repair by a whole week for a transient
+					// condition, so wait out the in-flight pass and retry a
+					// bounded number of times before moving on.
+					if ($attempt === self::MAX_LOCK_ATTEMPTS) {
+						$this->logger->warning("Mailbox {$mailbox->getId()} stayed locked through " . self::MAX_LOCK_ATTEMPTS . ' repair attempts, leaving it for the next run', [
+							'exception' => $e,
+						]);
+						break;
+					}
+					$this->pause(self::LOCK_RETRY_DELAY_SECONDS);
+				} catch (ServiceException $e) {
+					// One broken mailbox must not abort the repair of every
+					// mailbox after it in iteration order -- the same
+					// starvation shape ImapToDbSynchronizer::syncAccount()
+					// already guards against for the regular sync pass. No
+					// retry here: unlike a lock collision, a real failure
+					// (IMAP error, DB error) is unlikely to clear in seconds.
+					$this->logger->warning("Repair sync failed for mailbox {$mailbox->getId()}, continuing with the account's remaining mailboxes", [
+						'exception' => $e,
+					]);
+					break;
 				}
-			} catch (MailboxLockedException|ServiceException $e) {
-				// One locked or broken mailbox must not abort the repair of
-				// every mailbox after it in iteration order -- the same
-				// starvation shape ImapToDbSynchronizer::syncAccount()
-				// already guards against for the regular sync pass.
-				$this->logger->warning("Repair sync failed for mailbox {$mailbox->getId()}, continuing with the account's remaining mailboxes", [
-					'exception' => $e,
-				]);
 			}
 		}
 
 		$this->dispatcher->dispatchTyped(
 			new SynchronizationEvent($account, $this->logger, $rebuildThreads),
 		);
+	}
+
+	/**
+	 * Seam for unit tests: sleeping for real would slow the suite down.
+	 */
+	protected function pause(int $seconds): void {
+		sleep($seconds);
 	}
 }

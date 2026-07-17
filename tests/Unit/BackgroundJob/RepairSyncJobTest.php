@@ -18,6 +18,7 @@ use OCA\Mail\Db\Mailbox;
 use OCA\Mail\Db\MailboxMapper;
 use OCA\Mail\Events\SynchronizationEvent;
 use OCA\Mail\Exception\MailboxLockedException;
+use OCA\Mail\Exception\ServiceException;
 use OCA\Mail\Service\AccountService;
 use OCA\Mail\Service\Sync\SyncService;
 use OCP\AppFramework\Utility\ITimeFactory;
@@ -35,7 +36,7 @@ class RepairSyncJobTest extends TestCase {
 	private MailboxMapper&MockObject $mailboxMapper;
 	private LoggerInterface&MockObject $logger;
 	private IEventDispatcher&MockObject $dispatcher;
-	private RepairSyncJob $job;
+	private RepairSyncJob&MockObject $job;
 
 	protected function setUp(): void {
 		parent::setUp();
@@ -49,34 +50,31 @@ class RepairSyncJobTest extends TestCase {
 
 		$timeFactory = $this->createStub(ITimeFactory::class);
 		$timeFactory->method('getTime')->willReturn(700000);
-		$this->job = new RepairSyncJob(
-			$timeFactory,
-			$this->syncService,
-			$this->accountService,
-			$this->userManager,
-			$this->mailboxMapper,
-			$this->createStub(IJobList::class),
-			$this->logger,
-			$this->dispatcher,
-		);
+		// Partial mock: only pause() is replaced, so the retry loop runs
+		// for real without the test suite sleeping for real.
+		$this->job = $this->getMockBuilder(RepairSyncJob::class)
+			->setConstructorArgs([
+				$timeFactory,
+				$this->syncService,
+				$this->accountService,
+				$this->userManager,
+				$this->mailboxMapper,
+				$this->createStub(IJobList::class),
+				$this->logger,
+				$this->dispatcher,
+			])
+			->onlyMethods(['pause'])
+			->getMock();
 	}
 
-	public function testContinuesAfterALockedMailboxAndRebuildsThreadsForALaterRepair(): void {
-		$mailAccount = new MailAccount();
-		$mailAccount->setId(13);
-		$mailAccount->setUserId('user');
-		$mailAccount->setInboundPassword('test-password');
-		$account = new Account($mailAccount);
+	public function testContinuesAfterAPersistentlyLockedMailboxAndRebuildsThreadsForALaterRepair(): void {
+		$account = $this->account();
 		$lockedMailbox = $this->mailbox(149, 'INBOX');
 		$repairableMailbox = $this->mailbox(150, 'Forum');
-		$user = $this->createConfiguredMock(IUser::class, [
-			'isEnabled' => true,
-		]);
+		$this->seedAccountLookups($account, [$lockedMailbox, $repairableMailbox]);
 
-		$this->accountService->expects(self::once())->method('findById')->with(13)->willReturn($account);
-		$this->userManager->expects(self::once())->method('get')->with('user')->willReturn($user);
-		$this->mailboxMapper->expects(self::once())->method('findAll')->with($account)->willReturn([$lockedMailbox, $repairableMailbox]);
-		$this->syncService->expects(self::exactly(2))
+		// The locked mailbox burns all attempts, the healthy one succeeds
+		$this->syncService->expects(self::exactly(RepairSyncJob::MAX_LOCK_ATTEMPTS + 1))
 			->method('repairSync')
 			->willReturnCallback(static function (Account $actualAccount, Mailbox $mailbox) use ($account, $lockedMailbox): int {
 				self::assertSame($account, $actualAccount);
@@ -85,11 +83,84 @@ class RepairSyncJobTest extends TestCase {
 				}
 				return 1;
 			});
+		$this->job->expects(self::exactly(RepairSyncJob::MAX_LOCK_ATTEMPTS - 1))
+			->method('pause')
+			->with(RepairSyncJob::LOCK_RETRY_DELAY_SECONDS);
 		$this->logger->expects(self::once())->method('warning');
 		$this->dispatcher->expects(self::once())
 			->method('dispatchTyped')
 			->with(self::callback(static fn (SynchronizationEvent $event) => $event->isRebuildThreads()));
 
+		$this->startJob();
+	}
+
+	public function testRetriesATransientlyLockedMailboxWithoutSkippingItsRepair(): void {
+		$account = $this->account();
+		$mailbox = $this->mailbox(149, 'INBOX');
+		$this->seedAccountLookups($account, [$mailbox]);
+
+		// First attempt collides with an in-flight sync pass, second succeeds
+		$attempt = 0;
+		$this->syncService->expects(self::exactly(2))
+			->method('repairSync')
+			->willReturnCallback(static function () use (&$attempt, $mailbox): int {
+				if (++$attempt === 1) {
+					throw MailboxLockedException::from($mailbox);
+				}
+				return 1;
+			});
+		$this->job->expects(self::once())
+			->method('pause')
+			->with(RepairSyncJob::LOCK_RETRY_DELAY_SECONDS);
+		$this->logger->expects(self::never())->method('warning');
+		$this->dispatcher->expects(self::once())
+			->method('dispatchTyped')
+			->with(self::callback(static fn (SynchronizationEvent $event) => $event->isRebuildThreads()));
+
+		$this->startJob();
+	}
+
+	public function testDoesNotRetryARealFailureAndContinuesWithTheRemainingMailboxes(): void {
+		$account = $this->account();
+		$brokenMailbox = $this->mailbox(149, 'INBOX');
+		$repairableMailbox = $this->mailbox(150, 'Forum');
+		$this->seedAccountLookups($account, [$brokenMailbox, $repairableMailbox]);
+
+		$this->syncService->expects(self::exactly(2))
+			->method('repairSync')
+			->willReturnCallback(static function (Account $actualAccount, Mailbox $mailbox) use ($brokenMailbox): int {
+				if ($mailbox === $brokenMailbox) {
+					throw new ServiceException('IMAP exploded');
+				}
+				return 1;
+			});
+		$this->job->expects(self::never())->method('pause');
+		$this->logger->expects(self::once())->method('warning');
+		$this->dispatcher->expects(self::once())
+			->method('dispatchTyped')
+			->with(self::callback(static fn (SynchronizationEvent $event) => $event->isRebuildThreads()));
+
+		$this->startJob();
+	}
+
+	private function account(): Account {
+		$mailAccount = new MailAccount();
+		$mailAccount->setId(13);
+		$mailAccount->setUserId('user');
+		$mailAccount->setInboundPassword('test-password');
+		return new Account($mailAccount);
+	}
+
+	private function seedAccountLookups(Account $account, array $mailboxes): void {
+		$user = $this->createConfiguredMock(IUser::class, [
+			'isEnabled' => true,
+		]);
+		$this->accountService->expects(self::once())->method('findById')->with(13)->willReturn($account);
+		$this->userManager->expects(self::once())->method('get')->with('user')->willReturn($user);
+		$this->mailboxMapper->expects(self::once())->method('findAll')->with($account)->willReturn($mailboxes);
+	}
+
+	private function startJob(): void {
 		$this->job->setArgument(['accountId' => 13]);
 		$this->job->setLastRun(0);
 		$this->job->start($this->createMock(JobList::class));
