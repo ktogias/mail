@@ -1120,6 +1120,34 @@ describe('Vuex store actions', () => {
 			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-other']).toEqual([202])
 		})
 
+		// Profile-guided (three public Firefox profiles, 2026-07-17): the
+		// unconditional fresh-array Vue.set at the end of reclassify
+		// re-triggered a full list re-render for every eligible bucket on
+		// every reclassified envelope even when membership was completely
+		// unchanged -- 8.9% of main-thread samples across a 48-second
+		// unresponsive spell, feeding the selector-matching restyle storms
+		// that dominated the rest. A no-op must leave the array UNTOUCHED
+		// (same reference), so nothing downstream re-renders.
+		it('a reclassification that changes nothing leaves the list array untouched (same reference, no re-render trigger)', () => {
+			seedKnownEnvelope(80, true, { threadRootId: 'thread-80' })
+			const starredList = [80]
+			store.mailboxes[11].envelopeLists['is:starred'] = starredList
+
+			store.reclassifyFlagBucketsMutation({ envelope: store.envelopes[80], sourceMailbox: store.mailboxes[11] })
+
+			expect(store.mailboxes[11].envelopeLists['is:starred']).toBe(starredList)
+		})
+
+		it('still rewrites the list when stale ids (unknown envelopes) need dropping, even without a membership change', () => {
+			seedKnownEnvelope(81, true, { threadRootId: 'thread-81' })
+			// 999999 is not in store.envelopes -- a leftover pointing nowhere.
+			store.mailboxes[11].envelopeLists['is:starred'] = [81, 999999]
+
+			store.reclassifyFlagBucketsMutation({ envelope: store.envelopes[81], sourceMailbox: store.mailboxes[11] })
+
+			expect(store.mailboxes[11].envelopeLists['is:starred']).toEqual([81])
+		})
+
 		it('does not touch a flag-predicate bucket that is not loaded', () => {
 			seedKnownEnvelope(72, false)
 			// Neither is:starred nor not:starred loaded for this mailbox.

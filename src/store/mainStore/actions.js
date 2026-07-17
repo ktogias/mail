@@ -4373,17 +4373,35 @@ export default function mainStoreActions() {
 						continue
 					}
 					const list = mailbox.envelopeLists[listId]
+					const currentlyListed = list.includes(envelope.databaseId)
 					const withoutSelf = list.filter((id) => id !== envelope.databaseId && this.envelopes[id] !== undefined)
+					// Ids the filter above dropped beyond the envelope's own
+					// entry: leftovers pointing at envelopes the store no
+					// longer knows -- their removal is a real change too.
+					const hasStaleIds = withoutSelf.length !== list.length - (currentlyListed ? 1 : 0)
 					const isThreaded = this.getPreference('layout-message-view', 'threaded') === 'threaded'
 					const shouldContain = isThreaded
 						? this.threadStillMatchesFlagPredicate({
 								envelope,
 								tokens,
 								knownTokenPredicates,
-								alreadyListed: list.includes(envelope.databaseId),
+								alreadyListed: currentlyListed,
 								userInitiated,
 							})
 						: tokens.every((token) => knownTokenPredicates[token].matches(envelope.flags))
+
+					// No-op guard: membership already correct and nothing
+					// stale to drop -- leave the array UNTOUCHED. The
+					// previous unconditional fresh-array write re-triggered
+					// a full list re-render (and its style-recalculation
+					// pass) for every eligible bucket on every reclassified
+					// envelope, outcome-changing or not -- measured live at
+					// 8.9% of main-thread samples across a 48-second
+					// unresponsive spell, feeding the selector-matching
+					// restyle storms that dominated the rest of the profile.
+					if (shouldContain === currentlyListed && !hasStaleIds) {
+						continue
+					}
 
 					Vue.set(
 						mailbox.envelopeLists,
