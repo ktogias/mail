@@ -837,6 +837,80 @@ class MessageMapperTest extends TestCase {
 	}
 
 	/**
+	 * Partition semantics for the priority inbox: "Other" must be the
+	 * REMAINDER of "Important" (Gmail's "everything else" model), not an
+	 * independent attribute bucket. Under the plain thread-wide EXISTS
+	 * match, a mixed thread (one important member, one not) matched BOTH
+	 * is:pi-important (some member important) and the old
+	 * is:pi-other = Flag::not(IMPORTANT) (some member not important) --
+	 * confirmed live, the same conversation listed in both sections at
+	 * once. is:pi-other now parses to a thread-EXCLUDED flag (see
+	 * SearchQuery::getThreadExcludedFlags()): NOT EXISTS a member with
+	 * flag_important, so a thread belongs to exactly one of the two.
+	 */
+	public function testFindIdsByQueryThreadedOtherExcludesThreadsWithAnyImportantMember(): void {
+		$mailbox = new Mailbox();
+		$mailbox->setId(2);
+		$sortOrder = 'DESC';
+		$qb = $this->db->getQueryBuilder();
+
+		$values = [
+			// Thread A (mixed): older message important, newest reply not.
+			[
+				'id' => 20,
+				'uid' => $qb->createNamedParameter(420, IQueryBuilder::PARAM_INT),
+				'message_id' => $qb->createNamedParameter('<pa1@thread.com>'),
+				'mailbox_id' => $qb->createNamedParameter(2, IQueryBuilder::PARAM_INT),
+				'subject' => $qb->createNamedParameter('Thread A'),
+				'sent_at' => $qb->createNamedParameter(1000, IQueryBuilder::PARAM_INT),
+				'thread_root_id' => $qb->createNamedParameter('thread-pa'),
+				'flag_important' => $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL),
+			],
+			[
+				'id' => 21,
+				'uid' => $qb->createNamedParameter(421, IQueryBuilder::PARAM_INT),
+				'message_id' => $qb->createNamedParameter('<pa2@thread.com>'),
+				'mailbox_id' => $qb->createNamedParameter(2, IQueryBuilder::PARAM_INT),
+				'subject' => $qb->createNamedParameter('Re: Thread A'),
+				'sent_at' => $qb->createNamedParameter(2000, IQueryBuilder::PARAM_INT),
+				'thread_root_id' => $qb->createNamedParameter('thread-pa'),
+				'flag_important' => $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL),
+			],
+			// Thread B: no important member at all.
+			[
+				'id' => 22,
+				'uid' => $qb->createNamedParameter(422, IQueryBuilder::PARAM_INT),
+				'message_id' => $qb->createNamedParameter('<pb1@thread.com>'),
+				'mailbox_id' => $qb->createNamedParameter(2, IQueryBuilder::PARAM_INT),
+				'subject' => $qb->createNamedParameter('Thread B'),
+				'sent_at' => $qb->createNamedParameter(3000, IQueryBuilder::PARAM_INT),
+				'thread_root_id' => $qb->createNamedParameter('thread-pb'),
+				'flag_important' => $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL),
+			],
+		];
+
+		foreach ($values as $value) {
+			$insert = $qb->insert($this->mapper->getTableName())->values($value);
+			$insert->executeStatement();
+		}
+
+		// "Other": only thread B -- the mixed thread A is excluded because
+		// one of its members is important, even though its newest (and
+		// representative) message is not.
+		$otherQuery = new SearchQuery();
+		$otherQuery->addThreadExcludedFlag(Flag::is(Flag::IMPORTANT));
+		self::assertEquals([22], $this->mapper->findIdsByQuery($mailbox, $otherQuery, $sortOrder, null, null));
+
+		// "Important": exactly the complement -- thread A's representative
+		// (its newest message, itself NOT important), via the existing
+		// thread-wide EXISTS match. Together the two sections partition
+		// the mailbox: every thread in exactly one.
+		$importantQuery = new SearchQuery();
+		$importantQuery->addFlag(Flag::is(Flag::IMPORTANT));
+		self::assertEquals([21], $this->mapper->findIdsByQuery($mailbox, $importantQuery, $sortOrder, null, null));
+	}
+
+	/**
 	 * The priority inbox's "Other" section (is:pi-other = Flag::not(IMPORTANT))
 	 * is fetched in threaded view (view=threaded), then its known ids are
 	 * re-checked on every background sync via findIdsByQuery(...,

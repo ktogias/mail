@@ -4325,11 +4325,20 @@ export default function mainStoreActions() {
 		// locally (see threadStillMatchesFlagPredicate()), which the
 		// sync-driven path deliberately never does.
 		reclassifyFlagBucketsMutation({ envelope, sourceMailbox, includeUnified = true, excludeListId = null, userInitiated = false }) {
+			// Sign-aware, mirroring the server's two collections (SearchQuery
+			// $flags vs $threadExcludedFlags -- see FilterStringParser.php):
+			// `matches` is the per-message predicate (flat view, and the
+			// no-thread case). A `positive` entry marks a PARTITION token
+			// (not:starred, is:pi-other), whose thread-level meaning is "NO
+			// member carries the positive flag" -- one member carrying it
+			// disproves thread membership definitively, while a member
+			// lacking it proves nothing on its own. Purely existential
+			// tokens (is:starred, is:pi-important) have no `positive` entry.
 			const knownTokenPredicates = {
-				'is:starred': (flags) => flags?.flagged === true,
-				'not:starred': (flags) => flags?.flagged !== true,
-				[priorityImportantQuery]: (flags) => flags?.important === true,
-				[priorityOtherQuery]: (flags) => flags?.important !== true,
+				'is:starred': { matches: (flags) => flags?.flagged === true },
+				'not:starred': { matches: (flags) => flags?.flagged !== true, positive: (flags) => flags?.flagged === true },
+				[priorityImportantQuery]: { matches: (flags) => flags?.important === true },
+				[priorityOtherQuery]: { matches: (flags) => flags?.important !== true, positive: (flags) => flags?.important === true },
 			}
 			const inboxOnlyTokens = new Set([priorityImportantQuery, priorityOtherQuery])
 			const orderByDateInt = orderBy((id) => this.envelopes[id]?.dateInt ?? 0, this.preferences['sort-order'] === 'newest' ? 'desc' : 'asc')
@@ -4366,7 +4375,7 @@ export default function mainStoreActions() {
 								alreadyListed: list.includes(envelope.databaseId),
 								userInitiated,
 							})
-						: tokens.every((token) => knownTokenPredicates[token](envelope.flags))
+						: tokens.every((token) => knownTokenPredicates[token].matches(envelope.flags))
 
 					Vue.set(
 						mailbox.envelopeLists,
@@ -4379,6 +4388,16 @@ export default function mainStoreActions() {
 		/**
 		 * Whether an already-listed THREAD should stay in a flag-predicate
 		 * bucket, given a fresh reading of one of its member envelopes.
+		 *
+		 * PARTITION tokens (not:starred, is:pi-other -- the entries with a
+		 * `positive` predicate, mirroring the server's
+		 * SearchQuery::getThreadExcludedFlags()) invert the proof
+		 * directions relative to the existential logic documented below:
+		 * a member CARRYING the positive flag disproves thread membership
+		 * definitively (safe immediate REMOVE, sync-driven included),
+		 * while a member lacking it proves nothing on its own -- known
+		 * local members are consulted as the best available evidence, and
+		 * the bucket's own authoritative sync reconciles the rest.
 		 * Threaded view only -- see reclassifyFlagBucketsMutation(), which
 		 * uses the plain per-message predicate directly in flat/singleton
 		 * view, where there's no thread-sibling ambiguity at all.
@@ -4439,25 +4458,58 @@ export default function mainStoreActions() {
 		 * @param root0.userInitiated
 		 */
 		threadStillMatchesFlagPredicate({ envelope, tokens, knownTokenPredicates, alreadyListed, userInitiated = false }) {
-			const matchesTokens = (flags) => tokens.every((token) => knownTokenPredicates[token](flags))
-
 			if (!envelope.threadRootId) {
-				return matchesTokens(envelope.flags)
+				return tokens.every((token) => knownTokenPredicates[token].matches(envelope.flags))
 			}
-			if (matchesTokens(envelope.flags)) {
+
+			// Partition tokens (not:starred, is:pi-other) mirror the
+			// server's NOT EXISTS: ANY known thread member carrying the
+			// positive flag excludes the whole thread, definitively -- a
+			// proof, not a guess, so it applies to sync-driven readings
+			// too (the server agrees). Known local members are almost
+			// always sufficient in practice: the sibling that makes a
+			// thread Important is exactly the one already loaded in the
+			// Important section. The O(store) scan behind
+			// getEnvelopesByThreadRootId() is affordable here because
+			// reclassification only runs for genuinely NEW envelopes and
+			// REAL flag changes (updateEnvelopeMutation's isEqual guard),
+			// never once per envelope per routine tick.
+			const partitionTokens = tokens.filter((token) => knownTokenPredicates[token].positive !== undefined)
+			if (partitionTokens.length > 0) {
+				const knownMembers = this.getEnvelopesByThreadRootId(envelope.accountId, envelope.threadRootId)
+				const membersToCheck = knownMembers.length > 0 ? knownMembers : [envelope]
+				for (const token of partitionTokens) {
+					if (knownTokenPredicates[token].positive(envelope.flags)
+						|| membersToCheck.some((member) => knownTokenPredicates[token].positive(member.flags))) {
+						return false
+					}
+				}
+			}
+
+			// Existential tokens (is:starred, is:pi-important): this
+			// envelope matching alone proves the thread does, via itself.
+			// Combined with no partition token having disqualified the
+			// thread above, that's the best local answer available --
+			// authoritative when there are no unseen siblings, and
+			// self-correcting via the bucket's own sync when there are
+			// (prefer-to-over-include, the same eventually-consistent
+			// trade-off this mechanism has always made for ADDs).
+			const existentialTokens = tokens.filter((token) => knownTokenPredicates[token].positive === undefined)
+			if (existentialTokens.every((token) => knownTokenPredicates[token].matches(envelope.flags))) {
 				return true
 			}
 
 			const fullThreadIds = envelope.thread
 			if (Array.isArray(fullThreadIds) && fullThreadIds.length > 0
 				&& fullThreadIds.every((id) => this.envelopes[id] !== undefined)) {
-				return fullThreadIds.some((id) => matchesTokens(this.envelopes[id].flags))
+				return existentialTokens.every((token) => fullThreadIds.some((id) => knownTokenPredicates[token].matches(this.envelopes[id].flags)))
 			}
 
 			if (userInitiated) {
-				// The envelope itself doesn't match (checked above), and
-				// this is the user's own toggle -- remove now, let the
-				// backstop resync correct the rare mixed-thread case.
+				// This envelope doesn't satisfy the existential tokens
+				// (checked above), and this is the user's own toggle --
+				// remove now, let the backstop resync correct the rare
+				// mixed-thread case.
 				return false
 			}
 			return alreadyListed

@@ -45,6 +45,13 @@
 					:class="{ 'one-line': oneLineLayout, 'favorite-icon-style': !oneLineLayout }"
 					:data-starred="data.flags.flagged ? 'true' : 'false'"
 					@click.prevent="hasWriteAcl ? onToggleFlagged() : false" />
+				<StarOutline
+					v-else-if="threadCarriesStarredOnly"
+					:size="22"
+					fill-color="#f9cf3d"
+					class="app-content-list-item-star favorite-icon-style"
+					:class="{ 'one-line': oneLineLayout, 'favorite-icon-style': !oneLineLayout }"
+					:title="t('mail', 'The conversation has a favorite message')" />
 				<ImportantIcon
 					v-if="isImportant"
 					fill-color="#00679e"
@@ -52,6 +59,13 @@
 					class="app-content-list-item-star icon-important"
 					:class="{ 'important-one-line': oneLineLayout, 'icon-important': !oneLineLayout }"
 					data-starred="true" />
+				<ImportantOutlineIcon
+					v-else-if="threadCarriesImportantOnly"
+					fill-color="#00679e"
+					:size="20"
+					class="app-content-list-item-star icon-important"
+					:class="{ 'important-one-line': oneLineLayout, 'icon-important': !oneLineLayout }"
+					:title="t('mail', 'The conversation has an important message')" />
 				<JunkIcon
 					v-if="data.flags.$junk"
 					:size="20"
@@ -836,6 +850,25 @@ export default {
 			return this.mainStore
 				.getEnvelopeTags(this.data.databaseId)
 				.some((tag) => tag.imapLabel === '$label1')
+		},
+
+		// Thread-context badges: a row rendered inside the Important or
+		// Favorites section is there because its THREAD matched the
+		// section's query (thread-wide EXISTS, server-side) -- when the
+		// shown (newest) message itself doesn't carry the attribute, an
+		// outline variant of the badge explains WHY the row is here at
+		// all, instead of showing nothing (reported live as confusing).
+		// The list context itself is the evidence; no extra data needed.
+		searchQueryTokens() {
+			return (this.searchQuery ?? '').split(' ').filter(Boolean)
+		},
+
+		threadCarriesImportantOnly() {
+			return !this.isImportant && this.searchQueryTokens.includes('is:pi-important')
+		},
+
+		threadCarriesStarredOnly() {
+			return !this.data.flags.flagged && this.searchQueryTokens.includes('is:starred')
 		},
 
 		tags() {

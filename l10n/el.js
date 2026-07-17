@@ -498,6 +498,8 @@ OC.L10N.register(
     "Copy to clipboard" : "Αντιγραφή στο πρόχειρο",
     "Add" : "Προσθήκη",
     "Show less" : "Εμφάνιση λιγότερων",
+    "The conversation has a favorite message" : "Η συνομιλία περιέχει αγαπημένο μήνυμα",
+    "The conversation has an important message" : "Η συνομιλία περιέχει σημαντικό μήνυμα",
     "Show more" : "Εμφάνιση περισσότερων",
     "Clear" : "Εκκαθάριση",
     "Search in folder" : "Αναζήτηση σε φάκελο",

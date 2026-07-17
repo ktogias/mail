@@ -21,6 +21,24 @@ class SearchQuery {
 	/** @var FlagExpression[] */
 	private $flagExpressions = [];
 
+	/**
+	 * Flags whose POSITIVE form must not be present on ANY message of a
+	 * thread for the thread to match, in threaded view -- partition
+	 * ("remainder-category") semantics: is:pi-other means "no message in
+	 * this thread is important", not "some message isn't". This is a
+	 * deliberately separate collection from $flags because the sign of a
+	 * Flag alone cannot express the difference: "unread" also arrives as
+	 * a negative flag (SEEN=false) but must keep EXISTENTIAL thread
+	 * semantics ("some member is unseen") -- the exact behavior the
+	 * thread-wide EXISTS match was introduced for. Entries here always
+	 * carry the positive form (isSet() === true); in flat/singleton view
+	 * they degrade to a plain negated per-message column check,
+	 * identical to what a negated $flags entry produces.
+	 *
+	 * @var Flag[]
+	 */
+	private $threadExcludedFlags = [];
+
 	/** @var string[] */
 	private $to = [];
 
@@ -108,6 +126,18 @@ class SearchQuery {
 
 	public function addFlagExpression(FlagExpression $expression): void {
 		$this->flagExpressions[] = $expression;
+	}
+
+	/**
+	 * @return Flag[]
+	 * @psalm-mutation-free
+	 */
+	public function getThreadExcludedFlags(): array {
+		return $this->threadExcludedFlags;
+	}
+
+	public function addThreadExcludedFlag(Flag $flag): void {
+		$this->threadExcludedFlags[] = $flag;
 	}
 
 	/**

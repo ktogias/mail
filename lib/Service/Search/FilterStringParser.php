@@ -47,6 +47,23 @@ class FilterStringParser {
 		switch ($type) {
 			case 'is':
 			case 'not':
+				// Partition ("remainder-category") tokens: not:starred and
+				// is:pi-other exist to make one Priority Inbox section the
+				// complement of another (Other = threads with NO important
+				// member; the not:starred compounds = threads with NO
+				// starred member, when favorites sort separately). In
+				// threaded view these must negate the THREAD-level
+				// attribute (NOT EXISTS a matching member), not assert the
+				// existence of a non-matching member -- otherwise every
+				// mixed thread appears in both sections at once (reported
+				// live). Deliberately NOT applied to other not:X tokens:
+				// "unread" (SEEN=false) keeps its existential semantics --
+				// a thread with any unseen member must keep matching the
+				// unread filter.
+				if ($type === 'not' && $param === 'starred') {
+					$query->addThreadExcludedFlag(Flag::is(Flag::FLAGGED));
+					return true;
+				}
 				if (array_key_exists($param, $flagMap)) {
 					/** @var Flag $flag */
 					$flag = $flagMap[$param];
@@ -63,9 +80,7 @@ class FilterStringParser {
 					return true;
 				}
 				if ($param === 'pi-other') {
-					$query->addFlag(
-						Flag::not(Flag::IMPORTANT),
-					);
+					$query->addThreadExcludedFlag(Flag::is(Flag::IMPORTANT));
 
 					return true;
 				}

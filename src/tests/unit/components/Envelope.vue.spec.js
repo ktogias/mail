@@ -1050,4 +1050,59 @@ describe('Envelope', () => {
 			expect(ViewportPrefetchObserver.unobserveViewportVisibility).toHaveBeenCalledWith(el)
 		})
 	})
+
+	describe('thread-context badges in the Important/Favorites sections', () => {
+		// A row rendered inside those sections is there because its THREAD
+		// matched the section's query (thread-wide EXISTS) -- when the
+		// shown message itself doesn't carry the attribute, an outline
+		// badge variant explains why the row is here (reported live as
+		// confusing: a message "in Important" with no badge at all).
+		function mountRow({ flagged = false, searchQuery } = {}) {
+			return shallowMount(Envelope, {
+				mocks: { $route },
+				propsData: {
+					mailbox: { specialRole: '', databaseId: '3', myAcls: undefined },
+					searchQuery,
+					data: {
+						accountId: 123,
+						databaseId: 999,
+						from: [{ email: 'info@test.com' }],
+						flags: { seen: false, flagged, $junk: false, answered: false, hasAttachments: false, draft: false },
+					},
+				},
+				store,
+				localVue,
+			})
+		}
+
+		it('offers the thread-important outline badge for an unimportant message rendered in an is:pi-important list', () => {
+			const view = mountRow({ searchQuery: 'not:starred is:pi-important' })
+
+			expect(view.vm.threadCarriesImportantOnly).toBe(true)
+		})
+
+		it('does not offer it when the message itself is important (the filled badge covers that)', () => {
+			const view = mountRow({ searchQuery: 'not:starred is:pi-important' })
+			store.getEnvelopeTags = vi.fn().mockReturnValue([{ imapLabel: '$label1' }])
+
+			expect(view.vm.threadCarriesImportantOnly).toBe(false)
+		})
+
+		it('does not offer it outside an is:pi-important list', () => {
+			const view = mountRow({ searchQuery: 'not:starred is:pi-other' })
+
+			expect(view.vm.threadCarriesImportantOnly).toBe(false)
+		})
+
+		it('offers the thread-starred outline badge for an unstarred message rendered in an is:starred list', () => {
+			const view = mountRow({ searchQuery: 'is:starred' })
+
+			expect(view.vm.threadCarriesStarredOnly).toBe(true)
+		})
+
+		it('does not offer it when the message itself is starred, or outside an is:starred list', () => {
+			expect(mountRow({ flagged: true, searchQuery: 'is:starred' }).vm.threadCarriesStarredOnly).toBe(false)
+			expect(mountRow({ searchQuery: 'not:starred is:pi-other' }).vm.threadCarriesStarredOnly).toBe(false)
+		})
+	})
 })

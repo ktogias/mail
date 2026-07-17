@@ -1192,7 +1192,7 @@ class MessageMapper extends QBMapper {
 			);
 		}
 
-		if ($query->getThreaded() && (!empty($query->getFlags()) || !empty($query->getFlagExpressions()))) {
+		if ($query->getThreaded() && (!empty($query->getFlags()) || !empty($query->getFlagExpressions()) || !empty($query->getThreadExcludedFlags()))) {
 			// In threaded view, `m` (see the self-join above) is only a
 			// stand-in for its whole thread -- the thread's newest message,
 			// not a message to judge on its own. A flag filter (unread,
@@ -1209,29 +1209,55 @@ class MessageMapper extends QBMapper {
 			// once the inner SQL is embedded as literal text below. This is
 			// the same reason findIdsGloballyByQuery()'s sub-select above
 			// creates its parameters via the outer $qb too.
-			$threadMatchQb = $this->db->getQueryBuilder();
-			$threadMatch = $threadMatchQb->select($threadMatchQb->expr()->literal(1))
-				->from($this->getTableName(), 'tm')
-				->where(
-					$threadMatchQb->expr()->eq('tm.mailbox_id', 'm.mailbox_id', IQueryBuilder::PARAM_INT),
-					$threadMatchQb->expr()->orX(
-						// A message with no thread_root_id isn't grouped
-						// with anything (NULL never equals NULL below), so
-						// it must still match itself.
-						$threadMatchQb->expr()->eq('tm.id', 'm.id', IQueryBuilder::PARAM_INT),
-						$threadMatchQb->expr()->eq('tm.thread_root_id', 'm.thread_root_id', IQueryBuilder::PARAM_STR),
-					),
-				);
-			foreach ($query->getFlags() as $flag) {
-				$threadMatch->andWhere($threadMatchQb->expr()->eq('tm.' . $this->flagToColumnName($flag), $qb->createNamedParameter($flag->isSet(), IQueryBuilder::PARAM_BOOL)));
+			$newThreadMatchQb = function () {
+				$threadMatchQb = $this->db->getQueryBuilder();
+				$threadMatch = $threadMatchQb->select($threadMatchQb->expr()->literal(1))
+					->from($this->getTableName(), 'tm')
+					->where(
+						$threadMatchQb->expr()->eq('tm.mailbox_id', 'm.mailbox_id', IQueryBuilder::PARAM_INT),
+						$threadMatchQb->expr()->orX(
+							// A message with no thread_root_id isn't grouped
+							// with anything (NULL never equals NULL below), so
+							// it must still match itself.
+							$threadMatchQb->expr()->eq('tm.id', 'm.id', IQueryBuilder::PARAM_INT),
+							$threadMatchQb->expr()->eq('tm.thread_root_id', 'm.thread_root_id', IQueryBuilder::PARAM_STR),
+						),
+					);
+				return [$threadMatchQb, $threadMatch];
+			};
+			if (!empty($query->getFlags()) || !empty($query->getFlagExpressions())) {
+				[$threadMatchQb, $threadMatch] = $newThreadMatchQb();
+				foreach ($query->getFlags() as $flag) {
+					$threadMatch->andWhere($threadMatchQb->expr()->eq('tm.' . $this->flagToColumnName($flag), $qb->createNamedParameter($flag->isSet(), IQueryBuilder::PARAM_BOOL)));
+				}
+				foreach ($query->getFlagExpressions() as $expr) {
+					$threadMatch->andWhere($this->flagExpressionToQuery($expr, $qb, 'tm'));
+				}
+				$select->andWhere($qb->createFunction('EXISTS (' . $threadMatch->getSQL() . ')'));
 			}
-			foreach ($query->getFlagExpressions() as $expr) {
-				$threadMatch->andWhere($this->flagExpressionToQuery($expr, $qb, 'tm'));
+			// Partition semantics (see SearchQuery::getThreadExcludedFlags()):
+			// the thread matches only if NO member carries the positive
+			// flag -- NOT EXISTS, the exact complement of the EXISTS above,
+			// so "Other" (no important member) and "Important" (some
+			// important member) partition mixed threads instead of both
+			// listing them. One subquery per excluded flag: multiple
+			// exclusions AND together ("no starred member AND no important
+			// member"), which a single combined subquery would not express.
+			foreach ($query->getThreadExcludedFlags() as $flag) {
+				[$threadMatchQb, $threadMatch] = $newThreadMatchQb();
+				$threadMatch->andWhere($threadMatchQb->expr()->eq('tm.' . $this->flagToColumnName($flag), $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL)));
+				$select->andWhere($qb->createFunction('NOT EXISTS (' . $threadMatch->getSQL() . ')'));
 			}
-			$select->andWhere($qb->createFunction('EXISTS (' . $threadMatch->getSQL() . ')'));
 		} else {
 			foreach ($query->getFlags() as $flag) {
 				$select->andWhere($qb->expr()->eq('m.' . $this->flagToColumnName($flag), $qb->createNamedParameter($flag->isSet(), IQueryBuilder::PARAM_BOOL)));
+			}
+			// In flat/singleton view one row IS one message: a thread-
+			// excluded flag degrades to a plain negated per-message check,
+			// exactly what these tokens produced before partition
+			// semantics existed.
+			foreach ($query->getThreadExcludedFlags() as $flag) {
+				$select->andWhere($qb->expr()->eq('m.' . $this->flagToColumnName($flag), $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL)));
 			}
 			if (!empty($query->getFlagExpressions())) {
 				$select->andWhere(
@@ -1397,6 +1423,12 @@ class MessageMapper extends QBMapper {
 		}
 		foreach ($query->getFlags() as $flag) {
 			$select->andWhere($qb->expr()->eq('m.' . $this->flagToColumnName($flag), $qb->createNamedParameter($flag->isSet(), IQueryBuilder::PARAM_BOOL)));
+		}
+		// Global search never served the priority-inbox partition, so a
+		// thread-excluded flag keeps its historical per-message meaning
+		// here (same as the flat branch of findIdsByQuery()).
+		foreach ($query->getThreadExcludedFlags() as $flag) {
+			$select->andWhere($qb->expr()->eq('m.' . $this->flagToColumnName($flag), $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL)));
 		}
 		if (!empty($query->getFlagExpressions())) {
 			$select->andWhere(

@@ -931,11 +931,11 @@ describe('Vuex store actions', () => {
 			store.envelopes[id] = { databaseId: id, mailboxId: 11, dateInt: id, flags: { flagged }, ...extra }
 		}
 
-		it('a star being added adds the message to is:starred, but does not immediately evict it from not:starred (a differently-unstarred sibling might still justify it)', () => {
+		it('a star being added adds the message to is:starred AND evicts it from not:starred (partition semantics: one starred member excludes the thread)', () => {
 			// threadRootId set: this envelope stands for a real (possibly
-			// multi-message) thread whose other members aren't loaded here --
-			// exactly the case the ratchet exists for. A message with NO
-			// threadRootId at all is covered by its own, separate test below.
+			// multi-message) thread whose other members aren't loaded here.
+			// A message with NO threadRootId at all is covered by its own,
+			// separate test below.
 			seedKnownEnvelope(70, false, { threadRootId: 'thread-70' })
 			store.mailboxes[11].envelopeLists['is:starred'] = []
 			store.mailboxes[11].envelopeLists['not:starred'] = [70]
@@ -945,12 +945,13 @@ describe('Vuex store actions', () => {
 			// Safe to add: this envelope alone proves the thread now has a
 			// starred message.
 			expect(store.mailboxes[11].envelopeLists['is:starred']).toEqual([70])
-			// Not evicted from not:starred: this envelope becoming starred
-			// doesn't rule out some OTHER thread sibling still being
-			// unstarred, which alone would justify the thread's place there
-			// -- only not:starred's own thread-aware sync may safely remove
-			// it.
-			expect(store.mailboxes[11].envelopeLists['not:starred']).toEqual([70])
+			// ALSO evicted from not:starred: under partition semantics
+			// (not:starred = the server's thread-excluded NOT EXISTS, see
+			// SearchQuery::getThreadExcludedFlags()) one starred member
+			// disproves the whole thread's membership definitively -- the
+			// server's own next sync of that bucket would vanish it anyway;
+			// removing it locally is a proof, not a guess.
+			expect(store.mailboxes[11].envelopeLists['not:starred']).toEqual([])
 		})
 
 		// Default layout-message-view is 'threaded' (see getPreference's own
@@ -1074,11 +1075,49 @@ describe('Vuex store actions', () => {
 			// known and still starred, so the thread genuinely still
 			// qualifies for is:starred.
 			expect(store.mailboxes[11].envelopeLists['is:starred']).toEqual([99])
-			// Also correctly added to not:starred: envelope 99 itself just
-			// became unstarred, which alone proves the thread now qualifies
-			// there too -- safe to add via its own flags directly, no
-			// sibling check even needed for this direction.
-			expect(store.mailboxes[11].envelopeLists['not:starred']).toEqual([99])
+			// And correctly NOT added to not:starred: partition semantics --
+			// the still-starred sibling (98) excludes the whole thread from
+			// the complement bucket. The thread lives in Favorites, and only
+			// in Favorites, exactly like the server's NOT EXISTS would
+			// resolve it.
+			expect(store.mailboxes[11].envelopeLists['not:starred']).toEqual([])
+		})
+
+		// The exact reported-live shape: a new, unimportant reply arrives in
+		// a thread whose important member is already loaded (it is what put
+		// the thread in the Important section) -- the reply must NOT drag
+		// the thread into Other as well. Partition semantics resolve this
+		// locally: the known important sibling excludes the thread from
+		// every is:pi-other bucket.
+		it('a new unimportant reply to a thread with a known important member is NOT cross-posted into Other', () => {
+			// accountId must match what addEnvelopesMutation stamps on the
+			// incoming reply (mailbox 11 -> account 13): the sibling lookup
+			// (getEnvelopesByThreadRootId) filters by accountId+threadRootId.
+			seedKnownEnvelope(200, false, { threadRootId: 'thread-200', accountId: 13, flags: { flagged: false, important: true } })
+			store.mailboxes[11].envelopeLists['not:starred is:pi-other'] = []
+			store.mailboxes[11].envelopeLists['not:starred is:pi-important'] = [200]
+
+			store.addEnvelopesMutation({
+				query: '',
+				envelopes: [{ databaseId: 201, mailboxId: 11, dateInt: 201, threadRootId: 'thread-200', flags: { seen: false, flagged: false, important: false } }],
+			})
+
+			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-other']).toEqual([])
+		})
+
+		// The freshness dual: a brand-new thread with no important member
+		// (and no known siblings at all) must still land in Other
+		// immediately -- known local members are the evidence, and here the
+		// new message IS the whole known thread.
+		it('a new unimportant message in a brand-new thread still lands in Other immediately', () => {
+			store.mailboxes[11].envelopeLists['not:starred is:pi-other'] = []
+
+			store.addEnvelopesMutation({
+				query: '',
+				envelopes: [{ databaseId: 202, mailboxId: 11, dateInt: 202, threadRootId: 'thread-202', flags: { seen: false, flagged: false, important: false } }],
+			})
+
+			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-other']).toEqual([202])
 		})
 
 		it('does not touch a flag-predicate bucket that is not loaded', () => {
@@ -1179,7 +1218,7 @@ describe('Vuex store actions', () => {
 			expect(store.mailboxes[11].envelopeLists['subject:foo is:pi-other']).toEqual([999])
 		})
 
-		it('a flag flip ADDS a message to the newly-matching compound bucket, same as the bare-key case', () => {
+		it('a flag flip ADDS a message to the newly-matching compound bucket and leaves the complement bucket in the same instant', () => {
 			seedKnownEnvelope(94, false, { threadRootId: 'thread-94' })
 			store.mailboxes[11].envelopeLists['not:starred is:pi-other'] = [94]
 			store.mailboxes[11].envelopeLists['not:starred is:pi-important'] = []
@@ -1187,13 +1226,13 @@ describe('Vuex store actions', () => {
 
 			store.updateEnvelopeMutation({ envelope: { databaseId: 94, mailboxId: 11, threadRootId: 'thread-94', flags: { flagged: false, important: true } } })
 
-			// Stays in not:starred/is:pi-other too, same reasoning as the
-			// bare-key is:starred case above: this envelope becoming
-			// important doesn't rule out some OTHER thread sibling still
-			// being not-important, which alone would justify the thread's
-			// place in that bucket -- only its own thread-aware sync may
-			// safely remove it.
-			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-other']).toEqual([94])
+			// AND leaves the Other bucket in the same instant: is:pi-other
+			// is a partition token (the server's thread-excluded NOT
+			// EXISTS), so this envelope becoming important disproves the
+			// thread's membership there definitively -- the exact
+			// reported-live bug this fixed (the same conversation listed
+			// in both Important and Other at once).
+			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-other']).toEqual([])
 			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-important']).toEqual([94])
 		})
 
