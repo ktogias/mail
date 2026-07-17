@@ -1011,6 +1011,52 @@ class MessageMapper extends QBMapper {
 	 *
 	 * @return Message[]
 	 */
+	/**
+	 * Message-IDs of an account's flag_important messages that have no
+	 * matching row in mail_message_tags for the given tag -- the exact
+	 * signature left behind when the classifier's flagMessage() succeeded
+	 * but its tagMessage() failed (see NewMessagesClassifier), or by any
+	 * client writing only the importance keyword. Consumed by
+	 * ReconcileImportanceTagJob's bounded nightly backfill.
+	 *
+	 * Deliberately cheap: flag_important=true is a small fraction of any
+	 * mailbox, the probe per row is a NOT EXISTS on the (indexed) tag
+	 * mapping, there is no ORDER BY, and the LIMIT lets the planner stop
+	 * at the first $limit hits. No IMAP involved at any point.
+	 *
+	 * @return string[]
+	 */
+	public function findImportantMessageIdsWithoutTag(int $accountId, int $tagId, int $limit): array {
+		$qb = $this->db->getQueryBuilder();
+		$tagProbe = $this->db->getQueryBuilder();
+		$tagProbe->select($tagProbe->expr()->literal(1))
+			->from('mail_message_tags', 'mt')
+			->where(
+				$tagProbe->expr()->eq('mt.imap_message_id', 'm.message_id', IQueryBuilder::PARAM_STR),
+				// Parameter created on the OUTER builder: the inner SQL is
+				// embedded as literal text, so its own placeholder counter
+				// would collide with the outer one (same reason as the
+				// thread-match subquery in findIdsByQuery()).
+				$tagProbe->expr()->eq('mt.tag_id', $qb->createNamedParameter($tagId, IQueryBuilder::PARAM_INT)),
+			);
+
+		$qb->selectDistinct('m.message_id')
+			->from($this->getTableName(), 'm')
+			->join('m', 'mail_mailboxes', 'mb', $qb->expr()->eq('m.mailbox_id', 'mb.id', IQueryBuilder::PARAM_INT))
+			->where(
+				$qb->expr()->eq('mb.account_id', $qb->createNamedParameter($accountId, IQueryBuilder::PARAM_INT)),
+				$qb->expr()->eq('m.flag_important', $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL)),
+				$qb->expr()->isNotNull('m.message_id'),
+				$qb->createFunction('NOT EXISTS (' . $tagProbe->getSQL() . ')'),
+			)
+			->setMaxResults($limit);
+
+		$result = $qb->executeQuery();
+		$ids = array_map(static fn (array $row) => $row['message_id'], $result->fetchAll());
+		$result->closeCursor();
+		return $ids;
+	}
+
 	public function findThread(Account $account, string $threadRootId): array {
 		$qb = $this->db->getQueryBuilder();
 		$qb->select('messages.*')

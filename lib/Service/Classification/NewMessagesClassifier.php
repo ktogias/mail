@@ -82,24 +82,48 @@ class NewMessagesClassifier {
 				$messages,
 				$this->logger
 			);
-
-			foreach ($messages as $message) {
-				$prediction = $predictions[$message->getUid()] ?? false;
-				$this->logger->info("Message {$message->getUid()} ({$message->getPreviewText()}) is " . ($prediction ? 'important' : 'not important'));
-				if ($prediction) {
-					$message->setFlagImportant(true);
-					$this->mailManager->flagMessage($account, $mailbox->getName(), $message->getUid(), Tag::LABEL_IMPORTANT, true);
-					$this->mailManager->tagMessage($account, $mailbox->getName(), $message, $importantTag, true);
-				}
-			}
 		} catch (ServiceException $e) {
 			$this->logger->error('Could not classify incoming message importance: ' . $e->getMessage(), [
 				'exception' => $e,
 			]);
-		} catch (ClientException $e) {
-			$this->logger->error('Could not persist incoming message importance to IMAP: ' . $e->getMessage(), [
-				'exception' => $e,
-			]);
+			return true;
+		}
+
+		foreach ($messages as $message) {
+			$prediction = $predictions[$message->getUid()] ?? false;
+			$this->logger->info("Message {$message->getUid()} ({$message->getPreviewText()}) is " . ($prediction ? 'important' : 'not important'));
+			if (!$prediction) {
+				continue;
+			}
+
+			// Each message's persistence is isolated: a failure here used
+			// to abort the whole batch (the catch sat outside the loop),
+			// leaving every remaining message unclassified for good AND
+			// the current one permanently half-written -- flag set (both
+			// in this in-memory object, persisted by the caller, and as
+			// the IMAP keyword) with no matching $label1 tag row, since
+			// tagMessage() runs after flagMessage() and neither is rolled
+			// back. Confirmed live (a whole Gmail thread flag-important
+			// with zero tag rows). The tag write also gets one retry: it
+			// is the last step, so a transient failure there is the exact
+			// signature that used to stick forever. Whatever still slips
+			// through is healed by ReconcileImportanceTagJob's nightly
+			// pass -- this loop and that job are two halves of one
+			// mechanism.
+			try {
+				$message->setFlagImportant(true);
+				$this->mailManager->flagMessage($account, $mailbox->getName(), $message->getUid(), Tag::LABEL_IMPORTANT, true);
+				try {
+					$this->mailManager->tagMessage($account, $mailbox->getName(), $message, $importantTag, true);
+				} catch (ServiceException|ClientException $e) {
+					$this->logger->warning("Retrying importance tag for message {$message->getUid()} after: " . $e->getMessage());
+					$this->mailManager->tagMessage($account, $mailbox->getName(), $message, $importantTag, true);
+				}
+			} catch (ServiceException|ClientException $e) {
+				$this->logger->error("Could not persist importance of message {$message->getUid()}, continuing with the rest of the batch: " . $e->getMessage(), [
+					'exception' => $e,
+				]);
+			}
 		}
 		return true;
 	}

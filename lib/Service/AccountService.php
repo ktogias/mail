@@ -15,6 +15,7 @@ use OCA\Mail\BackgroundJob\BackfillJob;
 use OCA\Mail\BackgroundJob\ContextChat\ScheduleJob;
 use OCA\Mail\BackgroundJob\PreviewEnhancementProcessingJob;
 use OCA\Mail\BackgroundJob\QuotaJob;
+use OCA\Mail\BackgroundJob\ReconcileImportanceTagJob;
 use OCA\Mail\BackgroundJob\RepairSyncJob;
 use OCA\Mail\BackgroundJob\SyncJob;
 use OCA\Mail\BackgroundJob\TrainImportanceClassifierJob;
@@ -249,6 +250,7 @@ class AccountService {
 		$now = $this->timeFactory->getTime();
 		$this->scheduleBackgroundJob(SyncJob::class, $now, $arguments);
 		$this->scheduleBackgroundJob(TrainImportanceClassifierJob::class, $now, $arguments);
+		$this->scheduleBackgroundJob(ReconcileImportanceTagJob::class, $now, $arguments);
 		$this->scheduleBackgroundJob(PreviewEnhancementProcessingJob::class, $now, $arguments);
 		$this->scheduleBackgroundJob(QuotaJob::class, $now, $arguments);
 		$this->scheduleBackgroundJob(ScheduleJob::class, $now, $arguments);

@@ -837,6 +837,67 @@ class MessageMapperTest extends TestCase {
 	}
 
 	/**
+	 * The reconciliation query behind ReconcileImportanceTagJob: only
+	 * flag-important messages of the given account that have NO mapping
+	 * row for the given tag, bounded by the limit. Uses real rows in all
+	 * three tables (messages, mailboxes for the account join, and
+	 * message_tags for the NOT EXISTS probe).
+	 */
+	public function testFindImportantMessageIdsWithoutTag(): void {
+		$qb = $this->db->getQueryBuilder();
+		// Idempotent re-runs against the shared container DB.
+		$qb->delete('mail_mailboxes')->where($qb->expr()->eq('account_id', $qb->createNamedParameter(7001, IQueryBuilder::PARAM_INT)))->executeStatement();
+		$qb2 = $this->db->getQueryBuilder();
+		$qb2->delete('mail_message_tags')->where($qb2->expr()->like('imap_message_id', $qb2->createNamedParameter('%@reconcile.test%')))->executeStatement();
+
+		$qb3 = $this->db->getQueryBuilder();
+		$qb3->insert('mail_mailboxes')->values([
+			'id' => $qb3->createNamedParameter(7002, IQueryBuilder::PARAM_INT),
+			'name' => $qb3->createNamedParameter('INBOX'),
+			'name_hash' => $qb3->createNamedParameter(md5('INBOX')),
+			'account_id' => $qb3->createNamedParameter(7001, IQueryBuilder::PARAM_INT),
+			'delimiter' => $qb3->createNamedParameter('.'),
+			'messages' => $qb3->createNamedParameter(0, IQueryBuilder::PARAM_INT),
+			'unseen' => $qb3->createNamedParameter(0, IQueryBuilder::PARAM_INT),
+		])->executeStatement();
+
+		$rows = [
+			// Important, untagged -- the divergence signature, must be found.
+			['id' => 30, 'message_id' => '<a@reconcile.test>', 'flag_important' => true],
+			// Important, tagged -- healthy, must NOT be found.
+			['id' => 31, 'message_id' => '<b@reconcile.test>', 'flag_important' => true],
+			// Not important, untagged -- irrelevant, must NOT be found.
+			['id' => 32, 'message_id' => '<c@reconcile.test>', 'flag_important' => false],
+		];
+		foreach ($rows as $row) {
+			$insert = $this->db->getQueryBuilder();
+			$insert->insert($this->mapper->getTableName())->values([
+				'id' => $insert->createNamedParameter($row['id'], IQueryBuilder::PARAM_INT),
+				'uid' => $insert->createNamedParameter(700 + $row['id'], IQueryBuilder::PARAM_INT),
+				'message_id' => $insert->createNamedParameter($row['message_id']),
+				'mailbox_id' => $insert->createNamedParameter(7002, IQueryBuilder::PARAM_INT),
+				'subject' => $insert->createNamedParameter('s'),
+				'sent_at' => $insert->createNamedParameter(1000 + $row['id'], IQueryBuilder::PARAM_INT),
+				'flag_important' => $insert->createNamedParameter($row['flag_important'], IQueryBuilder::PARAM_BOOL),
+			])->executeStatement();
+		}
+
+		$tag = new Tag();
+		$tag->setImapLabel(Tag::LABEL_IMPORTANT);
+		$tag->setDisplayName('Important');
+		$tag->setUserId('reconcile-test-user');
+		$this->tagMapper->tagMessage($tag, '<b@reconcile.test>', 'reconcile-test-user');
+		$tagId = $this->tagMapper->getTagByImapLabel(Tag::LABEL_IMPORTANT, 'reconcile-test-user')->getId();
+
+		self::assertEquals(
+			['<a@reconcile.test>'],
+			$this->mapper->findImportantMessageIdsWithoutTag(7001, $tagId, 100),
+		);
+		// The limit is honored (0 keeps even the divergent row out).
+		self::assertEquals([], $this->mapper->findImportantMessageIdsWithoutTag(7001, $tagId, 0));
+	}
+
+	/**
 	 * Partition semantics for the priority inbox: "Other" must be the
 	 * REMAINDER of "Important" (Gmail's "everything else" model), not an
 	 * independent attribute bucket. Under the plain thread-wide EXISTS
