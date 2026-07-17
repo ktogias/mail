@@ -345,20 +345,14 @@ export default {
 
 		isAtLeastOneSelectedImportant() {
 			// returns true if at least one selected message is marked as important
-			return this.selectedEnvelopes.some((env) => {
-				return this.mainStore
-					.getEnvelopeTags(env.databaseId)
-					.some((tag) => tag.imapLabel === '$label1')
-			})
+			// (per-copy flag, not the user-wide tag -- see Envelope.vue's
+			// own isImportant() for the multi-account divergence this avoids)
+			return this.selectedEnvelopes.some((env) => env.flags.important === true)
 		},
 
 		isAtLeastOneSelectedUnimportant() {
 			// returns true if at least one selected message is not marked as important
-			return this.selectedEnvelopes.some((env) => {
-				return !this.mainStore
-					.getEnvelopeTags(env.databaseId)
-					.some((tag) => tag.imapLabel === '$label1')
-			})
+			return this.selectedEnvelopes.some((env) => env.flags.important !== true)
 		},
 
 		isAtLeastOneSelectedJunk() {

@@ -2580,10 +2580,14 @@ export default function mainStoreActions() {
 		async toggleEnvelopeImportant(envelope) {
 			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
-				const hasTag = this
-					.getEnvelopeTags(envelope.databaseId)
-					.some((tag) => tag.imapLabel === IMPORTANT_TAG_LABEL)
-				await this.setEnvelopeImportant(envelope, !hasTag)
+				// Current state from the per-copy FLAG, not the user-wide
+				// $label1 tag: the badge and the priority sections both
+				// read the flag now, and the two sources genuinely diverge
+				// on multi-account duplicate mail (confirmed live) -- a
+				// tag-based read here would invert the toggle for a
+				// message whose copy is flagged important without a tag.
+				const isImportant = envelope.flags.important === true
+				await this.setEnvelopeImportant(envelope, !isImportant)
 			})
 		},
 		/**
@@ -2626,10 +2630,14 @@ export default function mainStoreActions() {
 		 * @param {boolean} important the desired importance state
 		 */
 		async setEnvelopeImportant(envelope, important) {
-			const hasTag = this
-				.getEnvelopeTags(envelope.databaseId)
-				.some((tag) => tag.imapLabel === IMPORTANT_TAG_LABEL)
-			if (hasTag === important) {
+			// No-op guard on the per-copy FLAG (same source as the badge,
+			// the sections, and toggleEnvelopeImportant() above). The tag
+			// is still maintained alongside below, but it no longer gates
+			// anything: on multi-account duplicate mail the user-wide tag
+			// can disagree with this copy's own state, and gating on it
+			// here made the action a silent no-op (or an inversion)
+			// exactly when the user was trying to fix such a message.
+			if ((envelope.flags.important === true) === important) {
 				return
 			}
 

@@ -411,16 +411,27 @@ class MailManager implements IMailManager {
 
 		$client = $this->imapClientFactory->getClient($account);
 		try {
-			// Only send system flags to the IMAP server as other flags might not be supported
-			$imapFlags = $this->filterFlags($client, $account, $flag, $mailbox);
-			foreach ($imapFlags as $imapFlag) {
-				if (empty($imapFlag) === true) {
-					continue;
-				}
-				if ($value) {
-					$this->imapMessageMapper->addFlag($client, $mb, [$uid], $imapFlag);
-				} else {
-					$this->imapMessageMapper->removeFlag($client, $mb, [$uid], $imapFlag);
+			// RFC 8457 interop: the importance keyword this app has always
+			// written ($label1 -- Thunderbird's legacy "Important" label)
+			// is invisible to standards-aware servers and clients; mirror
+			// every importance change onto the standard $important keyword
+			// too. Our own sync already reads both back into
+			// flag_important (IMAPMessage::setFlagImportant), so the round
+			// trip is lossless in both directions, and any other client
+			// honoring RFC 8457 now sees the same importance state.
+			$flagsToWrite = $flag === Tag::LABEL_IMPORTANT ? [$flag, '$important'] : [$flag];
+			foreach ($flagsToWrite as $writeFlag) {
+				// Only send system flags to the IMAP server as other flags might not be supported
+				$imapFlags = $this->filterFlags($client, $account, $writeFlag, $mailbox);
+				foreach ($imapFlags as $imapFlag) {
+					if (empty($imapFlag) === true) {
+						continue;
+					}
+					if ($value) {
+						$this->imapMessageMapper->addFlag($client, $mb, [$uid], $imapFlag);
+					} else {
+						$this->imapMessageMapper->removeFlag($client, $mb, [$uid], $imapFlag);
+					}
 				}
 			}
 		} catch (Horde_Imap_Client_Exception $e) {

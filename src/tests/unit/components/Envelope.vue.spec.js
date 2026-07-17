@@ -746,8 +746,8 @@ describe('Envelope', () => {
 
 		it('onToggleJunk() reports isImportant so EnvelopeList can defer clearing it too', async () => {
 			store.moveEnvelopeToJunk = vi.fn().mockResolvedValue(false)
-			store.getEnvelopeTags = vi.fn().mockReturnValue([{ imapLabel: '$label1' }])
-			const view = mountEnvelope()
+			// Importance now reads the per-copy flag, not the user-wide tag.
+			const view = mountEnvelope({ important: true })
 
 			view.vm.onToggleJunk()
 			await vi.waitFor(() => expect(view.emitted()['request-toggle-junk-one']).toBeTruthy())
@@ -1057,7 +1057,7 @@ describe('Envelope', () => {
 		// shown message itself doesn't carry the attribute, an outline
 		// badge variant explains why the row is here (reported live as
 		// confusing: a message "in Important" with no badge at all).
-		function mountRow({ flagged = false, searchQuery } = {}) {
+		function mountRow({ flagged = false, important = false, searchQuery } = {}) {
 			return shallowMount(Envelope, {
 				mocks: { $route },
 				propsData: {
@@ -1067,7 +1067,7 @@ describe('Envelope', () => {
 						accountId: 123,
 						databaseId: 999,
 						from: [{ email: 'info@test.com' }],
-						flags: { seen: false, flagged, $junk: false, answered: false, hasAttachments: false, draft: false },
+						flags: { seen: false, flagged, important, $junk: false, answered: false, hasAttachments: false, draft: false },
 					},
 				},
 				store,
@@ -1082,10 +1082,25 @@ describe('Envelope', () => {
 		})
 
 		it('does not offer it when the message itself is important (the filled badge covers that)', () => {
-			const view = mountRow({ searchQuery: 'not:starred is:pi-important' })
-			store.getEnvelopeTags = vi.fn().mockReturnValue([{ imapLabel: '$label1' }])
+			// Per-copy flag, the same source the sections and the filled
+			// badge now read -- not the user-wide tag.
+			const view = mountRow({ important: true, searchQuery: 'not:starred is:pi-important' })
 
 			expect(view.vm.threadCarriesImportantOnly).toBe(false)
+		})
+
+		// The reported live case (message 1100345): the copy's
+		// flag_important is set (our classifier's keyword round-tripped
+		// via IMAP) but no user-wide $label1 tag was ever created (the
+		// classifier's tagMessage step can fail independently). The badge
+		// must follow the flag -- the same source that put the row in the
+		// Important section -- so the message visibly IS the important one
+		// instead of showing a confusing "the conversation contains an
+		// important message" outline with no filled badge anywhere.
+		it('shows the filled badge for a flag-important copy even when no user-wide tag exists', () => {
+			const view = mountRow({ important: true, searchQuery: 'not:starred is:pi-important' })
+
+			expect(view.vm.isImportant).toBe(true)
 		})
 
 		it('does not offer it outside an is:pi-important list', () => {

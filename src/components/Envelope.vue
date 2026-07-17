@@ -846,10 +846,14 @@ export default {
 				|| (this.data.previewText && isPgpText(this.data.previewText)) // PGP/Mailvelope
 		},
 
+		// Reads the per-copy flag, NOT the user-wide $label1 tag: the
+		// priority sections classify by flag_important (the tag is keyed
+		// by Message-ID across ALL accounts and can disagree with this
+		// copy's own state -- confirmed live with multi-account duplicate
+		// mail), so the badge must read the same source the sections use
+		// or the two visibly contradict each other.
 		isImportant() {
-			return this.mainStore
-				.getEnvelopeTags(this.data.databaseId)
-				.some((tag) => tag.imapLabel === '$label1')
+			return this.data.flags.important === true
 		},
 
 		// Thread-context badges: a row rendered inside the Important or

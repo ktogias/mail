@@ -3673,6 +3673,34 @@ describe('Vuex store actions', () => {
 			expect(store.mailboxes[11].envelopeLists['is:pi-important']).toContain(42)
 		})
 
+		// The reported live inversion: a copy whose flag_important is set
+		// (classifier keyword round-tripped via IMAP) but whose user-wide
+		// $label1 tag was never created. A tag-based current-state read
+		// would compute "not important" and try to MARK it on toggle --
+		// the exact opposite of the user's intent to unmark the badge
+		// they're looking at. The flag is the source of truth now.
+		it('toggleEnvelopeImportant unmarks a flag-important message even when no user-wide tag exists', async () => {
+			store.tags[importantTag.id] = importantTag
+			const envelope = seedEnvelope(true, []) // flag set, NO tag
+			MessageService.setEnvelopeFlags.mockResolvedValue({})
+			MessageService.removeEnvelopeTag.mockResolvedValue(importantTag)
+
+			await store.toggleEnvelopeImportant(envelope)
+
+			expect(envelope.flags.important).toBe(false)
+			expect(MessageService.setEnvelopeFlags).toHaveBeenCalledWith(42, { $label1: false })
+		})
+
+		it('setEnvelopeImportant is a no-op when the flag already matches, regardless of tag state', async () => {
+			store.tags[importantTag.id] = importantTag
+			const envelope = seedEnvelope(true, []) // flag set, NO tag
+
+			await store.setEnvelopeImportant(envelope, true)
+
+			expect(MessageService.setEnvelopeFlags).not.toHaveBeenCalled()
+			expect(MessageService.setEnvelopeTag).not.toHaveBeenCalled()
+		})
+
 		it('reverts both the flag and the tag together if the network calls fail, once the tag was applied optimistically', async () => {
 			store.tags[importantTag.id] = importantTag
 			const envelope = seedEnvelope(false, [])

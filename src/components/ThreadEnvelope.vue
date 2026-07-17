@@ -627,10 +627,10 @@ export default {
 				&& isPgpText(this.envelope.previewText)
 		},
 
+		// Per-copy flag, not the user-wide tag -- see Envelope.vue's own
+		// isImportant() for the multi-account divergence this avoids.
 		isImportant() {
-			return this.mainStore
-				.getEnvelopeTags(this.envelope.databaseId)
-				.find((tag) => tag.imapLabel === '$label1')
+			return this.envelope.flags.important === true
 		},
 
 		tags() {

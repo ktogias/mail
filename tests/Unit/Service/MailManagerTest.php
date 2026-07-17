@@ -299,16 +299,47 @@ class MailManagerTest extends TestCase {
 		$this->imapClientFactory->expects($this->any())
 			->method('getClient')
 			->willReturn($client);
-		$client->expects($this->once())
+		// Importance is dual-written: the legacy $label1 keyword AND the
+		// RFC 8457 $important keyword, each checked against server
+		// capabilities separately.
+		$client->expects($this->exactly(2))
 			->method('status')
 			->willReturn([ 'permflags' => [ '11' => "\*" ] ]);
-		$this->imapMessageMapper->expects($this->once())
-			->method('addFlag');
+		$addedFlags = [];
+		$this->imapMessageMapper->expects($this->exactly(2))
+			->method('addFlag')
+			->willReturnCallback(static function ($client, $mb, $uids, $flag) use (&$addedFlags): void {
+				$addedFlags[] = $flag;
+			});
 
 		$this->manager->flagMessage($account, 'INBOX', 123, Tag::LABEL_IMPORTANT, true);
+
+		self::assertEquals([Tag::LABEL_IMPORTANT, '$important'], $addedFlags);
 	}
 
 	public function testUnsetCustomFlagWithIMAPCapabilities(): void {
+		$client = $this->createMock(Horde_Imap_Client_Socket::class);
+		$account = $this->createStub(Account::class);
+
+		$this->imapClientFactory->expects($this->any())
+			->method('getClient')
+			->willReturn($client);
+		$client->expects($this->exactly(2))
+			->method('status')
+			->willReturn([ 'permflags' => [ '11' => "\*" ] ]);
+		$removedFlags = [];
+		$this->imapMessageMapper->expects($this->exactly(2))
+			->method('removeFlag')
+			->willReturnCallback(static function ($client, $mb, $uids, $flag) use (&$removedFlags): void {
+				$removedFlags[] = $flag;
+			});
+
+		$this->manager->flagMessage($account, 'INBOX', 123, Tag::LABEL_IMPORTANT, false);
+
+		self::assertEquals([Tag::LABEL_IMPORTANT, '$important'], $removedFlags);
+	}
+
+	public function testSetNonImportanceCustomFlagWritesOnlyItself(): void {
 		$client = $this->createMock(Horde_Imap_Client_Socket::class);
 		$account = $this->createStub(Account::class);
 
@@ -319,9 +350,9 @@ class MailManagerTest extends TestCase {
 			->method('status')
 			->willReturn([ 'permflags' => [ '11' => "\*" ] ]);
 		$this->imapMessageMapper->expects($this->once())
-			->method('removeFlag');
+			->method('addFlag');
 
-		$this->manager->flagMessage($account, 'INBOX', 123, Tag::LABEL_IMPORTANT, false);
+		$this->manager->flagMessage($account, 'INBOX', 123, '$labelwork', true);
 	}
 
 	public function testFilterFlagsWithSystemFlags(): void {
