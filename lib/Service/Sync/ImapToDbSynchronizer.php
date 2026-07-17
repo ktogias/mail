@@ -52,6 +52,9 @@ class ImapToDbSynchronizer {
 	/** @var int */
 	public const MAX_NEW_MESSAGES = 5000;
 
+	/** @var int Upper bound of missing messages backfilled per repair run */
+	public const MAX_REPAIR_BACKFILL = 1000;
+
 	/** @var IEventDispatcher */
 	private $dispatcher;
 
@@ -680,7 +683,18 @@ class ImapToDbSynchronizer {
 	}
 
 	/**
-	 * Run a (rather costly) sync to delete cached messages which are not present on IMAP anymore.
+	 * Run a (rather costly) reconciliation against IMAP, in both directions:
+	 * delete cached messages which are not present on IMAP anymore
+	 * (phantoms), and backfill messages that exist on IMAP but were never
+	 * cached locally. The latter happens when a sync token advances past a
+	 * message: the new token is captured via getSyncToken() AFTER the SYNC
+	 * response is processed, so a message arriving in that short window is
+	 * covered by the token without ever having been returned as new (seen
+	 * live: one Gmail INBOX message skipped this way while 52 later UIDs
+	 * synced normally). Nothing else ever re-offers such a UID, so without
+	 * this backfill the gap is permanent.
+	 *
+	 * @return int number of repaired (deleted + backfilled) messages
 	 *
 	 * @throws MailboxLockedException
 	 * @throws ServiceException
@@ -689,25 +703,46 @@ class ImapToDbSynchronizer {
 		Account $account,
 		Mailbox $mailbox,
 		LoggerInterface $logger,
-	): void {
-		$this->mailboxMapper->lockForVanishedSync($mailbox);
+	): int {
+		// Match regular sync's lock order. Holding the new-message lock makes
+		// the IMAP-vs-DB set comparison and the ensuing inserts one atomic
+		// repair operation, including a missing mailbox tail with no later
+		// message to move the local high-water mark.
+		$this->mailboxMapper->lockForNewSync($mailbox);
+		$newSyncLockAcquired = true;
+		$vanishedSyncLockAcquired = false;
 
-		$perf = $this->performanceLogger->startWithLogger(
-			"Repair sync for {$account->getId()}:{$mailbox->getName()}",
-			$logger,
-		);
-
-		// Need to use a client without a cache here (to disable QRESYNC entirely)
-		$client = $this->clientFactory->getClient($account, false);
 		try {
-			$knownUids = $this->dbMapper->findAllUids($mailbox);
-			$hordeMailbox = new \Horde_Imap_Client_Mailbox($mailbox->getName());
-			$phantomVanishedUids = $client->vanished($hordeMailbox, 0, [
-				'ids' => new Horde_Imap_Client_Ids($knownUids),
-			])->ids;
-			if (count($phantomVanishedUids) > 0) {
-				$this->dbMapper->deleteByUid($mailbox, ...$phantomVanishedUids);
+			$this->mailboxMapper->lockForVanishedSync($mailbox);
+			$vanishedSyncLockAcquired = true;
+
+			$perf = $this->performanceLogger->startWithLogger(
+				"Repair sync for {$account->getId()}:{$mailbox->getName()}",
+				$logger,
+			);
+
+			$repaired = 0;
+			// Need to use a client without a cache here (to disable QRESYNC entirely)
+			$client = $this->clientFactory->getClient($account, false);
+			try {
+				$knownUids = $this->dbMapper->findAllUids($mailbox);
+				$hordeMailbox = new \Horde_Imap_Client_Mailbox($mailbox->getName());
+				$phantomVanishedUids = $client->vanished($hordeMailbox, 0, [
+					'ids' => new Horde_Imap_Client_Ids($knownUids),
+				])->ids;
+				if (count($phantomVanishedUids) > 0) {
+					$this->dbMapper->deleteByUid($mailbox, ...$phantomVanishedUids);
+					$repaired += count($phantomVanishedUids);
+				}
+				$perf->step('remove phantom messages');
+
+				$repaired += $this->backfillMissingUids($client, $account, $mailbox, $hordeMailbox, $knownUids, $logger);
+				$perf->step('backfill missing messages');
+			} finally {
+				$client->logout();
 			}
+		} catch (MailboxLockedException $e) {
+			throw $e;
 		} catch (Throwable $e) {
 			$message = sprintf(
 				'Repair sync failed for %d:%s: %s',
@@ -717,10 +752,110 @@ class ImapToDbSynchronizer {
 			);
 			throw new ServiceException($message, 0, $e);
 		} finally {
-			$this->mailboxMapper->unlockFromVanishedSync($mailbox);
-			$client->logout();
+			if ($vanishedSyncLockAcquired) {
+				$this->mailboxMapper->unlockFromVanishedSync($mailbox);
+			}
+			if ($newSyncLockAcquired) {
+				$this->mailboxMapper->unlockFromNewSync($mailbox);
+			}
 		}
 
 		$perf->end();
+		return $repaired;
+	}
+
+	/**
+	 * Ingest messages that exist on IMAP but are missing from the local
+	 * cache, using the same persist path as runPartialSync() (insert,
+	 * classify, NewMessagesSynchronized).
+	 *
+	 * repairSync() holds the new-message lock for this whole operation, so
+	 * every IMAP-only UID is safe to ingest. In particular, a missing newest
+	 * message cannot wait forever for an even newer message to advance a
+	 * local high-water mark.
+	 *
+	 * @param int[] $knownUids
+	 *
+	 * @return int number of backfilled messages
+	 */
+	private function backfillMissingUids(
+		Horde_Imap_Client_Base $client,
+		Account $account,
+		Mailbox $mailbox,
+		\Horde_Imap_Client_Mailbox $hordeMailbox,
+		array $knownUids,
+		LoggerInterface $logger,
+	): int {
+		if (!$mailbox->isCached()) {
+			// Initial sync still owns this mailbox
+			return 0;
+		}
+
+		$searchResult = $client->search($hordeMailbox, null, [
+			'results' => [Horde_Imap_Client::SEARCH_RESULTS_MATCH],
+		]);
+		$imapUids = $searchResult['match']->ids;
+
+		$missingUids = array_values(array_diff($imapUids, $knownUids));
+		if ($missingUids === []) {
+			return 0;
+		}
+
+		sort($missingUids);
+		if (count($missingUids) > self::MAX_REPAIR_BACKFILL) {
+			$logger->warning(sprintf(
+				'Mailbox %d is missing %d messages present on IMAP, backfilling only the first %d this run',
+				$mailbox->getId(),
+				count($missingUids),
+				self::MAX_REPAIR_BACKFILL,
+			));
+			$missingUids = array_slice($missingUids, 0, self::MAX_REPAIR_BACKFILL);
+		} else {
+			$logger->warning(sprintf(
+				'Mailbox %d is missing %d message(s) present on IMAP (uids %s), backfilling',
+				$mailbox->getId(),
+				count($missingUids),
+				implode(',', array_slice($missingUids, 0, 20)),
+			));
+		}
+
+		$importantTag = null;
+		try {
+			$importantTag = $this->tagMapper->getTagByImapLabel(Tag::LABEL_IMPORTANT, $account->getUserId());
+		} catch (DoesNotExistException $e) {
+			$this->logger->error('Could not find important tag for ' . $account->getUserId() . ' ' . $e->getMessage(), [
+				'exception' => $e,
+			]);
+		}
+
+		$backfilled = 0;
+		foreach (array_chunk($missingUids, 500) as $chunk) {
+			$imapMessages = $this->imapMapper->findByIds(
+				$client,
+				$mailbox->getName(),
+				new Horde_Imap_Client_Ids($chunk),
+				$account->getUserId(),
+			);
+			if ($imapMessages === []) {
+				continue;
+			}
+			$dbMessages = array_map(static fn (IMAPMessage $imapMessage) => $imapMessage->toDbMessage($mailbox->getId(), $account->getMailAccount()), $imapMessages);
+			$this->dbMapper->insertBulk($account, ...$dbMessages);
+			if ($importantTag) {
+				$this->newMessagesClassifier->classifyNewMessages(
+					$dbMessages,
+					$mailbox,
+					$account,
+					$importantTag,
+				);
+			}
+			$this->dispatcher->dispatch(
+				NewMessagesSynchronized::class,
+				new NewMessagesSynchronized($account, $mailbox, $dbMessages)
+			);
+			$backfilled += count($dbMessages);
+		}
+
+		return $backfilled;
 	}
 }

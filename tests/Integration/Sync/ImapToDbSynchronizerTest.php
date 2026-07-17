@@ -87,14 +87,58 @@ class ImapToDbSynchronizerTest extends TestCase {
 		self::assertCount(3, $dbMessageMapper->findAllUids($inbox));
 
 		// Do a repair sync to get rid of the vanished message that is still in the cache
-		$this->synchronizer->repairSync(
+		self::assertSame(1, $this->synchronizer->repairSync(
 			new Account($this->account),
 			$inbox,
 			Server::get(LoggerInterface::class),
-		);
+		));
 
 		// Assert that the cached state has been reconciled with IMAP
 		self::assertEqualsCanonicalizing([$uid1, $uid2], $dbMessageMapper->findAllUids($inbox));
+	}
+
+	public function testRepairSyncBackfillsNewestMessageMissingFromCache(): void {
+		$mailbox = 'INBOX';
+		$uids = [];
+		for ($i = 1; $i <= 3; $i++) {
+			$message = $this->getMessageBuilder()
+				->from('ralph@buffington@domain.tld')
+				->to('user@domain.tld')
+				->subject("Message $i")
+				->finish();
+			$uids[] = $this->saveMessage($mailbox, $message, $this->account);
+		}
+
+		$mailManager = Server::get(IMailManager::class);
+		$inbox = null;
+		foreach ($mailManager->getMailboxes(new Account($this->account)) as $mailBox) {
+			if ($mailBox->getName() === 'INBOX') {
+				$inbox = $mailBox;
+				break;
+			}
+		}
+
+		$syncService = Server::get(SyncService::class);
+		$syncService->syncMailbox(
+			new Account($this->account),
+			$inbox,
+			Horde_Imap_Client::SYNC_NEWMSGSUIDS | Horde_Imap_Client::SYNC_FLAGSUIDS | Horde_Imap_Client::SYNC_VANISHEDUIDS,
+			false,
+			null,
+			[],
+		);
+
+		$dbMessageMapper = Server::get(DbMessageMapper::class);
+		$dbMessageMapper->deleteByUid($inbox, $uids[2]);
+		self::assertEqualsCanonicalizing([$uids[0], $uids[1]], $dbMessageMapper->findAllUids($inbox));
+
+		self::assertSame(1, $this->synchronizer->repairSync(
+			new Account($this->account),
+			$inbox,
+			Server::get(LoggerInterface::class),
+		));
+
+		self::assertEqualsCanonicalizing($uids, $dbMessageMapper->findAllUids($inbox));
 	}
 
 	public function testRepairSyncNoopIfNoneVanished(): void {
@@ -146,11 +190,11 @@ class ImapToDbSynchronizerTest extends TestCase {
 		self::assertCount(3, $dbMessageMapper->findAllUids($inbox));
 
 		// Do a repair sync to get rid of the vanished message that is still in the cache
-		$this->synchronizer->repairSync(
+		self::assertSame(0, $this->synchronizer->repairSync(
 			new Account($this->account),
 			$inbox,
 			Server::get(LoggerInterface::class),
-		);
+		));
 
 		// Assert that the cached state has been reconciled with IMAP
 		self::assertEqualsCanonicalizing([$uid1, $uid2, $uid3], $dbMessageMapper->findAllUids($inbox));

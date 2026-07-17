@@ -11,6 +11,8 @@ namespace OCA\Mail\BackgroundJob;
 
 use OCA\Mail\Db\MailboxMapper;
 use OCA\Mail\Events\SynchronizationEvent;
+use OCA\Mail\Exception\MailboxLockedException;
+use OCA\Mail\Exception\ServiceException;
 use OCA\Mail\Service\AccountService;
 use OCA\Mail\Service\Sync\SyncService;
 use OCP\AppFramework\Db\DoesNotExistException;
@@ -81,8 +83,18 @@ class RepairSyncJob extends TimedJob {
 				continue;
 			}
 
-			if ($this->syncService->repairSync($account, $mailbox) > 0) {
-				$rebuildThreads = true;
+			try {
+				if ($this->syncService->repairSync($account, $mailbox) > 0) {
+					$rebuildThreads = true;
+				}
+			} catch (MailboxLockedException|ServiceException $e) {
+				// One locked or broken mailbox must not abort the repair of
+				// every mailbox after it in iteration order -- the same
+				// starvation shape ImapToDbSynchronizer::syncAccount()
+				// already guards against for the regular sync pass.
+				$this->logger->warning("Repair sync failed for mailbox {$mailbox->getId()}, continuing with the account's remaining mailboxes", [
+					'exception' => $e,
+				]);
 			}
 		}
 

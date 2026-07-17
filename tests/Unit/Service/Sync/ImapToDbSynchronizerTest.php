@@ -12,6 +12,7 @@ namespace OCA\Mail\Tests\Unit\Service\Sync;
 use ChristophWurst\Nextcloud\Testing\TestCase;
 use Horde_Imap_Client;
 use Horde_Imap_Client_Data_Capability_Imap;
+use Horde_Imap_Client_Ids;
 use Horde_Imap_Client_Socket;
 use OCA\Mail\Account;
 use OCA\Mail\Cache\HordeSyncTokenParser;
@@ -19,14 +20,18 @@ use OCA\Mail\Contracts\IMailManager;
 use OCA\Mail\Db\MailAccount;
 use OCA\Mail\Db\Mailbox;
 use OCA\Mail\Db\MailboxMapper;
+use OCA\Mail\Db\Message;
 use OCA\Mail\Db\MessageMapper as DatabaseMessageMapper;
+use OCA\Mail\Db\Tag;
 use OCA\Mail\Db\TagMapper;
+use OCA\Mail\Events\NewMessagesSynchronized;
 use OCA\Mail\Events\SynchronizationEvent;
 use OCA\Mail\Exception\IncompleteSyncException;
 use OCA\Mail\Exception\MailboxLockedException;
 use OCA\Mail\IMAP\IMAPClientFactory;
 use OCA\Mail\IMAP\MessageMapper as ImapMessageMapper;
 use OCA\Mail\IMAP\Sync\Synchronizer;
+use OCA\Mail\Model\IMAPMessage;
 use OCA\Mail\Service\Classification\NewMessagesClassifier;
 use OCA\Mail\Service\Sync\ImapToDbSynchronizer;
 use OCA\Mail\Service\Sync\SyncFastPathStats;
@@ -118,6 +123,50 @@ class ImapToDbSynchronizerTest extends TestCase {
 			$mailbox,
 			$this->createStub(LoggerInterface::class),
 		);
+	}
+
+	public function testRepairSyncBackfillsAMissingNewestUidWithoutWaitingForAnotherMessage(): void {
+		$mailAccount = new MailAccount();
+		$mailAccount->setId(1);
+		$mailAccount->setUserId('user');
+		$account = new Account($mailAccount);
+		$mailbox = $this->buildPartialSyncMailbox();
+		$client = $this->createMock(Horde_Imap_Client_Socket::class);
+		$dbMessage = new Message();
+		$imapMessage = $this->createMock(IMAPMessage::class);
+		$imapMessage->method('toDbMessage')->with(149, $mailAccount)->willReturn($dbMessage);
+
+		$this->mailboxMapper->expects(self::once())->method('lockForNewSync')->with($mailbox);
+		$this->mailboxMapper->expects(self::once())->method('lockForVanishedSync')->with($mailbox);
+		$this->mailboxMapper->expects(self::once())->method('unlockFromVanishedSync')->with($mailbox);
+		$this->mailboxMapper->expects(self::once())->method('unlockFromNewSync')->with($mailbox);
+		$this->clientFactory->expects(self::once())->method('getClient')->with($account, false)->willReturn($client);
+		$this->dbMapper->expects(self::once())->method('findAllUids')->with($mailbox)->willReturn([1, 2]);
+		$client->expects(self::once())->method('vanished')->willReturn(new Horde_Imap_Client_Ids());
+		$client->expects(self::once())->method('search')->willReturn([
+			'match' => new Horde_Imap_Client_Ids([1, 2, 3]),
+		]);
+		$client->expects(self::once())->method('logout');
+		$this->imapMapper->expects(self::once())
+			->method('findByIds')
+			->with($client, 'INBOX', self::callback(static fn (Horde_Imap_Client_Ids $ids) => $ids->ids === [3]), 'user')
+			->willReturn([$imapMessage]);
+		$this->dbMapper->expects(self::once())->method('insertBulk')->with($account, $dbMessage);
+
+		$tag = new Tag();
+		$tagMapper = $this->createStub(TagMapper::class);
+		$tagMapper->method('getTagByImapLabel')->with(Tag::LABEL_IMPORTANT, 'user')->willReturn($tag);
+		$classifier = $this->createMock(NewMessagesClassifier::class);
+		$classifier->expects(self::once())->method('classifyNewMessages')->with([$dbMessage], $mailbox, $account, $tag);
+		$this->dispatcher->expects(self::once())
+			->method('dispatch')
+			->with(NewMessagesSynchronized::class, self::isInstanceOf(NewMessagesSynchronized::class));
+
+		self::assertSame(1, $this->buildSynchronizerWithSyncMock(
+			$this->createStub(Synchronizer::class),
+			$tagMapper,
+			$classifier,
+		)->repairSync($account, $mailbox, $this->createStub(LoggerInterface::class)));
 	}
 
 	/**
@@ -269,7 +318,11 @@ class ImapToDbSynchronizerTest extends TestCase {
 		$synchronizer->syncAccount($account, $this->createStub(LoggerInterface::class));
 	}
 
-	private function buildSynchronizerWithSyncMock(Synchronizer&MockObject $imapSync): ImapToDbSynchronizer {
+	private function buildSynchronizerWithSyncMock(
+		Synchronizer&MockObject $imapSync,
+		?TagMapper $tagMapper = null,
+		?NewMessagesClassifier $classifier = null,
+	): ImapToDbSynchronizer {
 		return new ImapToDbSynchronizer(
 			$this->dbMapper,
 			$this->clientFactory,
@@ -281,8 +334,8 @@ class ImapToDbSynchronizerTest extends TestCase {
 			$this->performanceLogger,
 			$this->createStub(LoggerInterface::class),
 			$this->createStub(IMailManager::class),
-			$this->createStub(TagMapper::class),
-			$this->createStub(NewMessagesClassifier::class),
+			$tagMapper ?? $this->createStub(TagMapper::class),
+			$classifier ?? $this->createStub(NewMessagesClassifier::class),
 			new HordeSyncTokenParser(),
 			$this->fastPathStats,
 		);

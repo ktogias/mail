@@ -160,13 +160,17 @@ class SyncService {
 	}
 
 	/**
-	 * Run a (rather costly) sync to delete cached messages which are not present on IMAP anymore.
+	 * Run a (rather costly) reconciliation against IMAP: delete cached
+	 * messages which are not present on IMAP anymore and backfill messages
+	 * present on IMAP that the sync token skipped.
+	 *
+	 * @return int number of repaired (deleted + backfilled) messages
 	 *
 	 * @throws MailboxLockedException
 	 * @throws ServiceException
 	 */
-	public function repairSync(Account $account, Mailbox $mailbox): void {
-		$this->synchronizer->repairSync($account, $mailbox, $this->logger);
+	public function repairSync(Account $account, Mailbox $mailbox): int {
+		return $this->synchronizer->repairSync($account, $mailbox, $this->logger);
 	}
 
 	/**
