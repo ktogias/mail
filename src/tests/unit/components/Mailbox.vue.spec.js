@@ -469,6 +469,72 @@ describe('Mailbox', () => {
 		})
 	})
 
+	describe('onDelete() honors the "auto-advance" preference', () => {
+		// After deleting the open message, where to go is a user preference
+		// (AppSettingsMenu.vue): 'next' (default) / 'previous' / 'list'. The
+		// directions are sort-agnostic -- next/previous mean the neighbour
+		// below/above in the list as currently sorted, each falling back to
+		// the other end, then to the list.
+		beforeEach(() => {
+			store.getEnvelopes = vi.fn().mockReturnValue([
+				{ databaseId: 1 },
+				{ databaseId: 2 },
+				{ databaseId: 3 },
+			])
+			store.fetchNextEnvelopes = vi.fn().mockResolvedValue([])
+		})
+
+		it('opens the previous message when the preference is "previous"', () => {
+			store.getPreference = vi.fn().mockReturnValue('previous')
+			const view = mountMailbox({ searchQuery: 'is:starred' }, { $route: { params: { threadId: 2 } } })
+
+			view.vm.onDelete(2)
+
+			expect(store.getPreference).toHaveBeenCalledWith('auto-advance', 'next')
+			expect(view.vm.$router.push).toHaveBeenCalledWith(expect.objectContaining({
+				name: 'message',
+				params: expect.objectContaining({ threadId: 1 }),
+			}))
+		})
+
+		it('falls back to the other neighbour when the preferred direction has none', () => {
+			// "previous" from the first message: no message above, so it takes
+			// the one below rather than bailing to the list.
+			store.getPreference = vi.fn().mockReturnValue('previous')
+			const view = mountMailbox({ searchQuery: 'is:starred' }, { $route: { params: { threadId: 1 } } })
+
+			view.vm.onDelete(1)
+
+			expect(view.vm.$router.push).toHaveBeenCalledWith(expect.objectContaining({
+				name: 'message',
+				params: expect.objectContaining({ threadId: 2 }),
+			}))
+		})
+
+		it('returns to the message list when the preference is "list"', () => {
+			store.getPreference = vi.fn().mockReturnValue('list')
+			const view = mountMailbox({ searchQuery: 'is:starred' }, { $route: { params: { threadId: 2 } } })
+
+			view.vm.onDelete(2)
+
+			expect(view.vm.$router.push).toHaveBeenCalledWith(expect.objectContaining({ name: 'mailbox' }))
+			expect(view.vm.$router.push).not.toHaveBeenCalledWith(expect.objectContaining({ name: 'message' }))
+			// "list" is an explicit navigate-away, not a neighbour open, so it
+			// must not record list context for neighbour prefetching.
+			expect(store.lastOpenedFromList).toBeNull()
+		})
+
+		it('returns to the message list when there is no neighbour at all', () => {
+			store.getEnvelopes = vi.fn().mockReturnValue([{ databaseId: 2 }])
+			store.getPreference = vi.fn().mockReturnValue('next')
+			const view = mountMailbox({ searchQuery: 'is:starred' }, { $route: { params: { threadId: 2 } } })
+
+			view.vm.onDelete(2)
+
+			expect(view.vm.$router.push).toHaveBeenCalledWith(expect.objectContaining({ name: 'mailbox' }))
+		})
+	})
+
 	describe('keyboard-shortcut delete/archive go through the same undo window as a list click', () => {
 		// Mailbox.vue's own 'del'/'arch' keyboard shortcuts used to call
 		// deleteThread()/moveThread() directly -- a third entry point

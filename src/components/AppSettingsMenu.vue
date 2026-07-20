@@ -100,6 +100,15 @@
 					<NcRadioGroupButton :label="t('mail', 'Oldest first')" value="oldest" />
 				</NcRadioGroup>
 
+				<NcRadioGroup
+					:model-value="autoAdvance"
+					:label="t('mail', 'After deleting or moving a message')"
+					@update:modelValue="onSetAutoAdvance">
+					<NcRadioGroupButton :label="t('mail', 'Open the next message')" value="next" />
+					<NcRadioGroupButton :label="t('mail', 'Open the previous message')" value="previous" />
+					<NcRadioGroupButton :label="t('mail', 'Go back to the message list')" value="list" />
+				</NcRadioGroup>
+
 				<NcDialog
 					:open.sync="textBlockDialogOpen"
 					:name="t('mail', 'New text block')"
@@ -389,6 +398,7 @@ export default {
 			loadingSortFavorites: false,
 			displaySmimeCertificateModal: false,
 			sortOrder: 'newest',
+			autoAdvance: 'next',
 			showSettings: false,
 			showAccountSettings: false,
 			showMailSettings: true,
@@ -556,6 +566,7 @@ export default {
 
 	mounted() {
 		this.sortOrder = this.mainStore.getPreference('sort-order', 'newest')
+		this.autoAdvance = this.mainStore.getPreference('auto-advance', 'next')
 		document.addEventListener.call(window, 'mailvelope', () => this.checkMailvelope())
 		if (!this.mainStore.areTextBlocksFetched()) {
 			this.mainStore.fetchMyTextBlocks()
@@ -695,6 +706,21 @@ export default {
 			} catch (error) {
 				Logger.error('could not save preferences', { error })
 				this.sortOrder = previousValue
+				showError(t('mail', 'Could not update preference'))
+			}
+		},
+
+		async onSetAutoAdvance(value) {
+			const previousValue = this.autoAdvance
+			try {
+				this.autoAdvance = value
+				await this.mainStore.savePreference({
+					key: 'auto-advance',
+					value,
+				})
+			} catch (error) {
+				Logger.error('could not save preferences', { error })
+				this.autoAdvance = previousValue
 				showError(t('mail', 'Could not update preference'))
 			}
 		},

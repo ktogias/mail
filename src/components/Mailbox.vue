@@ -807,9 +807,22 @@ export default {
 				return
 			}
 
-			const next = this.envelopes[idx + 1] ?? this.envelopes[idx - 1]
-			if (!next) {
-				logger.debug('no next/previous envelope, not navigating')
+			// Where to go after the open message is removed. Directions are
+			// sort-agnostic: "next"/"previous" mean the neighbour below/above in
+			// the list as currently sorted, each falling back to the other end
+			// when there's no neighbour that way; "list" returns to the mailbox.
+			const autoAdvance = this.mainStore.getPreference('auto-advance', 'next')
+			const next = autoAdvance === 'previous'
+				? (this.envelopes[idx - 1] ?? this.envelopes[idx + 1])
+				: (this.envelopes[idx + 1] ?? this.envelopes[idx - 1])
+			if (autoAdvance === 'list' || !next) {
+				this.$router.push({
+					name: 'mailbox',
+					params: {
+						mailboxId: this.$route.params.mailboxId,
+						filter: this.$route.params.filter ? this.$route.params.filter : undefined,
+					},
+				})
 				return
 			}
 

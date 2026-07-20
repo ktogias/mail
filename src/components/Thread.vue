@@ -634,6 +634,38 @@ export default {
 			})
 		},
 
+		// After the whole thread is removed (deleted/moved/junked/snoozed),
+		// go where the user's "auto-advance" preference says. Directions are
+		// sort-agnostic: "next"/"previous" mean the neighbour below/above in the
+		// list as currently sorted, each falling back to the other end, then to
+		// the list. "list" (and having no neighbour at all) returns to the
+		// mailbox. Mirrors Mailbox.onDelete() for single-message removal.
+		advanceAfterRemoval() {
+			const preference = this.mainStore.getPreference('auto-advance', 'next')
+			const nav = this.listNavigation
+			if (preference !== 'list' && nav) {
+				if (preference === 'next' && nav.hasNext) {
+					this.navigateList('next')
+					return
+				}
+				if (preference === 'previous' && nav.hasPrevious) {
+					this.navigateList('prev')
+					return
+				}
+				// The preferred direction has no neighbour -- try the other way
+				// before giving up and returning to the list.
+				if (nav.hasNext) {
+					this.navigateList('next')
+					return
+				}
+				if (nav.hasPrevious) {
+					this.navigateList('prev')
+					return
+				}
+			}
+			this.closeThread()
+		},
+
 		// Mark every message in the thread read (targetSeen=true) or unread
 		// (false). Only the ones that actually differ are toggled. Reversible
 		// and cheap, so no undo toast -- unlike the removal actions below.
@@ -679,7 +711,7 @@ export default {
 				logger.error('could not move thread', { error })
 				showError(t('mail', 'Could not move thread'))
 			})
-			this.closeThread()
+			this.advanceAfterRemoval()
 		},
 
 		deleteThreadAction() {
@@ -705,7 +737,7 @@ export default {
 					},
 				}))
 			})
-			this.closeThread()
+			this.advanceAfterRemoval()
 		},
 
 		// Mark every message in the thread as spam / not-spam. In this fork
@@ -759,7 +791,7 @@ export default {
 				logger.error('could not snooze thread', { error })
 				showError(t('mail', 'Could not snooze thread'))
 			})
-			this.closeThread()
+			this.advanceAfterRemoval()
 		},
 
 		async unSnoozeThreadAction() {
