@@ -1248,12 +1248,20 @@ $mail-thread-header-inline-start: calc(var(--default-grid-baseline) * 14 + var(-
 @media only screen and (max-width: #{variables.$breakpoint-mobile}) {
     #mail-thread-header {
         position: sticky !important;
-        // Flush to the top of the scroll container. The old 29px offset left
-        // a transparent band above the pinned header that the scrolling
-        // message list showed through -- it used to be masked by a
-        // margin-top:-32px hack on the (single-row) fields, removed in the
-        // two-row redesign.
+        // Pin flush at the very top so it never moves on scroll. The mobile
+        // back button (.app-details-toggle, NcAppContent) is itself a sticky
+        // element sitting in the flow ABOVE this content, so at rest the
+        // header started ~32px lower than its pinned (top:0) position and
+        // "jumped up" on the first scroll. The negative margin cancels that
+        // flow block so the resting position already equals the pinned one --
+        // this is the margin-top:-32px hack the pre-redesign single-row header
+        // carried on its fields, restored here on the whole two-row header.
         top: 0 !important;
+        margin-top: -32px !important;
+        // Breathing room under the blue app bar, roughly matching the gap down
+        // to the meta line. Independent of the pin above: it grows the header
+        // downward from its (flush) top edge, it doesn't move that edge.
+        padding-top: calc(var(--default-grid-baseline) * 2) !important;
     }
 }
 
