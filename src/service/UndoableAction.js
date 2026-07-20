@@ -4,6 +4,7 @@
  */
 
 import { showUndo, TOAST_UNDO_TIMEOUT } from '@nextcloud/dialogs'
+import { enableSwipeToDismiss } from '../util/swipeToDismiss.js'
 
 /**
  * Plain-JS core of the "hide immediately, defer the real action, restore
@@ -29,18 +30,21 @@ import { showUndo, TOAST_UNDO_TIMEOUT } from '@nextcloud/dialogs'
  */
 export async function deferWithUndo({ message, action, onUndo }) {
 	let undone = false
-	showUndo(message, () => {
+	const toast = showUndo(message, () => {
 		undone = true
 		onUndo?.()
 	}, {
-		// An explicit dismiss (×) button: the toast can sit over the sticky
-		// thread header on mobile, and the only other way out was to wait for
-		// it to time out. Dismissing just hides the toast -- it does NOT undo
-		// (that's the Undo button's job); the deferred action still runs when
-		// the window passes, the standard snackbar behaviour.
+		// Also request a close (×) button where the theme renders one; on
+		// mobile the primary dismissal is the swipe gesture below.
 		close: true,
 		timeout: TOAST_UNDO_TIMEOUT,
 	})
+
+	// Swipe-to-dismiss (the standard mobile snackbar gesture): flinging the
+	// toast away just hides it, it does NOT undo -- the deferred action still
+	// runs when the window passes, matching a normal snackbar. showUndo returns
+	// the Toastify instance (undefined when mocked in tests, handled inside).
+	enableSwipeToDismiss(toast?.toastElement, () => toast?.hideToast?.())
 
 	await new Promise((resolve) => setTimeout(resolve, TOAST_UNDO_TIMEOUT))
 
