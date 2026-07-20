@@ -71,26 +71,30 @@
 					<div class="sender" :class="{ 'sender--expanded': expanded }">
 						{{ envelope.from && envelope.from[0] ? envelope.from[0].label : '' }}
 					</div>
+					<!-- Always offered while expanded (not only when there are
+					     to/cc/bcc): it's the one discoverable way into the full
+					     From/To/Cc details, and gating it on hasRecipients hid it
+					     entirely on bulk mail that carries no visible recipients
+					     -- reported live on mobile. Shows the sender's address
+					     (the most useful at-a-glance detail) with a chevron, and
+					     falls back to a plain "Details" label when the sender has
+					     no address. -->
 					<NcButton
-						v-if="expanded && hasRecipients"
+						v-if="expanded"
 						type="button"
 						class="sender__email sender__email--toggle"
 						size="small"
 						variant="tertiary"
 						alignment="start-reverse"
+						:aria-label="t('mail', 'Show sender and recipient details')"
 						:style="{ '--font-weight-element': 'normal' }"
 						@click.stop.prevent="showRecipients = !showRecipients">
-						{{ senderEmail }}
+						{{ senderEmail || t('mail', 'Details') }}
 						<template #icon>
 							<ChevronUpIcon v-if="showRecipients" :size="16" />
 							<ChevronDownIcon v-else :size="16" />
 						</template>
 					</NcButton>
-					<RecipientBubble
-						v-else-if="expanded && envelope.from && envelope.from[0]"
-						:email="envelope.from[0].email"
-						:label="envelope.from[0].label"
-						:size="24" />
 					<div v-if="hasChangedSubject" class="subline">
 						{{ cleanSubject }}
 					</div>
@@ -569,10 +573,6 @@ export default {
 		...mapStores(useOutboxStore, useMainStore),
 		senderEmail() {
 			return this.envelope.from?.[0]?.email ?? ''
-		},
-
-		hasRecipients() {
-			return !!(this.envelope.to?.length || this.envelope.cc?.length || this.envelope.bcc?.length)
 		},
 
 		inlineMenuSize() {
