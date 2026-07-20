@@ -20,6 +20,15 @@ export const IDLE_TRIM_MS = 12 * 60 * 1000
 // against the boundary; scrolling back down past this point simply re-runs
 // the existing forward pagination, the same as a fresh, first-time load.
 export const ENVELOPE_LIST_BASELINE_SIZE = 100
+// Above this many rendered rows the mailbox list stops animating enter/leave
+// transitions. On a long, deep-scrolled list those per-row animations
+// (`transition: all`, plus the per-entering-row getTransitionInfo/transitionDelay
+// reads and t()/DOMPurify work) dominate paint time while new pages stream in
+// during scroll -- confirmed in the 2026-07-20 Firefox profile (DisplayList +
+// Paint under RefreshDriver, transition-group `updated`/`hasMove` hot at ~1145
+// rows). Below the threshold a short list at the head keeps its animation. Set
+// comfortably above the trim baseline so ordinary top-of-list use is unaffected.
+export const ENVELOPE_LIST_MAX_ANIMATED_SIZE = 200
 export const UNDO_DELAY = TOAST_UNDO_TIMEOUT
 export const EDITOR_MODE_HTML = 'richtext'
 export const EDITOR_MODE_TEXT = 'plaintext'

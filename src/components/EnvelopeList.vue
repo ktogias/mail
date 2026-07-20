@@ -208,6 +208,7 @@ import NoTrashMailboxConfiguredError
 	from '../errors/NoTrashMailboxConfiguredError.js'
 import logger from '../logger.js'
 import UndoableActionMixin from '../mixins/UndoableActionMixin.js'
+import { ENVELOPE_LIST_MAX_ANIMATED_SIZE } from '../store/constants.js'
 import useMainStore from '../store/mainStore.js'
 
 export default {
@@ -387,7 +388,15 @@ export default {
 		},
 
 		listTransitionName() {
-			return this.skipTransition ? 'disabled' : 'list'
+			// Drop the enter/leave animation once the list is long: on a
+			// deep-scrolled list the per-row transitions dominate paint time
+			// as new pages stream in during scroll, for no visible benefit
+			// far below the viewport (see ENVELOPE_LIST_MAX_ANIMATED_SIZE).
+			// skipTransition still forces it off for bulk removals regardless.
+			if (this.skipTransition || this.sortedEnvelops.length > ENVELOPE_LIST_MAX_ANIMATED_SIZE) {
+				return 'disabled'
+			}
+			return 'list'
 		},
 	},
 

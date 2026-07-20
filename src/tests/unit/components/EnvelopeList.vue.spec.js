@@ -441,4 +441,34 @@ describe('EnvelopeList', () => {
 			expect(view.vm.sortedEnvelops.map((e) => e.databaseId).sort()).toEqual([1, 2, 3])
 		})
 	})
+
+	describe('listTransitionName: drops the enter/leave animation on long lists', () => {
+		// On a deep-scrolled list the per-row enter/leave transitions
+		// (transition: all + per-row getTransitionInfo/DOMPurify work)
+		// dominate paint time as new pages stream in during scroll -- the
+		// 2026-07-20 profile flagged exactly this at ~1145 rows. A short list
+		// at the head keeps animating; a long one does not.
+		function manyEnvelopes(count) {
+			return Array.from({ length: count }, (_, i) => ({ databaseId: i + 1, flags: {}, dateInt: i + 1 }))
+		}
+
+		it('animates a short list (at or below the threshold)', () => {
+			const view = mountEnvelopeList({ envelopes: manyEnvelopes(200) })
+
+			expect(view.vm.sortedEnvelops.length).toBe(200)
+			expect(view.vm.listTransitionName).toBe('list')
+		})
+
+		it('stops animating once the list grows past the threshold', () => {
+			const view = mountEnvelopeList({ envelopes: manyEnvelopes(201) })
+
+			expect(view.vm.listTransitionName).toBe('disabled')
+		})
+
+		it('still honours skipTransition on a short list (bulk-removal suppression)', () => {
+			const view = mountEnvelopeList({ envelopes: manyEnvelopes(3), skipTransition: true })
+
+			expect(view.vm.listTransitionName).toBe('disabled')
+		})
+	})
 })
