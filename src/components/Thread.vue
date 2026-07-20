@@ -14,7 +14,16 @@
 			<div id="mail-thread-header">
 				<div id="mail-thread-header-top">
 					<div id="mail-thread-header-fields">
-						<h2 dir="auto" :title="threadSubject">
+						<h2
+							dir="auto"
+							:title="threadSubject"
+							:class="{ 'thread-subject--expanded': subjectExpanded }"
+							role="button"
+							tabindex="0"
+							:aria-expanded="subjectExpanded"
+							@click="subjectExpanded = !subjectExpanded"
+							@keydown.enter="subjectExpanded = !subjectExpanded"
+							@keydown.space.prevent="subjectExpanded = !subjectExpanded">
 							{{ threadSubject }}
 						</h2>
 					</div>
@@ -183,6 +192,7 @@ export default {
 			errorMessage: '',
 			errorTitle: '',
 			expandedThreads: [],
+			subjectExpanded: false,
 			showMoveModal: false,
 			enabledThreadSummary: loadState('mail', 'llm_summaries_available', false),
 			summaryText: '',
@@ -776,6 +786,11 @@ export default {
 		},
 
 		async resetThread() {
+			// A different conversation -- collapse the subject back to its
+			// one-line form so a previously tapped-open long subject doesn't
+			// carry over.
+			this.subjectExpanded = false
+
 			// Opening a message is a direct user action -- give it
 			// priority over the background watched-mailbox poller (see
 			// setInteractionPriorityMutation() in the store).
@@ -1233,7 +1248,12 @@ $mail-thread-header-inline-start: calc(var(--default-grid-baseline) * 14 + var(-
 @media only screen and (max-width: #{variables.$breakpoint-mobile}) {
     #mail-thread-header {
         position: sticky !important;
-        top: 29px !important;
+        // Flush to the top of the scroll container. The old 29px offset left
+        // a transparent band above the pinned header that the scrolling
+        // message list showed through -- it used to be masked by a
+        // margin-top:-32px hack on the (single-row) fields, removed in the
+        // two-row redesign.
+        top: 0 !important;
     }
 }
 
@@ -1262,6 +1282,14 @@ $mail-thread-header-inline-start: calc(var(--default-grid-baseline) * 14 + var(-
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+		cursor: pointer;
+
+		// Tapped open: show the whole subject, wrapped, instead of truncated.
+		&.thread-subject--expanded {
+			white-space: normal;
+			overflow: visible;
+			text-overflow: clip;
+		}
 	}
 }
 
