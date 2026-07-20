@@ -32,6 +32,14 @@ export async function deferWithUndo({ message, action, onUndo }) {
 	showUndo(message, () => {
 		undone = true
 		onUndo?.()
+	}, {
+		// An explicit dismiss (×) button: the toast can sit over the sticky
+		// thread header on mobile, and the only other way out was to wait for
+		// it to time out. Dismissing just hides the toast -- it does NOT undo
+		// (that's the Undo button's job); the deferred action still runs when
+		// the window passes, the standard snackbar behaviour.
+		close: true,
+		timeout: TOAST_UNDO_TIMEOUT,
 	})
 
 	await new Promise((resolve) => setTimeout(resolve, TOAST_UNDO_TIMEOUT))

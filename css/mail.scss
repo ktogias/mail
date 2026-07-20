@@ -3,6 +3,21 @@
  * SPDX-FileCopyrightText: 2013-2016 ownCLoud, Inc.
  * SPDX-License-Identifier: AGPL-3.0-only
  */
+
+/* @nextcloud/dialogs toasts (incl. the delete/archive/move/snooze Undo toast)
+ * default to the top of the screen. On mobile that lands right under the app
+ * header and covers the sticky thread header, with no obvious way out. Move
+ * them to the bottom -- the standard snackbar position (Material) and the
+ * reachable thumb zone -- so they never obscure the header. Toastify sets the
+ * top offset inline, hence the !important. `close: true` (UndoableAction.js)
+ * adds an explicit dismiss button on top of the action + auto-timeout. */
+@media only screen and (max-width: 1024px) {
+	.toastify.dialogs {
+		top: unset !important;
+		bottom: calc(env(safe-area-inset-bottom, 0px) + var(--default-grid-baseline, 8px) * 2) !important;
+	}
+}
+
 .loading {
 	position: absolute;
 	inset-inline-start: 50%;
