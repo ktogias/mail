@@ -71,6 +71,27 @@
 					<div class="sender" :class="{ 'sender--expanded': expanded }">
 						{{ envelope.from && envelope.from[0] ? envelope.from[0].label : '' }}
 					</div>
+					<!-- The sender-address / details toggle sits in the sender
+					     cell (natural, fits the UI). It's the discoverable way
+					     into the full From/To/Cc; the Unsubscribe button was
+					     moved out to its own row below so it can no longer crowd
+					     and clip this toggle. -->
+					<NcButton
+						v-if="expanded"
+						type="button"
+						class="sender__email sender__email--toggle"
+						size="small"
+						variant="tertiary"
+						alignment="start-reverse"
+						:aria-label="t('mail', 'Show sender and recipient details')"
+						:style="{ '--font-weight-element': 'normal' }"
+						@click.stop.prevent="showRecipients = !showRecipients">
+						{{ senderEmail || t('mail', 'Details') }}
+						<template #icon>
+							<ChevronUpIcon v-if="showRecipients" :size="16" />
+							<ChevronDownIcon v-else :size="16" />
+						</template>
+					</NcButton>
 					<div v-if="hasChangedSubject" class="subline">
 						{{ cleanSubject }}
 					</div>
@@ -94,15 +115,6 @@
 							</span>
 						</div>
 					</div>
-				</div>
-				<div class="envelope__header__left__unsubscribe">
-					<NcButton
-						v-if="message && message.dkimValid && (message.unsubscribeUrl || message.unsubscribeMailto)"
-						variant="tertiary"
-						class="envelope__header__unsubscribe"
-						@click.stop="showListUnsubscribeConfirmation = true">
-						{{ t('mail', 'Unsubscribe') }}
-					</NcButton>
 				</div>
 			</div>
 			<div class="right">
@@ -277,65 +289,62 @@
 				</template>
 			</div>
 		</div>
-		<!-- Sender/recipient details live on their own full-width row below the
-		     header, NOT inside the sender cell: that cell is a clipped
-		     (overflow:hidden, nowrap) flex sibling of the Unsubscribe button, so
-		     an Unsubscribe button would crowd/hide the toggle -- reported live on
-		     mobile. Always offered while expanded; the address is shown at a
-		     glance, the chevron reveals the full From/To/Cc. -->
-		<div v-if="expanded" class="envelope__details">
-			<button
-				type="button"
-				class="envelope__details__toggle"
-				:aria-expanded="showRecipients ? 'true' : 'false'"
-				:aria-label="t('mail', 'Show sender and recipient details')"
-				@click.stop.prevent="showRecipients = !showRecipients">
-				<span class="envelope__details__toggle__text">{{ senderEmail || t('mail', 'Details') }}</span>
-				<ChevronUpIcon v-if="showRecipients" :size="16" />
-				<ChevronDownIcon v-else :size="16" />
-			</button>
-			<div v-if="showRecipients" class="envelope__recipients">
-				<div v-if="envelope.from && envelope.from.length" class="recipients">
-					<span class="recipients__label">{{ t('mail', 'From:') }}</span>
+		<!-- Unsubscribe on its own row below the header instead of crammed into
+		     the sender cell, where it used to clip the details toggle. -->
+		<div
+			v-if="message && message.dkimValid && (message.unsubscribeUrl || message.unsubscribeMailto)"
+			class="envelope__unsubscribe-row">
+			<NcButton
+				variant="tertiary"
+				class="envelope__header__unsubscribe"
+				@click.stop="showListUnsubscribeConfirmation = true">
+				<template #icon>
+					<EmailOffIcon :size="16" />
+				</template>
+				{{ t('mail', 'Unsubscribe') }}
+			</NcButton>
+		</div>
+		<div v-if="expanded && showRecipients" class="envelope__recipients">
+			<div v-if="envelope.from && envelope.from.length" class="recipients">
+				<span class="recipients__label">{{ t('mail', 'From:') }}</span>
+				<RecipientBubble
+					v-for="recipient in envelope.from"
+					:key="recipient.email"
+					:email="recipient.email"
+					:label="recipient.label"
+					:size="24" />
+			</div>
+			<div v-if="envelope.to && envelope.to.length" class="recipients">
+				<span class="recipients__label">{{ t('mail', 'To:') }}</span>
+				<div class="recipients__list">
 					<RecipientBubble
-						v-for="recipient in envelope.from"
-						:key="recipient.email"
+						v-for="(recipient, index) in envelope.to"
+						:key="`${recipient.email}-${index}`"
 						:email="recipient.email"
 						:label="recipient.label"
 						:size="24" />
 				</div>
-				<div v-if="envelope.to && envelope.to.length" class="recipients">
-					<span class="recipients__label">{{ t('mail', 'To:') }}</span>
-					<div class="recipients__list">
-						<RecipientBubble
-							v-for="(recipient, index) in envelope.to"
-							:key="`${recipient.email}-${index}`"
-							:email="recipient.email"
-							:label="recipient.label"
-							:size="24" />
-					</div>
+			</div>
+			<div v-if="envelope.cc && envelope.cc.length" class="recipients">
+				<span class="recipients__label">{{ t('mail', 'Cc:') }}</span>
+				<div class="recipients__list">
+					<RecipientBubble
+						v-for="(recipient, index) in envelope.cc"
+						:key="`${recipient.email}-${index}`"
+						:email="recipient.email"
+						:label="recipient.label"
+						:size="24" />
 				</div>
-				<div v-if="envelope.cc && envelope.cc.length" class="recipients">
-					<span class="recipients__label">{{ t('mail', 'Cc:') }}</span>
-					<div class="recipients__list">
-						<RecipientBubble
-							v-for="(recipient, index) in envelope.cc"
-							:key="`${recipient.email}-${index}`"
-							:email="recipient.email"
-							:label="recipient.label"
-							:size="24" />
-					</div>
-				</div>
-				<div v-if="envelope.bcc && envelope.bcc.length" class="recipients">
-					<span class="recipients__label">{{ t('mail', 'Bcc:') }}</span>
-					<div class="recipients__list">
-						<RecipientBubble
-							v-for="(recipient, index) in envelope.bcc"
-							:key="`${recipient.email}-${index}`"
-							:email="recipient.email"
-							:label="recipient.label"
-							:size="24" />
-					</div>
+			</div>
+			<div v-if="envelope.bcc && envelope.bcc.length" class="recipients">
+				<span class="recipients__label">{{ t('mail', 'Bcc:') }}</span>
+				<div class="recipients__list">
+					<RecipientBubble
+						v-for="(recipient, index) in envelope.bcc"
+						:key="`${recipient.email}-${index}`"
+						:email="recipient.email"
+						:label="recipient.label"
+						:size="24" />
 				</div>
 			</div>
 		</div>
@@ -400,6 +409,7 @@ import NcActionText from '@nextcloud/vue/components/NcActionText'
 import ArchiveIcon from 'vue-material-design-icons/ArchiveArrowDownOutline.vue'
 import ChevronDownIcon from 'vue-material-design-icons/ChevronDown.vue'
 import ChevronUpIcon from 'vue-material-design-icons/ChevronUp.vue'
+import EmailOffIcon from 'vue-material-design-icons/EmailOffOutline.vue'
 import EmailRead from 'vue-material-design-icons/EmailOpenOutline.vue'
 import EmailUnread from 'vue-material-design-icons/EmailOutline.vue'
 import LockOffIcon from 'vue-material-design-icons/LockOffOutline.vue'
@@ -477,6 +487,7 @@ export default {
 		ArchiveIcon,
 		ChevronDownIcon,
 		ChevronUpIcon,
+		EmailOffIcon,
 		LockIcon,
 		LockOffIcon,
 		LockPlusIcon,
@@ -1512,40 +1523,11 @@ export default {
 		inset-inline-start: var(--default-grid-baseline);
 	}
 
-	.envelope__details {
-		display: flex;
-		flex-direction: column;
-	}
-
-	.envelope__details__toggle {
-		align-self: flex-start;
-		display: inline-flex;
-		align-items: center;
-		gap: var(--default-grid-baseline);
-		max-width: 100%;
+	.envelope__unsubscribe-row {
 		// align under the sender name (same offset as .envelope__recipients)
-		margin-inline-start: calc(var(--border-radius-container) + var(--default-grid-baseline) * 10 + var(--default-grid-baseline) * 3);
-		margin-inline-end: var(--border-radius-container);
-		margin-block: 0 var(--default-grid-baseline);
-		padding: calc(var(--default-grid-baseline) / 2) var(--default-grid-baseline);
-		border: none;
-		border-radius: var(--border-radius-element);
-		background-color: transparent;
-		color: var(--color-primary-element);
-		font-size: 13px;
-		font-weight: 500;
-		cursor: pointer;
-
-		&:hover,
-		&:focus-visible {
-			background-color: var(--color-background-hover);
-		}
-
-		&__text {
-			overflow: hidden;
-			text-overflow: ellipsis;
-			white-space: nowrap;
-		}
+		padding-inline-start: calc(var(--border-radius-container) + var(--default-grid-baseline) * 10 + var(--default-grid-baseline) * 3 - var(--default-grid-baseline) * 2);
+		padding-inline-end: var(--border-radius-container);
+		margin-block: calc(var(--default-grid-baseline) * -2) var(--default-grid-baseline);
 	}
 
 	.envelope__recipients {
