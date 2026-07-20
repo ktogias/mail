@@ -71,30 +71,6 @@
 					<div class="sender" :class="{ 'sender--expanded': expanded }">
 						{{ envelope.from && envelope.from[0] ? envelope.from[0].label : '' }}
 					</div>
-					<!-- Always offered while expanded (not only when there are
-					     to/cc/bcc): it's the one discoverable way into the full
-					     From/To/Cc details, and gating it on hasRecipients hid it
-					     entirely on bulk mail that carries no visible recipients
-					     -- reported live on mobile. Shows the sender's address
-					     (the most useful at-a-glance detail) with a chevron, and
-					     falls back to a plain "Details" label when the sender has
-					     no address. -->
-					<NcButton
-						v-if="expanded"
-						type="button"
-						class="sender__email sender__email--toggle"
-						size="small"
-						variant="tertiary"
-						alignment="start-reverse"
-						:aria-label="t('mail', 'Show sender and recipient details')"
-						:style="{ '--font-weight-element': 'normal' }"
-						@click.stop.prevent="showRecipients = !showRecipients">
-						{{ senderEmail || t('mail', 'Details') }}
-						<template #icon>
-							<ChevronUpIcon v-if="showRecipients" :size="16" />
-							<ChevronDownIcon v-else :size="16" />
-						</template>
-					</NcButton>
 					<div v-if="hasChangedSubject" class="subline">
 						{{ cleanSubject }}
 					</div>
@@ -301,47 +277,65 @@
 				</template>
 			</div>
 		</div>
-		<div v-if="expanded && showRecipients" class="envelope__recipients">
-			<div v-if="envelope.from && envelope.from.length" class="recipients">
-				<span class="recipients__label">{{ t('mail', 'From:') }}</span>
-				<RecipientBubble
-					v-for="recipient in envelope.from"
-					:key="recipient.email"
-					:email="recipient.email"
-					:label="recipient.label"
-					:size="24" />
-			</div>
-			<div v-if="envelope.to && envelope.to.length" class="recipients">
-				<span class="recipients__label">{{ t('mail', 'To:') }}</span>
-				<div class="recipients__list">
+		<!-- Sender/recipient details live on their own full-width row below the
+		     header, NOT inside the sender cell: that cell is a clipped
+		     (overflow:hidden, nowrap) flex sibling of the Unsubscribe button, so
+		     an Unsubscribe button would crowd/hide the toggle -- reported live on
+		     mobile. Always offered while expanded; the address is shown at a
+		     glance, the chevron reveals the full From/To/Cc. -->
+		<div v-if="expanded" class="envelope__details">
+			<button
+				type="button"
+				class="envelope__details__toggle"
+				:aria-expanded="showRecipients ? 'true' : 'false'"
+				:aria-label="t('mail', 'Show sender and recipient details')"
+				@click.stop.prevent="showRecipients = !showRecipients">
+				<span class="envelope__details__toggle__text">{{ senderEmail || t('mail', 'Details') }}</span>
+				<ChevronUpIcon v-if="showRecipients" :size="16" />
+				<ChevronDownIcon v-else :size="16" />
+			</button>
+			<div v-if="showRecipients" class="envelope__recipients">
+				<div v-if="envelope.from && envelope.from.length" class="recipients">
+					<span class="recipients__label">{{ t('mail', 'From:') }}</span>
 					<RecipientBubble
-						v-for="(recipient, index) in envelope.to"
-						:key="`${recipient.email}-${index}`"
+						v-for="recipient in envelope.from"
+						:key="recipient.email"
 						:email="recipient.email"
 						:label="recipient.label"
 						:size="24" />
 				</div>
-			</div>
-			<div v-if="envelope.cc && envelope.cc.length" class="recipients">
-				<span class="recipients__label">{{ t('mail', 'Cc:') }}</span>
-				<div class="recipients__list">
-					<RecipientBubble
-						v-for="(recipient, index) in envelope.cc"
-						:key="`${recipient.email}-${index}`"
-						:email="recipient.email"
-						:label="recipient.label"
-						:size="24" />
+				<div v-if="envelope.to && envelope.to.length" class="recipients">
+					<span class="recipients__label">{{ t('mail', 'To:') }}</span>
+					<div class="recipients__list">
+						<RecipientBubble
+							v-for="(recipient, index) in envelope.to"
+							:key="`${recipient.email}-${index}`"
+							:email="recipient.email"
+							:label="recipient.label"
+							:size="24" />
+					</div>
 				</div>
-			</div>
-			<div v-if="envelope.bcc && envelope.bcc.length" class="recipients">
-				<span class="recipients__label">{{ t('mail', 'Bcc:') }}</span>
-				<div class="recipients__list">
-					<RecipientBubble
-						v-for="(recipient, index) in envelope.bcc"
-						:key="`${recipient.email}-${index}`"
-						:email="recipient.email"
-						:label="recipient.label"
-						:size="24" />
+				<div v-if="envelope.cc && envelope.cc.length" class="recipients">
+					<span class="recipients__label">{{ t('mail', 'Cc:') }}</span>
+					<div class="recipients__list">
+						<RecipientBubble
+							v-for="(recipient, index) in envelope.cc"
+							:key="`${recipient.email}-${index}`"
+							:email="recipient.email"
+							:label="recipient.label"
+							:size="24" />
+					</div>
+				</div>
+				<div v-if="envelope.bcc && envelope.bcc.length" class="recipients">
+					<span class="recipients__label">{{ t('mail', 'Bcc:') }}</span>
+					<div class="recipients__list">
+						<RecipientBubble
+							v-for="(recipient, index) in envelope.bcc"
+							:key="`${recipient.email}-${index}`"
+							:email="recipient.email"
+							:label="recipient.label"
+							:size="24" />
+					</div>
 				</div>
 			</div>
 		</div>
@@ -1516,6 +1510,42 @@ export default {
 		overflow: hidden;
 		text-overflow: ellipsis;
 		inset-inline-start: var(--default-grid-baseline);
+	}
+
+	.envelope__details {
+		display: flex;
+		flex-direction: column;
+	}
+
+	.envelope__details__toggle {
+		align-self: flex-start;
+		display: inline-flex;
+		align-items: center;
+		gap: var(--default-grid-baseline);
+		max-width: 100%;
+		// align under the sender name (same offset as .envelope__recipients)
+		margin-inline-start: calc(var(--border-radius-container) + var(--default-grid-baseline) * 10 + var(--default-grid-baseline) * 3);
+		margin-inline-end: var(--border-radius-container);
+		margin-block: 0 var(--default-grid-baseline);
+		padding: calc(var(--default-grid-baseline) / 2) var(--default-grid-baseline);
+		border: none;
+		border-radius: var(--border-radius-element);
+		background-color: transparent;
+		color: var(--color-primary-element);
+		font-size: 13px;
+		font-weight: 500;
+		cursor: pointer;
+
+		&:hover,
+		&:focus-visible {
+			background-color: var(--color-background-hover);
+		}
+
+		&__text {
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
 	}
 
 	.envelope__recipients {
