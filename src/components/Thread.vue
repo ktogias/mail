@@ -12,34 +12,83 @@
 			:message="errorMessage" />
 		<template v-else>
 			<div id="mail-thread-header">
-				<div id="mail-thread-header-fields">
-					<h2 dir="auto" :title="threadSubject">
-						{{ threadSubject }}
-					</h2>
+				<div id="mail-thread-header-top">
+					<div id="mail-thread-header-fields">
+						<h2 dir="auto" :title="threadSubject">
+							{{ threadSubject }}
+						</h2>
+					</div>
+					<NcActions
+						id="mail-thread-menu"
+						:aria-label="t('mail', 'Thread actions')"
+						:force-menu="true"
+						variant="tertiary">
+						<template #icon>
+							<DotsVerticalIcon :size="20" />
+						</template>
+						<NcActionButton
+							:close-after-click="true"
+							@click="markThreadSeen(threadHasUnread)">
+							<template #icon>
+								<EmailReadIcon v-if="threadHasUnread" :size="20" />
+								<EmailUnreadIcon v-else :size="20" />
+							</template>
+							{{ threadHasUnread ? t('mail', 'Mark all as read') : t('mail', 'Mark all as unread') }}
+						</NcActionButton>
+						<NcActionButton
+							v-if="threadAccount && threadAccount.archiveMailboxId"
+							:close-after-click="true"
+							@click="archiveThread">
+							<template #icon>
+								<ArchiveIcon :size="20" />
+							</template>
+							{{ t('mail', 'Archive thread') }}
+						</NcActionButton>
+						<NcActionButton
+							:close-after-click="true"
+							@click="showMoveModal = true">
+							<template #icon>
+								<OpenInNewIcon :size="20" />
+							</template>
+							{{ t('mail', 'Move thread') }}
+						</NcActionButton>
+						<NcActionSeparator />
+						<NcActionButton
+							:close-after-click="true"
+							@click="deleteThreadAction">
+							<template #icon>
+								<DeleteIcon :size="20" />
+							</template>
+							{{ t('mail', 'Delete thread') }}
+						</NcActionButton>
+					</NcActions>
 				</div>
-				<div v-if="listNavigation" id="mail-thread-list-navigation">
-					<ButtonVue
-						data-test="newer-message"
-						type="tertiary-no-background"
-						:aria-label="t('mail', 'Newer message')"
-						:title="t('mail', 'Newer message')"
-						:disabled="!listNavigation.hasPrevious"
-						@click="navigateList('prev')">
-						<template #icon>
-							<ChevronLeftIcon :size="20" />
-						</template>
-					</ButtonVue>
-					<ButtonVue
-						data-test="older-message"
-						type="tertiary-no-background"
-						:aria-label="t('mail', 'Older message')"
-						:title="t('mail', 'Older message')"
-						:disabled="!listNavigation.hasNext"
-						@click="navigateList('next')">
-						<template #icon>
-							<ChevronRightIcon :size="20" />
-						</template>
-					</ButtonVue>
+				<div id="mail-thread-header-meta">
+					<span class="thread-meta">{{ threadMetaText }}</span>
+					<div v-if="listNavigation" id="mail-thread-list-navigation">
+						<ButtonVue
+							data-test="newer-message"
+							type="tertiary-no-background"
+							:aria-label="t('mail', 'Newer message')"
+							:title="t('mail', 'Newer message')"
+							:disabled="!listNavigation.hasPrevious"
+							@click="navigateList('prev')">
+							<template #icon>
+								<ChevronLeftIcon :size="20" />
+							</template>
+						</ButtonVue>
+						<ButtonVue
+							data-test="older-message"
+							type="tertiary-no-background"
+							:aria-label="t('mail', 'Older message')"
+							:title="t('mail', 'Older message')"
+							:disabled="!listNavigation.hasNext"
+							@click="navigateList('next')">
+							<template #icon>
+								<ChevronRightIcon :size="20" />
+							</template>
+						</ButtonVue>
+					</div>
 				</div>
 			</div>
 			<ThreadSummary v-if="showSummaryBox" :loading="summaryLoading" :summary="summaryText" />
@@ -62,6 +111,13 @@
 				@move="onMove(env.databaseId)"
 				@toggle-expand="toggleExpand(env.databaseId)"
 				@print="print" />
+			<MoveModal
+				v-if="showMoveModal"
+				:account="threadAccount"
+				:envelopes="thread"
+				:move-thread="true"
+				@request-move="onThreadMove"
+				@close="showMoveModal = false" />
 		</template>
 	</AppContentDetails>
 </template>
@@ -69,12 +125,20 @@
 <script>
 import { showError } from '@nextcloud/dialogs'
 import { loadState } from '@nextcloud/initial-state'
-import { NcAppContentDetails as AppContentDetails, NcButton as ButtonVue } from '@nextcloud/vue'
+import { NcAppContentDetails as AppContentDetails, NcButton as ButtonVue, NcActionButton, NcActionSeparator } from '@nextcloud/vue'
 import { mapStores } from 'pinia'
+import NcActions from '@nextcloud/vue/components/NcActions'
+import ArchiveIcon from 'vue-material-design-icons/ArchiveArrowDownOutline.vue'
 import ChevronLeftIcon from 'vue-material-design-icons/ChevronLeft.vue'
 import ChevronRightIcon from 'vue-material-design-icons/ChevronRight.vue'
+import DotsVerticalIcon from 'vue-material-design-icons/DotsVertical.vue'
+import EmailReadIcon from 'vue-material-design-icons/EmailOpenOutline.vue'
+import EmailUnreadIcon from 'vue-material-design-icons/EmailOutline.vue'
+import OpenInNewIcon from 'vue-material-design-icons/OpenInNew.vue'
+import DeleteIcon from 'vue-material-design-icons/TrashCanOutline.vue'
 import Error from './Error.vue'
 import Loading from './Loading.vue'
+import MoveModal from './MoveModal.vue'
 import ThreadEnvelope from './ThreadEnvelope.vue'
 import ThreadSummary from './ThreadSummary.vue'
 import { matchError } from '../errors/match.js'
@@ -92,10 +156,20 @@ export default {
 		ThreadSummary,
 		AppContentDetails,
 		ButtonVue,
+		NcActions,
+		NcActionButton,
+		NcActionSeparator,
+		ArchiveIcon,
 		ChevronLeftIcon,
 		ChevronRightIcon,
+		DeleteIcon,
+		DotsVerticalIcon,
+		EmailReadIcon,
+		EmailUnreadIcon,
+		OpenInNewIcon,
 		Error,
 		Loading,
+		MoveModal,
 		ThreadEnvelope,
 	},
 
@@ -109,6 +183,7 @@ export default {
 			errorMessage: '',
 			errorTitle: '',
 			expandedThreads: [],
+			showMoveModal: false,
 			enabledThreadSummary: loadState('mail', 'llm_summaries_available', false),
 			summaryText: '',
 			summaryError: false,
@@ -212,6 +287,26 @@ export default {
 				return ''
 			}
 			return thread[0].subject || this.t('mail', 'No subject')
+		},
+
+		// The account the open thread belongs to -- used for thread-level
+		// actions (archive target, Move modal).
+		threadAccount() {
+			return this.thread.length > 0
+				? this.mainStore.getAccount(this.thread[0].accountId)
+				: undefined
+		},
+
+		threadHasUnread() {
+			return this.thread.some((envelope) => !envelope.flags?.seen)
+		},
+
+		// Compact context line under the subject: "N messages · X people".
+		// Reuses threadParticipants (distinct from+to addresses).
+		threadMetaText() {
+			const messages = this.n('mail', '%n message', '%n messages', this.thread.length)
+			const people = this.n('mail', '%n participant', '%n participants', this.threadParticipants.length || 1)
+			return `${messages} · ${people}`
 		},
 
 		threadParticipants() {
@@ -380,6 +475,93 @@ export default {
 				this.expandedThreads = this.expandedThreads.filter((id) => id !== threadId)
 				this.fetchThread()
 			}
+		},
+
+		// --- thread-level actions (the header's ⋮ menu) ---
+
+		// Leaves the reading pane back to the source mailbox. Used after a
+		// whole-thread action removes the conversation from view.
+		closeThread() {
+			this.$router.replace({
+				name: 'mailbox',
+				params: {
+					mailboxId: this.$route.params.mailboxId,
+				},
+			})
+		},
+
+		// Mark every message in the thread read (targetSeen=true) or unread
+		// (false). Only the ones that actually differ are toggled. Reversible
+		// and cheap, so no undo toast -- unlike the removal actions below.
+		markThreadSeen(targetSeen) {
+			Promise.all(this.thread
+				.filter((envelope) => Boolean(envelope.flags.seen) !== targetSeen)
+				.map((envelope) => this.mainStore.toggleEnvelopeSeen({ envelope }))).catch((error) => {
+				logger.error('could not update thread read state', { error })
+				showError(t('mail', 'Could not update read status'))
+			})
+		},
+
+		archiveThread() {
+			const account = this.threadAccount
+			if (!account?.archiveMailboxId) {
+				return
+			}
+			this.moveThreadOut(account.archiveMailboxId, t('mail', 'Thread archived'))
+		},
+
+		onThreadMove({ destMailboxId }) {
+			this.showMoveModal = false
+			this.moveThreadOut(destMailboxId, t('mail', 'Thread moved'))
+		},
+
+		// Shared by Archive and Move: relocate the whole thread, close the
+		// reading pane immediately (per performActionWithUndo's contract:
+		// navigate before awaiting), and offer an undo toast.
+		moveThreadOut(destMailboxId, message) {
+			const root = this.thread.find((envelope) => envelope.databaseId === this.threadId) || this.thread[0]
+			if (!root) {
+				return
+			}
+			const ids = this.thread.map((envelope) => envelope.databaseId)
+			this.performActionWithUndo({
+				ids,
+				message,
+				action: async () => {
+					await this.mainStore.moveThread({ envelope: root, destMailboxId })
+					await this.mainStore.syncEnvelopes({ mailboxId: destMailboxId })
+				},
+			}).catch((error) => {
+				logger.error('could not move thread', { error })
+				showError(t('mail', 'Could not move thread'))
+			})
+			this.closeThread()
+		},
+
+		deleteThreadAction() {
+			const root = this.thread.find((envelope) => envelope.databaseId === this.threadId) || this.thread[0]
+			if (!root) {
+				return
+			}
+			const ids = this.thread.map((envelope) => envelope.databaseId)
+			this.performActionWithUndo({
+				ids,
+				message: t('mail', 'Thread deleted'),
+				action: async () => {
+					await this.mainStore.deleteThread({ envelope: root })
+				},
+			}).catch(async (error) => {
+				showError(await matchError(error, {
+					[NoTrashMailboxConfiguredError.getName()]() {
+						return t('mail', 'No trash folder configured')
+					},
+					default(error) {
+						logger.error('could not delete thread', { error })
+						return t('mail', 'Could not delete thread')
+					},
+				}))
+			})
+			this.closeThread()
 		},
 
 		// ThreadEnvelope.vue's own delete/archive actions request them
@@ -1008,17 +1190,24 @@ export default {
 	border-radius: 5px;
 }
 
+// Compact, fixed-height conversation header: two stacked rows -- subject +
+// thread ⋮ menu, then a meta line ("N messages · X people") + prev/next.
+// The subject is clamped to a single line (see #mail-thread-header-fields h2)
+// so the header no longer balloons on a long subject, which also removes the
+// old empty gap around the vertically-centred nav buttons.
+$mail-thread-header-inline-start: calc(var(--default-grid-baseline) * 14 + var(--border-radius-container) + 2px);
+
 #mail-thread-header {
 	display: flex;
-	flex-direction: row;
-	justify-content: space-between;
-	align-items: center;
-	padding: 0 0 calc(var(--default-grid-baseline) * 2) 0;
+	flex-direction: column;
+	gap: 1px;
+	padding: 0 0 calc(var(--default-grid-baseline) * 1.5) 0;
 	// somehow ios doesn't care about this !important rule
 	// so we have to manually set left/right padding to chidren
 	// for 100% to be used
 	box-sizing: content-box !important;
 	width: 100%;
+	background: var(--color-main-background);
 
 	z-index: 100;
 	position: fixed; // ie fallback
@@ -1048,34 +1237,54 @@ export default {
     }
 }
 
+#mail-thread-header-top {
+	display: flex;
+	flex-direction: row;
+	align-items: center;
+	gap: var(--default-grid-baseline);
+	min-width: 0;
+}
+
 #mail-thread-header-fields {
-	// initial width
-	width: 0;
+	min-width: 0;
 	// while scrolling, the back button overlaps with subject on small screen
 	// envelope margin (2×baseline) + border (2px) + header padding (--border-radius-container) + avatar (10×baseline) + sender margin (2×baseline)
-	padding-inline-start: calc(var(--default-grid-baseline) * 14 + var(--border-radius-container) + 2px);
-	// grow and try to fill 100%
+	padding-inline-start: $mail-thread-header-inline-start;
 	flex: 1 1 auto;
-	background: var(--color-main-background);
-	margin-inline-end: 5px;
-	h2,
-	p {
-		padding-bottom: calc(var(--default-grid-baseline) * 2);
-		margin-bottom: 0;
-		// some h2 styling coming from server add some space on top
-		margin-top: var(--default-grid-baseline);
-	}
 
-	p {
+	h2 {
+		margin: 0;
+		padding: calc(var(--default-grid-baseline) / 2) 0 0 0;
+		// override the server's oversized h2 -- a compact single line
+		font-size: 16px;
+		line-height: 1.35;
+		font-weight: bold;
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
-	.transparency {
-		opacity: 0.6;
-		a {
-			font-weight: bold;
-		}
+}
+
+#mail-thread-menu {
+	flex: 0 0 auto;
+}
+
+#mail-thread-header-meta {
+	display: flex;
+	flex-direction: row;
+	align-items: center;
+	justify-content: space-between;
+	gap: var(--default-grid-baseline);
+	min-width: 0;
+	padding-inline-start: $mail-thread-header-inline-start;
+
+	.thread-meta {
+		min-width: 0;
+		font-size: 12px;
+		color: var(--color-text-maxcontrast);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 }
 
@@ -1087,14 +1296,9 @@ export default {
 }
 
 @media only screen and (max-width: #{variables.$breakpoint-mobile}) {
-    #mail-thread-header-fields {
-        padding-inline-start: 48px;
-    }
-}
-
-@media only screen and (max-width: #{variables.$breakpoint-mobile}) {
-	#mail-thread-header-fields {
-		margin-top: -32px;
+	#mail-thread-header-fields,
+	#mail-thread-header-meta {
+		padding-inline-start: 48px;
 	}
 }
 

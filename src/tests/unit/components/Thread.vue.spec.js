@@ -1270,4 +1270,126 @@ describe('Thread', () => {
 			expect(store.snoozeMessage).not.toHaveBeenCalled()
 		})
 	})
+
+	describe('thread-level actions (the header ⋮ menu, 2026-07-20)', () => {
+		function mountThread(threadId) {
+			return shallowMount(Thread, {
+				mocks: {
+					$route: { params: { threadId, mailboxId: '30' } },
+					$router: { replace: vi.fn() },
+				},
+				store,
+				localVue,
+			})
+		}
+
+		it('exposes unread state and a compact "N messages · X participants" meta line', () => {
+			const unread = mountThread(4003)
+			expect(unread.vm.threadHasUnread).toBe(true)
+			// 3 messages in the fixture; no from/to -> falls back to 1 participant
+			expect(unread.vm.threadMetaText).toContain('3')
+
+			const allRead = mountThread(5003)
+			expect(allRead.vm.threadHasUnread).toBe(false)
+		})
+
+		it('marks all as read by toggling only the messages that are still unread', async () => {
+			store.toggleEnvelopeSeen = vi.fn().mockResolvedValue()
+			const view = mountThread(4003)
+
+			view.vm.markThreadSeen(true)
+			await view.vm.$nextTick()
+
+			// Only 4001 is unread in the fixture, so only it is toggled
+			expect(store.toggleEnvelopeSeen).toHaveBeenCalledTimes(1)
+			expect(store.toggleEnvelopeSeen).toHaveBeenCalledWith({
+				envelope: expect.objectContaining({ databaseId: 4001 }),
+			})
+		})
+
+		it('marks all as unread by toggling every currently-read message', async () => {
+			store.toggleEnvelopeSeen = vi.fn().mockResolvedValue()
+			const view = mountThread(5003)
+
+			view.vm.markThreadSeen(false)
+			await view.vm.$nextTick()
+
+			// All three fixture messages are read -> all three toggled
+			expect(store.toggleEnvelopeSeen).toHaveBeenCalledTimes(3)
+		})
+
+		it('deletes the whole thread behind an undo window and closes the reading pane immediately', async () => {
+			vi.useFakeTimers()
+			store.deleteThread = vi.fn().mockResolvedValue()
+			showUndo.mockClear()
+			const view = mountThread(4003)
+
+			view.vm.deleteThreadAction()
+
+			// Navigates back to the mailbox right away (before awaiting)
+			expect(view.vm.$router.replace).toHaveBeenCalledWith(expect.objectContaining({ name: 'mailbox' }))
+			// The real, irreversible delete is deferred
+			await vi.advanceTimersByTimeAsync(0)
+			expect(store.deleteThread).not.toHaveBeenCalled()
+
+			await vi.advanceTimersByTimeAsync(10000)
+			expect(store.deleteThread).toHaveBeenCalledWith({
+				envelope: expect.objectContaining({ databaseId: 4003 }),
+			})
+			vi.useRealTimers()
+		})
+
+		it('never deletes the thread if Undo is clicked in time', async () => {
+			vi.useFakeTimers()
+			store.deleteThread = vi.fn().mockResolvedValue()
+			showUndo.mockClear()
+			const view = mountThread(4003)
+
+			view.vm.deleteThreadAction()
+			const onUndo = showUndo.mock.calls[0][1]
+			onUndo()
+			await vi.advanceTimersByTimeAsync(10000)
+
+			expect(store.deleteThread).not.toHaveBeenCalled()
+			vi.useRealTimers()
+		})
+
+		it('archives the whole thread (moveThread to the account archive) behind the undo window', async () => {
+			vi.useFakeTimers()
+			store.getAccount = vi.fn().mockReturnValue({ archiveMailboxId: 55 })
+			store.moveThread = vi.fn().mockResolvedValue()
+			store.syncEnvelopes = vi.fn().mockResolvedValue()
+			showUndo.mockClear()
+			const view = mountThread(4003)
+
+			view.vm.archiveThread()
+			expect(view.vm.$router.replace).toHaveBeenCalled()
+
+			await vi.advanceTimersByTimeAsync(10000)
+			expect(store.moveThread).toHaveBeenCalledWith({
+				envelope: expect.objectContaining({ databaseId: 4003 }),
+				destMailboxId: 55,
+			})
+			vi.useRealTimers()
+		})
+
+		it('moves the whole thread to the chosen folder from the Move modal', async () => {
+			vi.useFakeTimers()
+			store.moveThread = vi.fn().mockResolvedValue()
+			store.syncEnvelopes = vi.fn().mockResolvedValue()
+			showUndo.mockClear()
+			const view = mountThread(4003)
+
+			view.vm.onThreadMove({ destMailboxId: 77 })
+			expect(view.vm.showMoveModal).toBe(false)
+			expect(view.vm.$router.replace).toHaveBeenCalled()
+
+			await vi.advanceTimersByTimeAsync(10000)
+			expect(store.moveThread).toHaveBeenCalledWith({
+				envelope: expect.objectContaining({ databaseId: 4003 }),
+				destMailboxId: 77,
+			})
+			vi.useRealTimers()
+		})
+	})
 })
