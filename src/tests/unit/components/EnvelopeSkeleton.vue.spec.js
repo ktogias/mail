@@ -88,3 +88,88 @@ describe('EnvelopeSkeleton: the unread indicator must not depend on hover/focus 
 		expect(view.find('.list-item__hoverable').exists()).toBe(false)
 	})
 })
+
+describe('EnvelopeSkeleton: navigation decoupled from $route (2026-07-20 open-latency fix)', () => {
+	// The row used to be a <router-link>, which subscribes to $route and
+	// re-rendered every row on every navigation. It now resolves its href
+	// once (resolvedHref) and navigates programmatically in onClick(), so a
+	// route change only re-renders the row whose `active` prop changes.
+	const to = { name: 'message', params: { mailboxId: 'priority', threadId: 7 } }
+
+	function mountRow(propsOverride = {}, routerOverride = {}) {
+		return shallowMount(EnvelopeSkeleton, {
+			propsData: { name: 'Test envelope', to, ...propsOverride },
+			mocks: {
+				$router: {
+					resolve: vi.fn(() => ({ href: '/box/priority/thread/7' })),
+					push: vi.fn(() => Promise.resolve()),
+					...routerOverride,
+				},
+			},
+			localVue,
+		})
+	}
+
+	it('resolves its href once from `to`, without a router-link', () => {
+		const view = mountRow()
+
+		expect(view.vm.resolvedHref).toBe('/box/priority/thread/7')
+		expect(view.vm.$router.resolve).toHaveBeenCalledWith(to)
+	})
+
+	it('falls back to the href prop when there is no route (draft row)', () => {
+		const view = mountRow({ to: null, href: '#' })
+
+		expect(view.vm.resolvedHref).toBe('#')
+	})
+
+	it('navigates in place on a plain click and prevents the browser link-follow', () => {
+		const push = vi.fn(() => Promise.resolve())
+		const view = mountRow({}, { push })
+		const event = { preventDefault: vi.fn() }
+
+		view.vm.onClick(event)
+
+		expect(view.emitted('click')).toBeTruthy()
+		expect(event.preventDefault).toHaveBeenCalled()
+		expect(push).toHaveBeenCalledWith(to)
+	})
+
+	it('does not navigate in place on a modifier-key click (open-in-new-tab)', () => {
+		const push = vi.fn(() => Promise.resolve())
+		const view = mountRow({}, { push })
+		const event = { ctrlKey: true, preventDefault: vi.fn() }
+
+		view.vm.onClick(event)
+
+		expect(view.emitted('click')).toBeTruthy()
+		expect(push).not.toHaveBeenCalled()
+		expect(event.preventDefault).not.toHaveBeenCalled()
+	})
+
+	it('leaves a draft row (no `to`) for the parent, emitting click but not navigating', () => {
+		const push = vi.fn(() => Promise.resolve())
+		const view = mountRow({ to: null }, { push })
+		const event = { preventDefault: vi.fn() }
+
+		view.vm.onClick(event)
+
+		expect(view.emitted('click')).toBeTruthy()
+		expect(push).not.toHaveBeenCalled()
+		expect(event.preventDefault).not.toHaveBeenCalled()
+	})
+
+	it('swallows the NavigationDuplicated rejection from re-clicking the open row', () => {
+		const push = vi.fn(() => Promise.reject(new Error('NavigationDuplicated')))
+		const view = mountRow({}, { push })
+
+		expect(() => view.vm.onClick({ preventDefault: vi.fn() })).not.toThrow()
+	})
+
+	it('reflects the `active` prop as the row-active class (was router-link isActive)', async () => {
+		const view = mountRow({ active: true })
+		await view.vm.$nextTick()
+
+		expect(view.find('.list-item__wrapper').classes()).toContain('list-item__wrapper--active')
+	})
+})

@@ -504,6 +504,77 @@ describe('Envelope', () => {
 		})
 	})
 
+	describe('link()/isActiveThread decouple the row from $route (2026-07-20 open-latency fix)', () => {
+		// Every row used to be a <router-link>, so opening any message
+		// re-rendered the whole list. link() now reads the store's route
+		// mirror (stable across thread opens) and active state comes from
+		// currentOpenThreadId, so only the affected rows re-render.
+		function mountEnvelope(propsOverride = {}) {
+			return shallowMount(Envelope, {
+				mocks: { $route },
+				propsData: {
+					mailbox: { specialRole: '', databaseId: 42, myAcls: undefined },
+					searchQuery: 'is:starred',
+					data: {
+						accountId: 123,
+						databaseId: 999,
+						from: [{ email: 'info@test.com' }],
+						flags: { seen: false, flagged: false, $junk: false, answered: false, hasAttachments: false, draft: false },
+					},
+					...propsOverride,
+				},
+				store,
+				localVue,
+			})
+		}
+
+		it('builds the target route from the store mirror, not $route', () => {
+			store.setCurrentViewMailboxIdMutation('priority')
+			store.setCurrentViewFilterMutation('starred')
+			const view = mountEnvelope()
+
+			expect(view.vm.link).toEqual({
+				name: 'message',
+				params: { mailboxId: 'priority', filter: 'starred', threadId: 999 },
+			})
+		})
+
+		it('omits an empty filter segment', () => {
+			store.setCurrentViewMailboxIdMutation('42')
+			store.setCurrentViewFilterMutation(undefined)
+			const view = mountEnvelope()
+
+			expect(view.vm.link.params.filter).toBeUndefined()
+		})
+
+		it('has no link for a draft row (it opens the composer instead)', () => {
+			const view = mountEnvelope({
+				data: {
+					accountId: 123,
+					databaseId: 999,
+					from: [{ email: 'info@test.com' }],
+					flags: { seen: false, flagged: false, $junk: false, answered: false, hasAttachments: false, draft: true },
+				},
+			})
+
+			expect(view.vm.link).toBeUndefined()
+		})
+
+		it('marks itself active only when its own thread id is the open one', () => {
+			const view = mountEnvelope()
+			expect(view.vm.isActiveThread).toBe(false)
+
+			store.setCurrentOpenThreadIdMutation(999)
+			expect(view.vm.isActiveThread).toBe(true)
+
+			store.setCurrentOpenThreadIdMutation(1000)
+			expect(view.vm.isActiveThread).toBe(false)
+
+			store.setCurrentOpenThreadIdMutation(undefined)
+			expect(view.vm.isActiveThread).toBe(false)
+		})
+	})
+
 	describe('onDelete() delegates the actual deletion to EnvelopeList, for a shared undo window', () => {
 		// EnvelopeList.vue owns the undo-toast bookkeeping (a single
 		// click here should behave exactly like a bulk delete of one

@@ -1520,6 +1520,11 @@ export default function mainStoreActions() {
 		setCurrentViewMailboxIdMutation(mailboxId) {
 			this.currentViewMailboxId = mailboxId
 		},
+		// See currentViewFilter in mainStore.js's state() -- mirrored from
+		// MailboxThread.vue alongside setCurrentViewMailboxIdMutation().
+		setCurrentViewFilterMutation(filter) {
+			this.currentViewFilter = filter
+		},
 		// See currentOpenThreadId in mainStore.js's state() -- mirrored
 		// from Thread.vue's own route watcher, the same way
 		// setCurrentViewMailboxIdMutation() above is mirrored from

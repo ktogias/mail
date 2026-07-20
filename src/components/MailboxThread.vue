@@ -476,6 +476,7 @@ export default {
 			// in every component test) -- mirror the open mailbox into
 			// the store for its view-aware decisions instead.
 			this.mainStore.setCurrentViewMailboxIdMutation(to.params?.mailboxId)
+			this.mainStore.setCurrentViewFilterMutation(to.params?.filter)
 			this.handleMailto()
 			if (to.name === 'mailbox' && to.params.mailboxId === PRIORITY_INBOX_ID) {
 				await this.onPriorityMailboxOpened()
@@ -523,6 +524,7 @@ export default {
 
 	created() {
 		this.mainStore.setCurrentViewMailboxIdMutation(this.$route?.params?.mailboxId)
+		this.mainStore.setCurrentViewFilterMutation(this.$route?.params?.filter)
 		this.handleMailto()
 		// Set here, not in mounted(): Vue mounts children bottom-up
 		// (child created+mounted, THEN parent mounted), so setting this

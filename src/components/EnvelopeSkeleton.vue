@@ -4,16 +4,18 @@
 -->
 
 <template>
-	<!-- This wrapper can be either a router link or a `<li>` -->
-	<component
-		:is="to ? 'router-link' : 'NcVNodes'"
-		v-slot="{ href: routerLinkHref, navigate, isActive }"
-		:custom="to ? true : null"
-		:to="to"
-		:exact="to ? exact : null">
+	<!-- Was a conditional <router-link> wrapper. A router-link subscribes to
+	     $route, so every row re-rendered on every navigation -- opening one
+	     message re-rendered the whole list (O(N) per open, traced in the
+	     2026-07-20 profiling). NcVNodes is a transparent fragment (no DOM
+	     wrapper element, no route reactivity): the row resolves its href once
+	     (resolvedHref) and takes its active state from the `active` prop (fed
+	     from the store's currentOpenThreadId), and navigates in onClick(). A
+	     route change now re-renders only the row whose active state changed. -->
+	<NcVNodes>
 		<li
 			class="list-item__wrapper"
-			:class="{ 'list-item__wrapper--active': isActive || active }">
+			:class="{ 'list-item__wrapper--active': active }">
 			<div
 				ref="list-item"
 				class="list-item"
@@ -28,12 +30,12 @@
 					:id="anchorId || undefined"
 					:aria-label="linkAriaLabel"
 					class="list-item__anchor"
-					:href="routerLinkHref || href"
+					:href="resolvedHref"
 					:target="target || (href === '#' ? undefined : '_blank')"
 					:rel="href === '#' ? undefined : 'noopener noreferrer'"
 					@focus="showActions"
 					@focusout="handleBlur"
-					@click="onClick($event, navigate, routerLinkHref)"
+					@click="onClick"
 					@contextmenu.prevent
 					@keydown.esc="hideActions">
 					<!-- @slot This slot is used for the NcAvatar or icon, the content of this slot must not be interactive -->
@@ -76,7 +78,7 @@
 									class="list-item-content__inner__details__extra">
 									<NcCounterBubble
 										v-if="counterNumber"
-										:active="isActive || active"
+										:active="active"
 										:class="{ 'extra--hidden': !showAdditionalElements }"
 										class="list-item-content__inner__details__extra__counter"
 										:type="counterType">
@@ -125,7 +127,7 @@
 						@focusout="handleBlur">
 						<NcActions
 							ref="actions"
-							:primary="isActive || active"
+							:primary="active"
 							:aria-label="computedActionsAriaLabel"
 							variant="tertiary"
 							@update:open="handleActionsUpdateOpen">
@@ -139,7 +141,7 @@
 				</div>
 			</div>
 		</li>
-	</component>
+	</NcVNodes>
 </template>
 
 <script>
@@ -330,6 +332,21 @@ export default {
 		computedActionsAriaLabel() {
 			return this.actionsAriaLabel || t('Actions for item with name "{name}"', { name: this.name })
 		},
+
+		// Resolve the row's href ONCE from `to`, without a <router-link>'s
+		// reactive dependency on the live $route. `to` is built from the
+		// store's route mirror (Envelope.vue::link()), so it stays stable
+		// across thread opens and this computed does not re-run on navigation.
+		resolvedHref() {
+			if (!this.to) {
+				return this.href
+			}
+			try {
+				return this.$router.resolve(this.to).href
+			} catch (e) {
+				return this.href
+			}
+		},
 	},
 
 	watch: {
@@ -352,23 +369,32 @@ export default {
 
 	methods: {
 		/**
-		 * Handle link click
+		 * Handle link click. Navigation is done here (this.$router.push)
+		 * rather than by a <router-link> so the row does not carry a reactive
+		 * dependency on $route -- see the template comment and resolvedHref().
 		 *
 		 * @param {MouseEvent|KeyboardEvent} event - Native click or keydown event
-		 * @param {Function} [navigate] - VueRouter link's navigate if any
-		 * @param {string} [routerLinkHref] - VueRouter link's href
 		 */
-		onClick(event, navigate, routerLinkHref) {
-			// Always forward native event
+		onClick(event) {
+			// Always forward the native event: Envelope.vue's own @click
+			// handler records list context and opens draft rows on it.
 			this.$emit('click', event)
-			// Do not navigate with control keys - it is opening in a new tab
+			// Modifier keys mean open-in-new-tab (or, on an envelope row,
+			// select via the parent's own modifier handlers) -- let the
+			// browser follow the real href and do not navigate in place.
 			if (event.metaKey || event.altKey || event.ctrlKey || event.shiftKey) {
 				return
 			}
-			// Prevent default link behaviour if it's a router-link and navigate manually
-			if (routerLinkHref) {
-				navigate?.(event)
+			// Internal route: navigate in place. Draft rows have no `to`;
+			// their click is handled entirely by the parent (opens composer).
+			if (this.to) {
 				event.preventDefault()
+				// push() rejects with NavigationDuplicated when re-clicking
+				// the already-open row -- swallow that.
+				const navigation = this.$router.push(this.to)
+				if (navigation && typeof navigation.catch === 'function') {
+					navigation.catch(() => {})
+				}
 			}
 		},
 

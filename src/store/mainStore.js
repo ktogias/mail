@@ -50,6 +50,13 @@ export default defineStore('main', {
 			// Used for view-aware decisions: sync the open mailbox
 			// first, keep refreshing an open priority inbox.
 			currentViewMailboxId: undefined,
+			// The current view's :filter route segment (e.g. 'starred'),
+			// mirrored the same way currentViewMailboxId is. Lets an envelope
+			// row build its own target route WITHOUT reading $route, so a
+			// thread open (which only changes :threadId) doesn't invalidate
+			// every row's link() and re-render the whole list (see
+			// Envelope.vue::link() and EnvelopeSkeleton.vue).
+			currentViewFilter: undefined,
 			// The envelope id of the currently open thread/message (the
 			// route's own :threadId, mirrored the same way
 			// currentViewMailboxId is -- see Thread.vue's own route

@@ -24,6 +24,7 @@
 		:compact="compactMode"
 		:is-read="showImportantIconVariant"
 		:is-important="isImportant"
+		:active="isActiveThread"
 		@click.exact="onClick"
 		@click.ctrl.exact.prevent="toggleSelected"
 		@click.shift.exact.prevent="onSelectMultiple"
@@ -785,15 +786,33 @@ export default {
 			if (this.draft) {
 				return undefined
 			} else {
+				// mailboxId/filter come from the store's route mirror, NOT
+				// this.$route: reading $route here would make link() (and thus
+				// the row) recompute on every navigation -- including opening
+				// any OTHER thread, which only changes :threadId -- re-rendering
+				// the whole list. The mirror only changes when the view itself
+				// changes, so opening a thread leaves every row's link()
+				// untouched. See EnvelopeSkeleton.vue for the matching
+				// router-link removal and the 2026-07-20 profiling this fixes.
 				return {
 					name: 'message',
 					params: {
-						mailboxId: this.$route.params.mailboxId,
-						filter: this.$route.params.filter ? this.$route.params.filter : undefined,
+						mailboxId: this.mainStore.currentViewMailboxId,
+						filter: this.mainStore.currentViewFilter ? this.mainStore.currentViewFilter : undefined,
 						threadId: this.data.databaseId,
 					},
 				}
 			}
+		},
+
+		// Whether this row's thread is the one currently open. Replaces
+		// <router-link>'s reactive isActive (see EnvelopeSkeleton.vue): only
+		// the rows whose open-state actually changes re-render on navigation,
+		// instead of every row. currentOpenThreadId is stored as an int
+		// (Thread.vue parseInt), matching data.databaseId.
+		isActiveThread() {
+			return this.mainStore.currentOpenThreadId !== undefined
+				&& this.mainStore.currentOpenThreadId === this.data.databaseId
 		},
 
 		addresses() {
