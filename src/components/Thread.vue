@@ -35,41 +35,107 @@
 						<template #icon>
 							<DotsVerticalIcon :size="20" />
 						</template>
-						<NcActionButton
-							:close-after-click="true"
-							@click="markThreadSeen(threadHasUnread)">
-							<template #icon>
-								<EmailReadIcon v-if="threadHasUnread" :size="20" />
-								<EmailUnreadIcon v-else :size="20" />
-							</template>
-							{{ threadHasUnread ? t('mail', 'Mark all as read') : t('mail', 'Mark all as unread') }}
-						</NcActionButton>
-						<NcActionButton
-							v-if="threadAccount && threadAccount.archiveMailboxId"
-							:close-after-click="true"
-							@click="archiveThread">
-							<template #icon>
-								<ArchiveIcon :size="20" />
-							</template>
-							{{ t('mail', 'Archive thread') }}
-						</NcActionButton>
-						<NcActionButton
-							:close-after-click="true"
-							@click="showMoveModal = true">
-							<template #icon>
-								<OpenInNewIcon :size="20" />
-							</template>
-							{{ t('mail', 'Move thread') }}
-						</NcActionButton>
-						<NcActionSeparator />
-						<NcActionButton
-							:close-after-click="true"
-							@click="deleteThreadAction">
-							<template #icon>
-								<DeleteIcon :size="20" />
-							</template>
-							{{ t('mail', 'Delete thread') }}
-						</NcActionButton>
+						<template v-if="!threadSnoozeOpen">
+							<NcActionButton
+								:close-after-click="true"
+								@click="markThreadSeen(threadHasUnread)">
+								<template #icon>
+									<EmailReadIcon v-if="threadHasUnread" :size="20" />
+									<EmailUnreadIcon v-else :size="20" />
+								</template>
+								{{ threadHasUnread ? t('mail', 'Mark all as read') : t('mail', 'Mark all as unread') }}
+							</NcActionButton>
+							<NcActionButton
+								v-if="threadAccount && threadAccount.archiveMailboxId"
+								:close-after-click="true"
+								@click="archiveThread">
+								<template #icon>
+									<ArchiveIcon :size="20" />
+								</template>
+								{{ t('mail', 'Archive thread') }}
+							</NcActionButton>
+							<NcActionButton
+								:close-after-click="true"
+								@click="showMoveModal = true">
+								<template #icon>
+									<OpenInNewIcon :size="20" />
+								</template>
+								{{ t('mail', 'Move thread') }}
+							</NcActionButton>
+							<NcActionButton
+								v-if="!isSnoozeDisabled && !isThreadInSnoozeMailbox"
+								:close-after-click="false"
+								@click="threadSnoozeOpen = true">
+								<template #icon>
+									<AlarmIcon :size="20" />
+								</template>
+								{{ t('mail', 'Snooze thread') }}
+							</NcActionButton>
+							<NcActionButton
+								v-if="!isSnoozeDisabled && isThreadInSnoozeMailbox"
+								:close-after-click="true"
+								@click="unSnoozeThreadAction">
+								<template #icon>
+									<AlarmIcon :size="20" />
+								</template>
+								{{ t('mail', 'Unsnooze thread') }}
+							</NcActionButton>
+							<NcActionButton
+								:close-after-click="true"
+								@click="junkThread">
+								<template #icon>
+									<AlertOctagonIcon :size="20" />
+								</template>
+								{{ threadIsJunk ? t('mail', 'Mark thread as not spam') : t('mail', 'Mark thread as spam') }}
+							</NcActionButton>
+							<NcActionSeparator />
+							<NcActionButton
+								:close-after-click="true"
+								@click="deleteThreadAction">
+								<template #icon>
+									<DeleteIcon :size="20" />
+								</template>
+								{{ t('mail', 'Delete thread') }}
+							</NcActionButton>
+						</template>
+						<template v-else>
+							<NcActionButton
+								:close-after-click="false"
+								@click="threadSnoozeOpen = false">
+								<template #icon>
+									<ChevronLeftIcon :size="20" />
+								</template>
+								{{ t('mail', 'Back') }}
+							</NcActionButton>
+							<NcActionButton
+								v-for="option in reminderOptions"
+								:key="option.key"
+								:aria-label="option.ariaLabel"
+								close-after-click
+								@click.stop="snoozeThreadAt(option.timestamp)">
+								{{ option.label }}
+							</NcActionButton>
+							<NcActionSeparator />
+							<NcActionInput
+								type="datetime-local"
+								is-native-picker
+								:model-value="customSnoozeDateTime"
+								:min="new Date()"
+								@change="setCustomSnoozeDateTime">
+								<template #icon>
+									<CalendarClockIcon :size="20" />
+								</template>
+							</NcActionInput>
+							<NcActionButton
+								:aria-label="t('mail', 'Set custom snooze')"
+								close-after-click
+								@click.stop="snoozeThreadAt(customSnoozeDateTime.valueOf())">
+								<template #icon>
+									<CheckIcon :size="20" />
+								</template>
+								{{ t('mail', 'Set custom snooze') }}
+							</NcActionButton>
+						</template>
 					</NcActions>
 				</div>
 				<div id="mail-thread-header-meta">
@@ -134,10 +200,16 @@
 <script>
 import { showError } from '@nextcloud/dialogs'
 import { loadState } from '@nextcloud/initial-state'
+import moment from '@nextcloud/moment'
 import { NcAppContentDetails as AppContentDetails, NcButton as ButtonVue, NcActionButton, NcActionSeparator } from '@nextcloud/vue'
 import { mapStores } from 'pinia'
+import NcActionInput from '@nextcloud/vue/components/NcActionInput'
 import NcActions from '@nextcloud/vue/components/NcActions'
+import AlarmIcon from 'vue-material-design-icons/Alarm.vue'
+import AlertOctagonIcon from 'vue-material-design-icons/AlertOctagonOutline.vue'
 import ArchiveIcon from 'vue-material-design-icons/ArchiveArrowDownOutline.vue'
+import CalendarClockIcon from 'vue-material-design-icons/CalendarClockOutline.vue'
+import CheckIcon from 'vue-material-design-icons/Check.vue'
 import ChevronLeftIcon from 'vue-material-design-icons/ChevronLeft.vue'
 import ChevronRightIcon from 'vue-material-design-icons/ChevronRight.vue'
 import DotsVerticalIcon from 'vue-material-design-icons/DotsVertical.vue'
@@ -167,8 +239,13 @@ export default {
 		ButtonVue,
 		NcActions,
 		NcActionButton,
+		NcActionInput,
 		NcActionSeparator,
+		AlarmIcon,
+		AlertOctagonIcon,
 		ArchiveIcon,
+		CalendarClockIcon,
+		CheckIcon,
 		ChevronLeftIcon,
 		ChevronRightIcon,
 		DeleteIcon,
@@ -194,6 +271,8 @@ export default {
 			expandedThreads: [],
 			subjectExpanded: false,
 			showMoveModal: false,
+			threadSnoozeOpen: false,
+			customSnoozeDateTime: new Date(moment().add(2, 'hours').minute(0).second(0).valueOf()),
 			enabledThreadSummary: loadState('mail', 'llm_summaries_available', false),
 			summaryText: '',
 			summaryError: false,
@@ -309,6 +388,61 @@ export default {
 
 		threadHasUnread() {
 			return this.thread.some((envelope) => !envelope.flags?.seen)
+		},
+
+		threadIsJunk() {
+			return this.thread.length > 0 && this.thread.every((envelope) => envelope.flags?.$junk)
+		},
+
+		isSnoozeDisabled() {
+			return this.mainStore.isSnoozeDisabled
+		},
+
+		// True when the open thread already lives in the account's snooze
+		// mailbox -- then the menu offers Unsnooze instead of Snooze.
+		isThreadInSnoozeMailbox() {
+			const account = this.threadAccount
+			return account?.snoozeMailboxId !== undefined
+				&& this.thread.some((envelope) => envelope.mailboxId === account.snoozeMailboxId)
+		},
+
+		// Snooze presets, mirroring MenuEnvelope.vue's per-message options.
+		reminderOptions() {
+			const currentDateTime = moment()
+			const laterTodayTime = (currentDateTime.hour() < 18) ? moment().hour(18) : null
+			const tomorrowTime = moment().add(1, 'days').hour(8)
+			const thisWeekendTime = (currentDateTime.day() !== 6 && currentDateTime.day() !== 0)
+				? moment().day(6).hour(8)
+				: null
+			const nextWeekTime = moment().add(1, 'weeks').day(1).hour(8)
+			const getTimestamp = (momentObject) => momentObject?.minute(0).second(0).millisecond(0).valueOf() || null
+
+			return [
+				{
+					key: 'laterToday',
+					timestamp: getTimestamp(laterTodayTime),
+					label: t('mail', 'Later today – {timeLocale}', { timeLocale: laterTodayTime?.format('LT') }),
+					ariaLabel: t('mail', 'Snooze thread until later today'),
+				},
+				{
+					key: 'tomorrow',
+					timestamp: getTimestamp(tomorrowTime),
+					label: t('mail', 'Tomorrow – {timeLocale}', { timeLocale: tomorrowTime?.format('ddd LT') }),
+					ariaLabel: t('mail', 'Snooze thread until tomorrow'),
+				},
+				{
+					key: 'thisWeekend',
+					timestamp: getTimestamp(thisWeekendTime),
+					label: t('mail', 'This weekend – {timeLocale}', { timeLocale: thisWeekendTime?.format('ddd LT') }),
+					ariaLabel: t('mail', 'Snooze thread until this weekend'),
+				},
+				{
+					key: 'nextWeek',
+					timestamp: getTimestamp(nextWeekTime),
+					label: t('mail', 'Next week – {timeLocale}', { timeLocale: nextWeekTime?.format('ddd LT') }),
+					ariaLabel: t('mail', 'Snooze thread until next week'),
+				},
+			].filter((option) => option.timestamp !== null)
 		},
 
 		// Compact context line under the subject: "N messages · X people".
@@ -574,6 +708,73 @@ export default {
 			this.closeThread()
 		},
 
+		// Mark every message in the thread as spam / not-spam. In this fork
+		// junk is only a flag (it never moves the message to a folder -- see
+		// toggleEnvelopeJunk()), so this stays in place, no navigation, no
+		// undo, exactly like markThreadSeen(). Only the messages whose state
+		// differs from the target are toggled.
+		junkThread() {
+			const targetJunk = !this.threadIsJunk
+			Promise.all(this.thread
+				.filter((envelope) => Boolean(envelope.flags?.$junk) !== targetJunk)
+				.map((envelope) => this.mainStore.toggleEnvelopeJunk({ envelope, removeEnvelope: false }))).catch((error) => {
+				logger.error('could not update thread spam status', { error })
+				showError(t('mail', 'Could not update spam status'))
+			})
+		},
+
+		setCustomSnoozeDateTime(event) {
+			this.customSnoozeDateTime = new Date(event.target.value)
+		},
+
+		// Snooze the whole thread until `timestamp` (ms). Ensures the snooze
+		// mailbox exists first (one-time, idempotent, not itself undoable),
+		// then defers the move behind the undo window and closes the reading
+		// pane -- the thread leaves the current mailbox for the snooze folder.
+		async snoozeThreadAt(timestamp) {
+			this.threadSnoozeOpen = false
+			if (timestamp === null || timestamp === undefined) {
+				return
+			}
+			const account = this.threadAccount
+			const root = this.thread.find((envelope) => envelope.databaseId === this.threadId) || this.thread[0]
+			if (!account || !root) {
+				return
+			}
+			if (!account.snoozeMailboxId) {
+				await this.mainStore.createAndSetSnoozeMailbox(account)
+			}
+			const ids = this.thread.map((envelope) => envelope.databaseId)
+			this.performActionWithUndo({
+				ids,
+				message: t('mail', 'Thread snoozed'),
+				action: async () => {
+					await this.mainStore.snoozeThread({
+						envelope: root,
+						unixTimestamp: Math.floor(timestamp / 1000),
+						destMailboxId: account.snoozeMailboxId,
+					})
+				},
+			}).catch((error) => {
+				logger.error('could not snooze thread', { error })
+				showError(t('mail', 'Could not snooze thread'))
+			})
+			this.closeThread()
+		},
+
+		async unSnoozeThreadAction() {
+			const root = this.thread.find((envelope) => envelope.databaseId === this.threadId) || this.thread[0]
+			if (!root) {
+				return
+			}
+			try {
+				await this.mainStore.unSnoozeThread({ envelope: root })
+			} catch (error) {
+				logger.error('could not unsnooze thread', { error })
+				showError(t('mail', 'Could not unsnooze thread'))
+			}
+		},
+
 		// ThreadEnvelope.vue's own delete/archive actions request them
 		// here instead of calling the store directly, so a message
 		// deleted/archived from within an open thread goes through the
@@ -788,8 +989,9 @@ export default {
 		async resetThread() {
 			// A different conversation -- collapse the subject back to its
 			// one-line form so a previously tapped-open long subject doesn't
-			// carry over.
+			// carry over, and reset the ⋮ menu's snooze submenu.
 			this.subjectExpanded = false
+			this.threadSnoozeOpen = false
 
 			// Opening a message is a direct user action -- give it
 			// priority over the background watched-mailbox poller (see

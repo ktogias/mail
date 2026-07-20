@@ -1391,5 +1391,44 @@ describe('Thread', () => {
 			})
 			vi.useRealTimers()
 		})
+
+		it('marks the whole thread as spam by junking the not-yet-junk messages (no navigation)', async () => {
+			store.toggleEnvelopeJunk = vi.fn().mockResolvedValue()
+			const view = mountThread(4003)
+			// Fixture messages carry no $junk flag -> all three get junked
+			expect(view.vm.threadIsJunk).toBe(false)
+
+			view.vm.junkThread()
+			await view.vm.$nextTick()
+
+			expect(store.toggleEnvelopeJunk).toHaveBeenCalledTimes(3)
+			expect(store.toggleEnvelopeJunk).toHaveBeenCalledWith(expect.objectContaining({ removeEnvelope: false }))
+			// A flag toggle stays in place -- no navigation
+			expect(view.vm.$router.replace).not.toHaveBeenCalled()
+		})
+
+		it('snoozes the whole thread behind the undo window, creating the snooze mailbox if needed, and closes the pane', async () => {
+			vi.useFakeTimers()
+			store.getAccount = vi.fn().mockReturnValue({ snoozeMailboxId: undefined })
+			store.createAndSetSnoozeMailbox = vi.fn().mockImplementation(async (account) => {
+				account.snoozeMailboxId = 99
+			})
+			store.snoozeThread = vi.fn().mockResolvedValue()
+			showUndo.mockClear()
+			const view = mountThread(4003)
+
+			await view.vm.snoozeThreadAt(1700000000000)
+			expect(store.createAndSetSnoozeMailbox).toHaveBeenCalled()
+			expect(view.vm.$router.replace).toHaveBeenCalled()
+			expect(view.vm.threadSnoozeOpen).toBe(false)
+
+			await vi.advanceTimersByTimeAsync(10000)
+			expect(store.snoozeThread).toHaveBeenCalledWith({
+				envelope: expect.objectContaining({ databaseId: 4003 }),
+				unixTimestamp: 1700000000,
+				destMailboxId: 99,
+			})
+			vi.useRealTimers()
+		})
 	})
 })
