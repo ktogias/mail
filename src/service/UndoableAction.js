@@ -30,6 +30,13 @@ import { enableSwipeToDismiss } from '../util/swipeToDismiss.js'
  */
 export async function deferWithUndo({ message, action, onUndo }) {
 	let undone = false
+	// Snapshot the toasts already on screen so we can identify the one this
+	// call adds -- Toastify's bundled build doesn't expose the element on the
+	// returned instance under a stable name, so we diff the DOM instead of
+	// relying on a `toastElement` property.
+	const before = new Set(typeof document !== 'undefined'
+		? document.querySelectorAll('.toastify.dialogs')
+		: [])
 	const toast = showUndo(message, () => {
 		undone = true
 		onUndo?.()
@@ -42,9 +49,17 @@ export async function deferWithUndo({ message, action, onUndo }) {
 
 	// Swipe-to-dismiss (the standard mobile snackbar gesture): flinging the
 	// toast away just hides it, it does NOT undo -- the deferred action still
-	// runs when the window passes, matching a normal snackbar. showUndo returns
-	// the Toastify instance (undefined when mocked in tests, handled inside).
-	enableSwipeToDismiss(toast?.toastElement, () => toast?.hideToast?.())
+	// runs when the window passes, matching a normal snackbar.
+	const element = typeof document !== 'undefined'
+		? [...document.querySelectorAll('.toastify.dialogs')].find((el) => !before.has(el))
+		: undefined
+	enableSwipeToDismiss(element, () => {
+		if (toast?.hideToast instanceof Function) {
+			toast.hideToast()
+		} else {
+			element?.remove()
+		}
+	})
 
 	await new Promise((resolve) => setTimeout(resolve, TOAST_UNDO_TIMEOUT))
 

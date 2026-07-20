@@ -26,6 +26,11 @@ export function enableSwipeToDismiss(element, onDismiss) {
 		return () => {}
 	}
 
+	// Let the browser keep handling vertical panning (page scroll) but hand
+	// horizontal gestures to us, so the swipe isn't eaten as a scroll/refresh.
+	const previousTouchAction = element.style.touchAction
+	element.style.touchAction = 'pan-y'
+
 	let startX = 0
 	let startY = 0
 	let deltaX = 0
@@ -77,6 +82,7 @@ export function enableSwipeToDismiss(element, onDismiss) {
 	element.addEventListener('touchcancel', onEnd)
 
 	return () => {
+		element.style.touchAction = previousTouchAction
 		element.removeEventListener('touchstart', onStart)
 		element.removeEventListener('touchmove', onMove)
 		element.removeEventListener('touchend', onEnd)
