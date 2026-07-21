@@ -677,10 +677,14 @@ export default {
 					})
 
 					break
-				case 'arch':
+				case 'arch': {
 					logger.debug('archiving via shortcut')
 
-					if (this.account.archiveMailboxId === null) {
+					// In unified mailboxes this.account is the unified account which
+					// has no archive mailbox, so resolve the envelope's actual account
+					const account = this.mainStore.getAccount(env.accountId)
+
+					if (account.archiveMailboxId === null) {
 						showWarning(t('mail', 'To archive a message please configure an archive folder in account settings'))
 						return
 					}
@@ -690,20 +694,28 @@ export default {
 						return
 					}
 
-					if (env.mailboxId === this.account.archiveMailboxId) {
+					if (env.mailboxId === account.archiveMailboxId) {
 						logger.debug('message is already in archive folder')
 						return
 					}
 
 					logger.debug('archiving', { env })
 					this.onDelete(env.databaseId)
+					// destMailboxId reads the locally-resolved `account` (the
+					// envelope's own account, above) -- NOT this.account, which
+					// in a unified mailbox is the unified pseudo-account with no
+					// archive folder of its own. Merge conflict with upstream's
+					// own fix for the same reference (see the comment above)
+					// surfaced that our own undo-window wrapping had
+					// accidentally regressed to `this.account.archiveMailboxId`
+					// here; keeping the undo support, fixing the reference.
 					this.performActionWithUndo({
 						ids: [env.databaseId],
 						message: t('mail', 'Message archived'),
 						action: async () => {
 							await this.mainStore.moveThread({
 								envelope: env,
-								destMailboxId: this.account.archiveMailboxId,
+								destMailboxId: account.archiveMailboxId,
 							})
 						},
 					}).catch((error) => {
@@ -715,6 +727,7 @@ export default {
 						showError(t('mail', 'Could not archive message'))
 					})
 					break
+				}
 				case 'flag':
 					logger.debug('flagging envelope via shortkey', { env })
 					this.mainStore.toggleEnvelopeFlagged(env).catch((error) => logger.error('could not flag envelope via shortkey', {

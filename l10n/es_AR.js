@@ -46,10 +46,10 @@ OC.L10N.register(
     "Select account" : "Seleccione la cuenta",
     "Subject" : "Asunto",
     "Add attachment from Files" : "Agregar adjunto desde Archivos",
-    "Choose" : "Elige",
-    "Choose a file to add as attachment" : "Seleccione el archivo a agregar como adjunto",
+    "Choose a file" : "Seleccione un archivo",
     "Confirm" : "Confirmar",
     "Revoke" : "Revocar",
+    "Choose" : "Elige",
     "Favorite" : "Favorito",
     "Read" : "Leer",
     "Edit tags" : "Editar etiquetas",
@@ -98,7 +98,6 @@ OC.L10N.register(
     "Date" : "Fecha",
     "Tags" : "Etiquetas",
     "Custom" : "Personalizado",
-    "Tag already exists" : "La etiqueta ya existe",
     "Add tag" : "Añadir etiqueta",
     "Not found" : "No encontrado",
     "From:" : "De:",
@@ -140,6 +139,8 @@ OC.L10N.register(
     "Could not load your message" : "No se pudo cargar tu mensaje",
     "Could not load the desired message" : "No se pudo cargar el mensaje deseado",
     "Could not load the message" : "No se pudo cargar el mensaje.",
-    "Error loading message" : "Se presentó un error al cargar el mensaje"
+    "Tag already exists" : "La etiqueta ya existe",
+    "Error loading message" : "Se presentó un error al cargar el mensaje",
+    "Choose a file to add as attachment" : "Seleccione el archivo a agregar como adjunto"
 },
 "nplurals=3; plural=n == 1 ? 0 : n != 0 && n % 1000000 == 0 ? 1 : 2;");

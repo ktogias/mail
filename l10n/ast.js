@@ -80,7 +80,6 @@ OC.L10N.register(
     "Tomorrow afternoon" : "Mañana pela tarde",
     "Monday morning" : "Llunes pela mañana",
     "Enter a date" : "Introduz una data",
-    "Choose" : "Escoyer",
     "Untitled message" : "Mensaxe ensin títulu",
     "Expand composer" : "Espander el compositor",
     "Close composer" : "Zarrar el compositor",
@@ -90,6 +89,7 @@ OC.L10N.register(
     "Plain text" : "Testu ensin formatu",
     "Rich text" : "Testu arriquecíu",
     "No messages" : "Nun hai nengún mensaxe",
+    "Choose" : "Escoyer",
     "Tomorrow – {timeLocale}" : "Mañana – {timeLocale}",
     "This weekend – {timeLocale}" : "Esta fin de selmana – {timeLocale}",
     "Next week – {timeLocale}" : "La próxima selmana – {timeLocale}",
@@ -229,8 +229,6 @@ OC.L10N.register(
     "Delete tag" : "Desaniciar la etiqueta",
     "Set tag" : "Afitar la etiqueta",
     "Unset tag" : "Quitar la etiqueta",
-    "Tag already exists" : "La etiqueta yá esiste",
-    "Tag name cannot be empty" : "El nome de la etiqueta nun pue tar baleru",
     "An error occurred, unable to create the tag." : "Prodúxose un error, nun ye posible crear la bandexa de corréu.",
     "Add tag" : "Amestar una etiqueta",
     "Task created" : "Creóse la xera",
@@ -314,6 +312,8 @@ OC.L10N.register(
     "Could not load your message" : "Nun se pudo cargar el mensaxe",
     "Could not load the desired message" : "Nun se pudo cargar el mensaxe deseáu",
     "Could not load the message" : "Nun se pudo cargar el mensaxe",
+    "Tag name cannot be empty" : "El nome de la etiqueta nun pue tar baleru",
+    "Tag already exists" : "La etiqueta yá esiste",
     "Error loading message" : "Hebo un error al cargar el mensaxe"
 },
 "nplurals=2; plural=(n != 1);");

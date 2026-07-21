@@ -496,12 +496,12 @@ export default {
 				// the same class of leak documented elsewhere in this file
 				// (see appendToSearch()'s own comment), just triggered by
 				// toggling this preference live instead of by mounting.
-				// Upstream fixed the same bug independently (569dfa45c);
-				// kept its more defensive else-branch below (optional
-				// chaining plus trimming back to undefined) over this
-				// fork's original, which could throw on an unset
+				// Upstream fixed the same bug independently (569dfa45c) with
+				// this exact line; kept its more defensive else-branch below
+				// (optional chaining plus trimming back to undefined) over
+				// this fork's original, which could throw on an unset
 				// searchQuery and left a stray empty string behind.
-				this.searchQuery = this.searchQuery ? (this.searchQuery + ' not:starred') : 'not:starred'
+				this.searchQuery = this.searchQuery ? this.searchQuery + ' not:starred' : 'not:starred'
 			} else if (this.searchQuery?.includes('not:starred')) {
 				this.searchQuery = this.searchQuery.replace('not:starred', '').trim() || undefined
 			}
@@ -609,14 +609,12 @@ export default {
 			// running for 38-51 MINUTES on a 27k-message INBOX, pinning
 			// the DB at 300% CPU and starving every other request -- the
 			// actual root cause behind the recurring mailbox sync
-			// 502s/504s attributed to "mailbox 149 being slow".
+			// 502s/504s attributed to "mailbox 149 being slow". Upstream
+			// v5.10.9 doesn't have this guard at all -- kept in full.
 			if (str === undefined || str === null) {
 				return this.searchQuery
 			}
 
-			// Upstream's !this.searchQuery (catches '' and null too, not
-			// just undefined) is more defensive than this fork's original
-			// strict-equality check; adopted it on merge.
 			if (!this.searchQuery) {
 				return str
 			}
