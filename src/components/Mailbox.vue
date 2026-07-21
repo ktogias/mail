@@ -7,6 +7,10 @@
 	<div
 		class="mailbox"
 		:class="{ 'empty-content': (!hasMessages && !loadingEnvelopes) || error }">
+		<div ref="pullToRefreshIndicator" class="pull-to-refresh-indicator" aria-hidden="true">
+			<IconLoading v-if="pullToRefreshSpinning" :size="20" />
+			<IconRefresh v-else :size="20" />
+		</div>
 		<Error
 			v-if="error"
 			:error="errorTitle"
@@ -52,8 +56,10 @@
 
 <script>
 import { showError, showWarning } from '@nextcloud/dialogs'
+import { NcLoadingIcon as IconLoading } from '@nextcloud/vue'
 import { mapStores } from 'pinia'
 import { findIndex, propEq } from 'ramda'
+import IconRefresh from 'vue-material-design-icons/Refresh.vue'
 import EmptyMailbox from './EmptyMailbox.vue'
 import EmptyMailboxSection from './EmptyMailboxSection.vue'
 import EnvelopeList from './EnvelopeList.vue'
@@ -68,6 +74,8 @@ import NoTrashMailboxConfiguredError
 	from '../errors/NoTrashMailboxConfiguredError.js'
 import logger from '../logger.js'
 import IdleTailTrimMixin from '../mixins/IdleTailTrimMixin.js'
+import PullToRefreshMixin from '../mixins/PullToRefreshMixin.js'
+import ReturnScrollAnchorMixin from '../mixins/ReturnScrollAnchorMixin.js'
 import UndoableActionMixin from '../mixins/UndoableActionMixin.js'
 import useMainStore from '../store/mainStore.js'
 import { mailboxHasRights } from '../util/acl.js'
@@ -80,12 +88,14 @@ export default {
 		EmptyMailbox,
 		EnvelopeList,
 		Error,
+		IconLoading,
+		IconRefresh,
 		Loading,
 		LoadingSkeleton,
 		SectionTitle,
 	},
 
-	mixins: [UndoableActionMixin, IdleTailTrimMixin],
+	mixins: [UndoableActionMixin, IdleTailTrimMixin, PullToRefreshMixin, ReturnScrollAnchorMixin],
 
 	props: {
 		groupEnvelopes: {
@@ -631,6 +641,7 @@ export default {
 					this.mainStore.setLastOpenedFromListMutation({
 						mailboxId: this.mailbox.databaseId,
 						query: this.searchQuery,
+						databaseId: next.databaseId,
 					})
 					this.$router.push({
 						name: 'message',
@@ -844,6 +855,7 @@ export default {
 			this.mainStore.setLastOpenedFromListMutation({
 				mailboxId: this.mailbox.databaseId,
 				query: this.searchQuery,
+				databaseId: next.databaseId,
 			})
 			this.$router.push({
 				name: 'message',
@@ -932,5 +944,33 @@ export default {
 	height: 100%;
 	display: flex;
 	justify-content: center;
+}
+
+.mailbox {
+	position: relative;
+}
+
+// Hidden (opacity 0, transform driven by pullToRefresh.js during the
+// gesture) until a drag actually starts -- see enablePullToRefresh().
+// Horizontal centering deliberately does NOT use `transform` (left +
+// negative margin instead): pullToRefresh.js sets this element's
+// `transform` directly (translateY + rotate) during the drag, which would
+// silently clobber a transform-based centering trick.
+.pull-to-refresh-indicator {
+	position: absolute;
+	top: 0;
+	inset-inline-start: 50%;
+	margin-inline-start: calc(var(--default-clickable-area) / -2);
+	opacity: 0;
+	z-index: 10;
+	pointer-events: none;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: var(--default-clickable-area);
+	height: var(--default-clickable-area);
+	border-radius: 50%;
+	background-color: var(--color-main-background);
+	box-shadow: 0 0 4px 0 var(--color-box-shadow);
 }
 </style>

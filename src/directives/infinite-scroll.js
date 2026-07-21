@@ -45,7 +45,9 @@ function throttle(fn, delay) {
 	}
 }
 
-function getScrollTop(element) {
+// Exported for pullToRefresh.js's canStart() check, which needs the exact
+// same window-vs-element scrollTop branch to decide "already at the top."
+export function getScrollTop(element) {
 	if (element === window) {
 		return Math.max(window.pageYOffset || 0, document.documentElement.scrollTop)
 	}

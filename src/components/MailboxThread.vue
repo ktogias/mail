@@ -772,6 +772,10 @@ export default {
 	overflow-y: auto;
 	min-height: 0;
 	contain: none !important;
+	// Suppresses the browser's own native pull-to-refresh/bounce at this
+	// container's scroll boundaries so it doesn't race PullToRefreshMixin's
+	// own touch-driven gesture (src/mixins/PullToRefreshMixin.js).
+	overscroll-behavior-y: contain;
 }
 
 .load-more-sentinel {

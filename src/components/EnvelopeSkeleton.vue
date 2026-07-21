@@ -377,8 +377,14 @@ export default {
 		 */
 		onClick(event) {
 			// Always forward the native event: Envelope.vue's own @click
-			// handler records list context and opens draft rows on it.
+			// handler records list context and opens draft rows on it --
+			// and, on mobile (see LongPressMixin/selectMode there), may
+			// call event.preventDefault() to turn this tap into a
+			// selection toggle instead of a navigation.
 			this.$emit('click', event)
+			if (event.defaultPrevented) {
+				return
+			}
 			// Modifier keys mean open-in-new-tab (or, on an envelope row,
 			// select via the parent's own modifier handlers) -- let the
 			// browser follow the real href and do not navigate in place.
@@ -745,20 +751,35 @@ export default {
 
 }
 
+@mixin visible-hoverable {
+	visibility: visible;
+	position: absolute;
+	display: flex;
+	background: var(--color-main-background);
+	border-radius: var(--border-radius-element);
+	box-shadow: 0 0 4px 0 var(--color-box-shadow);
+	height: var(--default-clickable-area);
+	inset-inline-end: var(--default-grid-baseline);
+
+	:deep(svg) {
+		fill: var(--color-main-text) !important; // needed to not inherit active styling
+	}
+}
+
 .list-item:hover {
 	.list-item__hoverable {
-		visibility: visible;
-		position: absolute;
-		display: flex;
-		background: var(--color-main-background);
-		border-radius: var(--border-radius-element);
-		box-shadow: 0 0 4px 0 var(--color-box-shadow);
-		height: var(--default-clickable-area);
-		inset-inline-end: var(--default-grid-baseline);
+		@include visible-hoverable;
+	}
+}
 
-		:deep(svg) {
-			fill: var(--color-main-text) !important; // needed to not inherit active styling
-		}
+// Hover/focus never reliably reveal this on a touch device (mobile
+// browsers synthesize both ambiguously against a tap's own navigation --
+// see Envelope.vue's onClick()/selectMode handling) -- unconditional here
+// instead, same size as the desktop hover reveal. The desktop mouse
+// experience above is untouched.
+@media (pointer: coarse) {
+	.list-item__hoverable {
+		@include visible-hoverable;
 	}
 }
 

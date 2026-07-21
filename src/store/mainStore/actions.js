@@ -1570,8 +1570,11 @@ export default function mainStoreActions() {
 		// See lastOpenedFromList in mainStore.js's state() for the full
 		// reasoning. mailboxId/query together are exactly what
 		// getEnvelopes() needs to reconstruct the same list later.
-		setLastOpenedFromListMutation({ mailboxId, query }) {
-			this.lastOpenedFromList = { mailboxId, query }
+		// databaseId is the opened envelope itself -- Mailbox.vue's own
+		// ReturnScrollAnchorMixin reads it back to re-anchor the list's
+		// scroll position to this exact row once the thread closes.
+		setLastOpenedFromListMutation({ mailboxId, query, databaseId }) {
+			this.lastOpenedFromList = { mailboxId, query, databaseId }
 		},
 		// See selectedEnvelopeIdsByList in mainStore.js's state().
 		setListSelectionMutation({ mailboxId, query, ownerId = 'default', selectedIds }) {

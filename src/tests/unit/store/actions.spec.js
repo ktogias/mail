@@ -3835,6 +3835,17 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	describe('setLastOpenedFromListMutation', () => {
+		// Mailbox.vue's own ReturnScrollAnchorMixin reads databaseId back
+		// to re-anchor the list's scroll position to this exact row once
+		// the thread closes -- see mainStore/actions.js.
+		it('stores mailboxId, query, and databaseId together', () => {
+			store.setLastOpenedFromListMutation({ mailboxId: 38, query: 'is:starred', databaseId: 70 })
+
+			expect(store.lastOpenedFromList).toEqual({ mailboxId: 38, query: 'is:starred', databaseId: 70 })
+		})
+	})
+
 	describe('interaction priority: user actions over background sync', () => {
 		// A direct user action (opening a message, switching folders,
 		// starring/deleting/flagging, ...) arms a short priority window

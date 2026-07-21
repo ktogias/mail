@@ -147,6 +147,17 @@ describe('EnvelopeSkeleton: navigation decoupled from $route (2026-07-20 open-la
 		expect(event.preventDefault).not.toHaveBeenCalled()
 	})
 
+	it('does not navigate when the click listener already called preventDefault (mobile tap ambiguity fix -- selectMode/long-press interception in Envelope.vue)', () => {
+		const push = vi.fn(() => Promise.resolve())
+		const view = mountRow({}, { push })
+		const event = { defaultPrevented: true, preventDefault: vi.fn() }
+
+		view.vm.onClick(event)
+
+		expect(view.emitted('click')).toBeTruthy()
+		expect(push).not.toHaveBeenCalled()
+	})
+
 	it('leaves a draft row (no `to`) for the parent, emitting click but not navigating', () => {
 		const push = vi.fn(() => Promise.resolve())
 		const view = mountRow({ to: null }, { push })

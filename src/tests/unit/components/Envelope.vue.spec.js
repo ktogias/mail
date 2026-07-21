@@ -484,7 +484,7 @@ describe('Envelope', () => {
 
 			await view.vm.onClick({})
 
-			expect(store.lastOpenedFromList).toEqual({ mailboxId: 42, query: 'is:starred' })
+			expect(store.lastOpenedFromList).toEqual({ mailboxId: 42, query: 'is:starred', databaseId: 999 })
 		})
 
 		it('does not record anything for a draft (opens the composer instead)', async () => {
@@ -501,6 +501,161 @@ describe('Envelope', () => {
 			await view.vm.onClick({})
 
 			expect(store.lastOpenedFromList).toBeNull()
+		})
+	})
+
+	describe('onClick: selection-mode and long-press interception (mobile tap ambiguity fix)', () => {
+		function mountEnvelope(propsOverride = {}) {
+			return shallowMount(Envelope, {
+				mocks: { $route },
+				propsData: {
+					mailbox: { specialRole: '', databaseId: 42, myAcls: undefined },
+					searchQuery: 'is:starred',
+					selectMode: false,
+					data: {
+						accountId: 123,
+						databaseId: 999,
+						from: [{ email: 'info@test.com' }],
+						flags: { seen: false, flagged: false, $junk: false, answered: false, hasAttachments: false, draft: false },
+					},
+					...propsOverride,
+				},
+				store,
+				localVue,
+			})
+		}
+
+		it('toggles selection instead of navigating when selectMode is true', async () => {
+			const view = mountEnvelope({ selectMode: true })
+			const event = { preventDefault: vi.fn() }
+
+			await view.vm.onClick(event)
+
+			expect(event.preventDefault).toHaveBeenCalled()
+			expect(view.emitted('update:selected')).toEqual([[true]])
+			// Did not fall through to the normal open-and-record path.
+			expect(store.lastOpenedFromList).toBeNull()
+		})
+
+		it('opens normally (records list context) when selectMode is false', async () => {
+			const view = mountEnvelope({ selectMode: false })
+
+			await view.vm.onClick({})
+
+			expect(store.lastOpenedFromList).toEqual({ mailboxId: 42, query: 'is:starred', databaseId: 999 })
+		})
+
+		it('swallows exactly one click after a long-press, then resumes normal behavior', async () => {
+			const view = mountEnvelope()
+			await view.setData({ suppressNextClickAfterLongPress: true })
+			const suppressedEvent = { preventDefault: vi.fn() }
+
+			await view.vm.onClick(suppressedEvent)
+
+			expect(suppressedEvent.preventDefault).toHaveBeenCalled()
+			expect(store.lastOpenedFromList).toBeNull()
+			expect(view.vm.suppressNextClickAfterLongPress).toBe(false)
+
+			// The flag only swallows the one synthesized click -- the next
+			// real click behaves normally again.
+			await view.vm.onClick({})
+
+			expect(store.lastOpenedFromList).toEqual({ mailboxId: 42, query: 'is:starred', databaseId: 999 })
+		})
+	})
+
+	describe('long-press-to-select (mobile tap ambiguity fix)', () => {
+		function mountEnvelope(propsOverride = {}) {
+			return shallowMount(Envelope, {
+				mocks: { $route },
+				propsData: {
+					mailbox: { specialRole: '', databaseId: 42, myAcls: undefined },
+					data: {
+						accountId: 123,
+						databaseId: 999,
+						from: [{ email: 'info@test.com' }],
+						flags: { seen: false, flagged: false, $junk: false, answered: false, hasAttachments: false, draft: false },
+					},
+					...propsOverride,
+				},
+				store,
+				localVue,
+			})
+		}
+
+		beforeEach(() => {
+			vi.useFakeTimers()
+		})
+
+		afterEach(() => {
+			vi.useRealTimers()
+		})
+
+		it('toggles selection and arms the click-suppress flag after a 500ms hold with no movement', () => {
+			const view = mountEnvelope()
+			const touchEvent = { touches: [{ clientX: 100, clientY: 100 }] }
+
+			view.vm.onEnvelopeTouchStart(touchEvent)
+			vi.advanceTimersByTime(500)
+
+			expect(view.emitted('update:selected')).toEqual([[true]])
+			expect(view.vm.suppressNextClickAfterLongPress).toBe(true)
+		})
+
+		it('does not fire before 500ms elapses', () => {
+			const view = mountEnvelope()
+			const touchEvent = { touches: [{ clientX: 100, clientY: 100 }] }
+
+			view.vm.onEnvelopeTouchStart(touchEvent)
+			vi.advanceTimersByTime(499)
+
+			expect(view.emitted('update:selected')).toBeUndefined()
+		})
+
+		it('is cancelled by a touchmove past the movement tolerance', () => {
+			const view = mountEnvelope()
+			view.vm.onEnvelopeTouchStart({ touches: [{ clientX: 100, clientY: 100 }] })
+
+			view.vm.onEnvelopeTouchMove({ touches: [{ clientX: 130, clientY: 100 }] })
+			vi.advanceTimersByTime(500)
+
+			expect(view.emitted('update:selected')).toBeUndefined()
+		})
+
+		it('survives a touchmove within the movement tolerance (hand tremor)', () => {
+			const view = mountEnvelope()
+			view.vm.onEnvelopeTouchStart({ touches: [{ clientX: 100, clientY: 100 }] })
+
+			view.vm.onEnvelopeTouchMove({ touches: [{ clientX: 105, clientY: 100 }] })
+			vi.advanceTimersByTime(500)
+
+			expect(view.emitted('update:selected')).toEqual([[true]])
+		})
+
+		it('is cancelled by touchend before the hold completes', () => {
+			const view = mountEnvelope()
+			view.vm.onEnvelopeTouchStart({ touches: [{ clientX: 100, clientY: 100 }] })
+
+			view.vm.onEnvelopeTouchEnd()
+			vi.advanceTimersByTime(500)
+
+			expect(view.emitted('update:selected')).toBeUndefined()
+		})
+
+		it('still works on a draft row (bulk-selecting drafts is a real case)', () => {
+			const view = mountEnvelope({
+				data: {
+					accountId: 123,
+					databaseId: 999,
+					from: [{ email: 'info@test.com' }],
+					flags: { seen: false, flagged: false, $junk: false, answered: false, hasAttachments: false, draft: true },
+				},
+			})
+
+			view.vm.onEnvelopeTouchStart({ touches: [{ clientX: 100, clientY: 100 }] })
+			vi.advanceTimersByTime(500)
+
+			expect(view.emitted('update:selected')).toEqual([[true]])
 		})
 	})
 

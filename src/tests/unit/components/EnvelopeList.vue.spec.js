@@ -74,7 +74,7 @@ describe('EnvelopeList', () => {
 
 			await view.vm.deleteAllSelected()
 
-			expect(store.lastOpenedFromList).toEqual({ mailboxId: 38, query: 'is:starred' })
+			expect(store.lastOpenedFromList).toEqual({ mailboxId: 38, query: 'is:starred', databaseId: 1 })
 			expect(view.vm.$router.push).toHaveBeenCalledWith(expect.objectContaining({
 				params: expect.objectContaining({ threadId: 1 }),
 			}))

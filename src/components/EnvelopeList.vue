@@ -626,6 +626,7 @@ export default {
 				this.mainStore.setLastOpenedFromListMutation({
 					mailboxId: this.mailbox.databaseId,
 					query: this.searchQuery,
+					databaseId: nextEnvelopeToNavigate.databaseId,
 				})
 				await this.$router.push({
 					name: 'message',

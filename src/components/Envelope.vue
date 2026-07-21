@@ -25,6 +25,7 @@
 		:is-read="showImportantIconVariant"
 		:is-important="isImportant"
 		:active="isActiveThread"
+		:force-display-actions="alwaysShowActions"
 		@click.exact="onClick"
 		@click.ctrl.exact.prevent="toggleSelected"
 		@click.shift.exact.prevent="onSelectMultiple"
@@ -35,7 +36,8 @@
 		@mousemove.native="onEnvelopeMouseMove"
 		@mouseleave.native="onEnvelopeMouseLeave"
 		@touchstart.native.passive="onEnvelopeTouchStart"
-		@touchmove.native.passive="cancelHoverPrefetch">
+		@touchmove.native.passive="onEnvelopeTouchMove"
+		@touchend.native.passive="onEnvelopeTouchEnd">
 		<template #icon>
 			<div v-if="!compactMode">
 				<Star
@@ -596,11 +598,13 @@ import { DraggableEnvelopeDirective } from '../directives/drag-and-drop/draggabl
 import logger from '../logger.js'
 import AttachmentMixin from '../mixins/AttachmentMixin.js'
 import HoverPrefetchMixin from '../mixins/HoverPrefetchMixin.js'
+import LongPressMixin from '../mixins/LongPressMixin.js'
 import ViewportPrefetchMixin from '../mixins/ViewportPrefetchMixin.js'
 import { buildRecipients as buildReplyRecipients } from '../ReplyBuilder.js'
 import { FOLLOW_UP_TAG_LABEL } from '../store/constants.js'
 import useMainStore from '../store/mainStore.js'
 import { mailboxHasRights } from '../util/acl.js'
+import { isCoarsePointer } from '../util/pointerType.js'
 import { isScrollingRecently } from '../util/scrollActivityTracker.js'
 import { messageDateTime, shortRelativeDatetime } from '../util/shortRelativeDatetime.js'
 import { translateTagDisplayName } from '../util/tag.js'
@@ -658,7 +662,7 @@ export default {
 		draggableEnvelope: DraggableEnvelopeDirective,
 	},
 
-	mixins: [AttachmentMixin, HoverPrefetchMixin, ViewportPrefetchMixin],
+	mixins: [AttachmentMixin, HoverPrefetchMixin, LongPressMixin, ViewportPrefetchMixin],
 
 	props: {
 		withReply: {
@@ -725,6 +729,11 @@ export default {
 			quickActionLoading: false,
 			possibleAttachmentsCount: 0,
 			attachmentMeasureRaf: null,
+			// Set when a long-press fires toggleSelected() -- the browser
+			// still synthesizes a click once the finger lifts, which
+			// would otherwise toggle the same row a second time and undo
+			// the long-press. See onClick()/LongPressMixin.
+			suppressNextClickAfterLongPress: false,
 		}
 	},
 
@@ -736,6 +745,16 @@ export default {
 
 		isRTL() {
 			return isRTL()
+		},
+
+		// On a coarse (touch) pointer, hover/focus never reliably reveal
+		// the actions button (mobile browsers synthesize both ambiguously
+		// against the tap's own navigation -- see onClick()'s selectMode
+		// handling below) -- force it always-visible there instead, sized
+		// for a real touch target (EnvelopeSkeleton.vue's coarse-pointer
+		// media query). Desktop mouse behavior (hover-gated) is untouched.
+		alwaysShowActions() {
+			return isCoarsePointer()
 		},
 
 		// In threaded listings this row represents the whole thread (its
@@ -1250,6 +1269,24 @@ export default {
 		},
 
 		async onClick(event) {
+			// The browser synthesizes a click after the long-press's own
+			// touchend -- swallow exactly that one, then resume normal
+			// behavior for every click after it.
+			if (this.suppressNextClickAfterLongPress) {
+				this.suppressNextClickAfterLongPress = false
+				event.preventDefault()
+				return
+			}
+			// Once at least one row is selected, every plain tap/click
+			// toggles selection instead of opening -- the standard
+			// "selection mode" behavior (Gmail/Files/etc). @click.exact
+			// only fires with no modifier keys, so this doesn't touch the
+			// existing ctrl/shift-click bindings at all.
+			if (this.selectMode) {
+				event.preventDefault()
+				this.toggleSelected()
+				return
+			}
 			if (!event.ctrlKey && this.draft && !event.defaultPrevented) {
 				await this.mainStore.startComposerSession({
 					data: {
@@ -1272,6 +1309,7 @@ export default {
 				this.mainStore.setLastOpenedFromListMutation({
 					mailboxId: this.mailbox.databaseId,
 					query: this.searchQuery,
+					databaseId: this.data.databaseId,
 				})
 			}
 		},
@@ -1306,7 +1344,21 @@ export default {
 			this.cancelHoverPrefetch()
 		},
 
-		onEnvelopeTouchStart() {
+		onEnvelopeTouchStart(event) {
+			// Long-press-to-select: independent of the prefetch timer
+			// below (its own timer slot, see LongPressMixin) so both can
+			// arm from the very same touchstart without clobbering each
+			// other. Selecting a draft should work the same as any other
+			// row (bulk-deleting several drafts is a real case), so this
+			// isn't gated on `draft` the way prefetch below is. A tap
+			// landing mid-fling-scroll isn't real intent here either --
+			// same reasoning as the prefetch guard below.
+			if (!isScrollingRecently()) {
+				this.armLongPress(event, () => {
+					this.suppressNextClickAfterLongPress = true
+					this.toggleSelected()
+				})
+			}
 			// Touch's equivalent of onEnvelopeMouseMove() -- see
 			// TOUCH_PREFETCH_DELAY_MS in HoverPrefetchMixin.js for why this
 			// needs its own much shorter delay instead of reusing the
@@ -1324,6 +1376,15 @@ export default {
 				this.mainStore.fetchMessage(this.data.databaseId, { speculative: true }).catch(() => {})
 				this.mainStore.fetchThread(this.data.databaseId, { speculative: true }).catch(() => {})
 			})
+		},
+
+		onEnvelopeTouchMove(event) {
+			this.cancelHoverPrefetch()
+			this.checkLongPressMove(event)
+		},
+
+		onEnvelopeTouchEnd() {
+			this.cancelLongPress()
 		},
 
 		onSelectMultiple() {

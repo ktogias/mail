@@ -82,8 +82,8 @@ export default defineStore('main', {
 			// regular folder, the unified inbox's merged view, or a
 			// search/filter's results all share the same route, so it
 			// can't be reconstructed from route params alone). Read by
-			// Thread.vue::prefetchListNeighborhood() -- see
-			// mainStore/actions.js.
+			// Thread.vue::prefetchListNeighborhood() and Mailbox.vue's
+			// own ReturnScrollAnchorMixin -- see mainStore/actions.js.
 			lastOpenedFromList: null,
 			preferences: {},
 			accountsUnmapped: {
