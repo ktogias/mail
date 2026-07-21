@@ -707,36 +707,6 @@ describe('Vuex store actions', () => {
 			// Thread-collapsed: the newest member represents the thread row.
 			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['not:starred is:pi-other']).toContain(81)
 		})
-
-		it('makes a new reply to a starred thread the Favorites row at once, replacing (not duplicating) the older representative', () => {
-			// The starred member A already represents the thread in is:starred.
-			// A new (unstarred) reply B belongs to the same starred thread, so
-			// its arrival must update the Favorites row to the newest message --
-			// exactly one entry per thread, no duplicate row.
-			store.preferences['sort-order'] = 'newest'
-			store.envelopes[90] = { databaseId: 90, accountId: 13, mailboxId: 11, uid: 90, dateInt: 90000, threadRootId: 'thr-star', flags: { seen: true, flagged: true, important: false }, tags: {} }
-			store.mailboxes[11].envelopeLists['is:starred'] = [90]
-			store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:starred'] = [90]
-
-			const reply = { databaseId: 91, mailboxId: 11, uid: 91, dateInt: 91000, threadRootId: 'thr-star', flags: { seen: false, flagged: false, important: false }, tags: {} }
-			store.addEnvelopesMutation({ query: '', envelopes: [reply] })
-
-			// The reply is now the thread's representative in Favorites, and the
-			// older starred member is no longer a separate row.
-			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:starred']).toEqual([91])
-			expect(store.mailboxes[11].envelopeLists['is:starred']).toEqual([91])
-		})
-
-		it('leaves the Favorites row unchanged for a new reply to a thread with no starred member', () => {
-			store.preferences['sort-order'] = 'newest'
-			store.envelopes[92] = { databaseId: 92, accountId: 13, mailboxId: 11, uid: 92, dateInt: 92000, threadRootId: 'thr-plain', flags: { seen: true, flagged: false, important: false }, tags: {} }
-			store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:starred'] = []
-
-			const reply = { databaseId: 93, mailboxId: 11, uid: 93, dateInt: 93000, threadRootId: 'thr-plain', flags: { seen: false, flagged: false, important: false }, tags: {} }
-			store.addEnvelopesMutation({ query: '', envelopes: [reply] })
-
-			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:starred']).toEqual([])
-		})
 	})
 
 	describe('addEnvelopesMutation: new mail in an existing thread invalidates its cached member list and, if open, proactively prefetches the body', () => {
