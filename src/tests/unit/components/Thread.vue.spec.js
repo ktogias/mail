@@ -1066,14 +1066,16 @@ describe('Thread', () => {
 		})
 	})
 
-	describe('advanceAfterRemoval() honors the "auto-advance" preference', () => {
-		// After the whole thread is removed (delete/move/junk/snooze) the
-		// reading pane advances per the user's preference, mirroring
-		// Mailbox.onDelete() for single messages: 'next' (default) / 'previous'
-		// open the neighbour below/above in the list (each falling back to the
-		// other end), 'list' returns to the mailbox. Directions are
-		// sort-agnostic. Falls back to closing the pane when there's no list
-		// context to navigate within.
+	describe('advanceAfterRemoval() delegates to the mailbox list, like single-message removal', () => {
+		// Whole-thread removal (delete/move/junk/snooze) must advance exactly
+		// like deleting a single message does: it emits 'delete', which
+		// MailboxThread forwards to the list's own onDelete() -- the one place
+		// that owns the sort-agnostic next/previous/back-to-list preference
+		// logic and, crucially, uses the list component's *own* mailbox+query
+		// (correct even in unified/Priority Inbox sections, where Thread's own
+		// listNavigation resolved empty and wrongly sent every thread removal
+		// back to the list). With no list context (a direct URL/bookmark/
+		// notification) there's nothing to advance within, so it closes the pane.
 		function mountAt(threadId) {
 			return shallowMount(Thread, {
 				mocks: {
@@ -1094,57 +1096,25 @@ describe('Thread', () => {
 				{ databaseId: 8003 },
 			])
 			store.fetchThread = vi.fn().mockResolvedValue([])
-			store.lastOpenedFromList = { mailboxId: 50, query: 'is:starred' }
 		})
 
-		it('opens the next neighbour (emitting the shared navigate-list payload) when the preference is "next"', () => {
-			store.getPreference = vi.fn().mockReturnValue('next')
+		it('emits "delete" with the open thread id when opened from a list (reusing the single-message advance path)', () => {
+			store.lastOpenedFromList = { mailboxId: 50, query: 'is:starred' }
 			const view = mountAt(8002)
 
 			view.vm.advanceAfterRemoval()
 
-			expect(view.emitted('navigate-list')).toEqual([[{ srcKey: 'next' }]])
+			expect(view.emitted('delete')).toEqual([[8002]])
 			expect(view.vm.$router.replace).not.toHaveBeenCalled()
 		})
 
-		it('opens the previous neighbour when the preference is "previous"', () => {
-			store.getPreference = vi.fn().mockReturnValue('previous')
-			const view = mountAt(8002)
-
-			view.vm.advanceAfterRemoval()
-
-			expect(view.emitted('navigate-list')).toEqual([[{ srcKey: 'prev' }]])
-		})
-
-		it('falls back to the other direction when the preferred one is at a boundary', () => {
-			// "next" from the last thread: no neighbour below, so it takes the
-			// one above rather than closing the pane.
-			store.getPreference = vi.fn().mockReturnValue('next')
-			const view = mountAt(8003)
-
-			view.vm.advanceAfterRemoval()
-
-			expect(view.emitted('navigate-list')).toEqual([[{ srcKey: 'prev' }]])
-		})
-
-		it('closes the reading pane when the preference is "list"', () => {
-			store.getPreference = vi.fn().mockReturnValue('list')
-			const view = mountAt(8002)
-
-			view.vm.advanceAfterRemoval()
-
-			expect(view.emitted('navigate-list')).toBeUndefined()
-			expect(view.vm.$router.replace).toHaveBeenCalledWith(expect.objectContaining({ name: 'mailbox' }))
-		})
-
-		it('closes the reading pane when there is no list context to navigate within', () => {
+		it('closes the reading pane when there is no list context to advance within', () => {
 			store.lastOpenedFromList = null
-			store.getPreference = vi.fn().mockReturnValue('next')
 			const view = mountAt(8002)
 
 			view.vm.advanceAfterRemoval()
 
-			expect(view.emitted('navigate-list')).toBeUndefined()
+			expect(view.emitted('delete')).toBeUndefined()
 			expect(view.vm.$router.replace).toHaveBeenCalledWith(expect.objectContaining({ name: 'mailbox' }))
 		})
 	})

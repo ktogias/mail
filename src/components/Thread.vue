@@ -635,33 +635,21 @@ export default {
 		},
 
 		// After the whole thread is removed (deleted/moved/junked/snoozed),
-		// go where the user's "auto-advance" preference says. Directions are
-		// sort-agnostic: "next"/"previous" mean the neighbour below/above in the
-		// list as currently sorted, each falling back to the other end, then to
-		// the list. "list" (and having no neighbour at all) returns to the
-		// mailbox. Mirrors Mailbox.onDelete() for single-message removal.
+		// advance exactly the way single-message removal already does: emit
+		// 'delete', which MailboxThread forwards to the mailbox list's own
+		// onDelete(). That advances using the list component's *own*
+		// mailbox + query -- always correct, including in the unified/Priority
+		// Inbox sections -- and honours the "auto-advance" preference
+		// (next/previous/back-to-list) itself, so the logic lives in exactly
+		// one place. (Thread's own listNavigation, by contrast, resolved empty
+		// for Priority Inbox sections and sent every thread removal back to
+		// the list.) When the thread wasn't opened from a list at all -- a
+		// direct URL, bookmark or notification -- there's no list to advance
+		// within, so just close the reading pane.
 		advanceAfterRemoval() {
-			const preference = this.mainStore.getPreference('auto-advance', 'next')
-			const nav = this.listNavigation
-			if (preference !== 'list' && nav) {
-				if (preference === 'next' && nav.hasNext) {
-					this.navigateList('next')
-					return
-				}
-				if (preference === 'previous' && nav.hasPrevious) {
-					this.navigateList('prev')
-					return
-				}
-				// The preferred direction has no neighbour -- try the other way
-				// before giving up and returning to the list.
-				if (nav.hasNext) {
-					this.navigateList('next')
-					return
-				}
-				if (nav.hasPrevious) {
-					this.navigateList('prev')
-					return
-				}
+			if (this.mainStore.lastOpenedFromList) {
+				this.$emit('delete', this.threadId)
+				return
 			}
 			this.closeThread()
 		},
