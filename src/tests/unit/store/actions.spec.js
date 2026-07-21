@@ -4394,6 +4394,52 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	describe('fetchMessage: a failed SPECULATIVE attempt cools down instead of being retried on every call', () => {
+		// Confirmed live via a Firefox Profiler + console-log capture
+		// (2026-07-21): under heavy server-side load, a couple of envelope
+		// ids kept getting reported as newly-added by successive routine
+		// sync ticks, each report re-firing the open-thread proactive body
+		// prefetch for the SAME id -- and since a failed speculative fetch
+		// was never cached in any form, every one of those repeats fired a
+		// brand-new network request, piling doomed 403/404s onto the
+		// already-overloaded mail-pool workers. A short cooldown after a
+		// speculative failure breaks that without touching a real fetch.
+		it('does not retry the same id speculatively again while the cooldown is active', async () => {
+			MessageService.fetchMessage.mockRejectedValueOnce(new Error('not found'))
+			await expect(store.fetchMessage(90020, { speculative: true })).rejects.toThrow('not found')
+
+			const result = await store.fetchMessage(90020, { speculative: true })
+
+			expect(result).toBeUndefined()
+			expect(MessageService.fetchMessage).toHaveBeenCalledTimes(1)
+		})
+
+		it('still fetches fresh for a REAL (non-speculative) call, even right after a speculative failure for the same id', async () => {
+			MessageService.fetchMessage.mockRejectedValueOnce(new Error('not found'))
+			await expect(store.fetchMessage(90021, { speculative: true })).rejects.toThrow('not found')
+
+			MessageService.fetchMessage.mockResolvedValue({ databaseId: 90021, subject: 'Real open' })
+			const message = await store.fetchMessage(90021)
+
+			expect(message).toEqual({ databaseId: 90021, subject: 'Real open' })
+			expect(MessageService.fetchMessage).toHaveBeenCalledTimes(2)
+		})
+
+		it('retries again once the cooldown window has passed', async () => {
+			vi.useFakeTimers()
+			MessageService.fetchMessage.mockRejectedValueOnce(new Error('not found'))
+			await expect(store.fetchMessage(90022, { speculative: true })).rejects.toThrow('not found')
+
+			vi.advanceTimersByTime(30 * 1000 + 1)
+			MessageService.fetchMessage.mockResolvedValue({ databaseId: 90022, subject: 'Retried' })
+			const message = await store.fetchMessage(90022, { speculative: true })
+
+			expect(message).toEqual({ databaseId: 90022, subject: 'Retried' })
+			expect(MessageService.fetchMessage).toHaveBeenCalledTimes(2)
+			vi.useRealTimers()
+		})
+	})
+
 	describe('fetchThread: concurrent calls for the same id are deduped', () => {
 		// Envelope.vue's hover prefetch and Thread.vue's own open-thread
 		// call independently fetch the same thread id whenever a hover

@@ -239,6 +239,25 @@ const pendingLockWaits = new Map()
 // first's in-flight request instead of firing a duplicate one.
 const pendingMessageFetches = new Map()
 
+// A SPECULATIVE fetchMessage() call (hover/touch/viewport prefetch, or the
+// proactive body prefetch for a new reply landing in the thread that's open
+// right now) that fails is never cached as a result -- this.messages[id]
+// stays unset, so nothing remembers the attempt already happened. Confirmed
+// live: with a mailbox under heavy server-side load (mailwrite pool
+// exhaustion -> 504s), a couple of specific envelope ids kept getting
+// reported as newly-added by SUCCESSIVE routine sync ticks (the same
+// "SyncService.php reports more than it should" class of gap this file's
+// own no-op guards already work around elsewhere) -- each report re-fired
+// the open-thread proactive prefetch for the SAME id, each attempt failing
+// (403/404) again, forever, piling needless requests onto the very
+// mailwrite pool already causing the overload. A short cooldown after a
+// speculative failure breaks that loop without touching a REAL (non-
+// speculative) fetch at all -- a genuine user open always attempts fresh,
+// matching the "the user's actual click always fetches, regardless" rule
+// the concurrency cap above already follows.
+const recentSpeculativeMessageFailures = new Map()
+const SPECULATIVE_MESSAGE_FAILURE_COOLDOWN_MS = 30 * 1000
+
 // Same reasoning, same fix, for fetchThread(): Envelope.vue's hover
 // prefetch and Thread.vue's own open-thread call independently fetch
 // the SAME thread id whenever a hover lands just before a click (very
@@ -3009,6 +3028,16 @@ export default function mainStoreActions() {
 				return this.messages[id]
 			}
 
+			if (speculative) {
+				const cooldownUntil = recentSpeculativeMessageFailures.get(id)
+				if (cooldownUntil !== undefined) {
+					if (Date.now() < cooldownUntil) {
+						return undefined
+					}
+					recentSpeculativeMessageFailures.delete(id)
+				}
+			}
+
 			if (pendingMessageFetches.has(id)) {
 				return pendingMessageFetches.get(id)
 			}
@@ -3053,6 +3082,14 @@ export default function mainStoreActions() {
 					})
 				}
 				return message
+			}).catch((error) => {
+				// Only a SPECULATIVE attempt starts the cooldown -- a real
+				// (non-speculative) fetch's failure must keep propagating
+				// exactly as before, with nothing suppressing a later retry.
+				if (speculative) {
+					recentSpeculativeMessageFailures.set(id, Date.now() + SPECULATIVE_MESSAGE_FAILURE_COOLDOWN_MS)
+				}
+				throw error
 			}).finally(() => {
 				pendingMessageFetches.delete(id)
 				speculativeMessageFetchControllers.delete(id)
