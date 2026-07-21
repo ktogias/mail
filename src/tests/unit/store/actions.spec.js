@@ -677,6 +677,39 @@ describe('Vuex store actions', () => {
 			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-important']).toEqual([62, 60])
 		})
 
+		it('leaves an unchanged bucket list untouched (same reference) when a sync reports nothing that actually differs', () => {
+			// SyncService.php reports every known message as "changed" on
+			// every sync (no real changed-set computation upstream), so most
+			// incremental sync batches for an already-loaded bucket touch
+			// every id in it without membership or order actually differing.
+			// Vue 2 doesn't diff a Vue.set()'s new value against the old one
+			// -- it notifies on every Vue.set() regardless -- so writing a
+			// freshly-built but content-identical array here would still
+			// force a full re-render of the whole list on every routine
+			// sync. Confirmed via a real object-identity check (toBe, not
+			// toEqual): the array reference itself must survive unchanged.
+			store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-important'] = []
+			store.addEnvelopesMutation({ envelopes: [newEnvelope(63, true)] })
+			const listAfterFirstSync = store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-important']
+
+			// The exact same message, reported again by a routine resync
+			// with nothing about it actually different.
+			store.addEnvelopesMutation({ envelopes: [newEnvelope(63, true)] })
+
+			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-important']).toBe(listAfterFirstSync)
+		})
+
+		it('still writes a fresh list when a sync genuinely changes membership', () => {
+			store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-important'] = []
+			store.addEnvelopesMutation({ envelopes: [newEnvelope(64, true)] })
+			const listAfterFirstSync = store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-important']
+
+			store.addEnvelopesMutation({ envelopes: [newEnvelope(65, true)] })
+
+			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-important']).not.toBe(listAfterFirstSync)
+			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-important']).toEqual(expect.arrayContaining([64, 65]))
+		})
+
 		it('withholds a new reply to a starred thread from the Other section the server returned it for (a known sibling is starred)', () => {
 			// The server classifies each message on its own flags, so a new
 			// non-starred reply to a starred thread comes back for the Other

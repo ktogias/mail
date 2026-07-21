@@ -4344,7 +4344,29 @@ export default function mainStoreActions() {
 			})
 
 			workingLists.forEach((working, targetMailbox) => {
-				Vue.set(targetMailbox.envelopeLists, listId, uniq(orderByDateInt(working.ids)))
+				const nextIds = uniq(orderByDateInt(working.ids))
+				const currentIds = targetMailbox.envelopeLists[listId]
+				// No-op guard, same reasoning (and same fix shape) as
+				// reclassifyFlagBucketsMutation()'s own: SyncService.php
+				// reports every known message as "changed" on every sync (no
+				// real changed-set computation upstream -- see the comment
+				// there), so most incremental sync batches touch a loaded
+				// bucket without actually altering its membership or order.
+				// Vue 2 doesn't diff a Vue.set()'s new value against the old
+				// one -- it notifies every consumer of envelopeLists[listId]
+				// regardless -- so writing a freshly-sorted-and-deduped but
+				// CONTENT-IDENTICAL array on every such sync still forces a
+				// full re-render of that list (and, for a large mailbox, a
+				// correspondingly large synchronous style recalculation) even
+				// though nothing visibly changed. Confirmed live via Firefox
+				// Profiler: a single continuous ~5.4s Style-computation block
+				// landing exactly when a big mailbox's sync response arrived.
+				if (currentIds !== undefined
+					&& currentIds.length === nextIds.length
+					&& currentIds.every((id, index) => id === nextIds[index])) {
+					return
+				}
+				Vue.set(targetMailbox.envelopeLists, listId, nextIds)
 			})
 		},
 		// Several search buckets are really just a boolean predicate over a
