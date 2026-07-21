@@ -180,7 +180,7 @@
 </template>
 
 <script>
-import { showError } from '@nextcloud/dialogs'
+import { showError, showSuccess } from '@nextcloud/dialogs'
 import { NcActionButton as ActionButton, NcActions as Actions, NcButton, NcDialog } from '@nextcloud/vue'
 import { mapStores } from 'pinia'
 import AlertOctagonIcon from 'vue-material-design-icons/AlertOctagonOutline.vue'
@@ -474,6 +474,13 @@ export default {
 					addTag: true,
 				})
 			})
+			// The message leaves the current section (e.g. Other) for the
+			// Important section immediately (see the store's reclassify) --
+			// a short toast confirms WHERE it went so its disappearance from
+			// the list the user is looking at isn't a mystery. Deliberately
+			// no auto-scroll to the new position: it would yank the viewport
+			// away from a batch-marking flow (and is a known anti-pattern).
+			showSuccess(t('mail', 'Marked as important'))
 			this.unselectAll()
 		},
 
@@ -484,6 +491,7 @@ export default {
 					addTag: false,
 				})
 			})
+			showSuccess(t('mail', 'Marked as unimportant'))
 			this.unselectAll()
 		},
 
@@ -547,6 +555,7 @@ export default {
 					favFlag: false,
 				})
 			})
+			showSuccess(t('mail', 'Removed from favorites'))
 			this.unselectAll()
 		},
 
@@ -557,6 +566,7 @@ export default {
 					favFlag: true,
 				})
 			})
+			showSuccess(t('mail', 'Added to favorites'))
 			this.unselectAll()
 		},
 

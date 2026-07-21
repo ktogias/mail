@@ -1596,6 +1596,22 @@ describe('Vuex store actions', () => {
 			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-other']).toContain(44)
 		})
 
+		it('bulk favorite (markEnvelopeFavoriteOrUnfavorite, the selection-toolbar path) reclassifies synchronously, same as the single-row toggle', async () => {
+			// Regression: the bulk-selection star used to skip the reclassify
+			// entirely, so the message only left the Other section on the next
+			// routine sync (tens of seconds later, reported live).
+			const envelope = seedListedEnvelope(46, { flagged: false, important: false })
+			store.mailboxes[11].envelopeLists['is:starred'] = []
+			store.mailboxes[11].envelopeLists['not:starred is:pi-other'] = [46]
+			MessageService.setEnvelopeFlags.mockReturnValue(new Promise(() => {}))
+
+			store.markEnvelopeFavoriteOrUnfavorite({ envelope, favFlag: true })
+			await Promise.resolve()
+
+			expect(store.mailboxes[11].envelopeLists['is:starred']).toContain(46)
+			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-other']).not.toContain(46)
+		})
+
 		it('unmarking important removes from is:pi-important synchronously, before any network call resolves', async () => {
 			store.tags[importantTag.id] = importantTag
 			const envelope = seedListedEnvelope(45, { flagged: false, important: true }, [importantTag.id])

@@ -2932,25 +2932,47 @@ export default function mainStoreActions() {
 			return handleHttpAuthErrors(async () => {
 				// Change immediately and switch back on error
 				const oldState = envelope.flags.flagged
+				// Move Priority Inbox section membership (into/out of
+				// Favorites, and the not:starred side of the Other/Important
+				// compound sections) in the SAME instant as the star --
+				// exactly like the single-row toggleEnvelopeFlagged() already
+				// does. This bulk-selection path used to skip the reclassify
+				// entirely, so a starred message only left the Other section
+				// on the next routine sync, tens of seconds later (reported
+				// live). userInitiated applies the removal side immediately
+				// too -- see threadStillMatchesFlagPredicate().
+				const reclassify = () => {
+					const mailbox = this.mailboxes[envelope.mailboxId]
+					if (mailbox) {
+						this.reclassifyFlagBucketsMutation({ envelope, sourceMailbox: mailbox, userInitiated: true })
+					}
+				}
 				this.flagEnvelopeMutation({
 					envelope,
 					flag: 'flagged',
 					value: favFlag,
 				})
+				reclassify()
 
 				try {
 					await setEnvelopeFlags(envelope.databaseId, {
 						flagged: favFlag,
 					})
+					// Fast, correct confirmation for any already-loaded
+					// Favorites-style bucket, without blocking on it -- same
+					// backstop toggleEnvelopeFlagged() uses.
+					this.refreshFlagPredicateBucketsForEnvelope(envelope)
 				} catch (error) {
 					logger.error('could not favorite/unfavorite message ' + envelope.uid, { error })
 
-					// Revert change
+					// Revert change AND its optimistic membership move, through
+					// the same mutation, so the lists land back where they were.
 					this.flagEnvelopeMutation({
 						envelope,
 						flag: 'flagged',
 						value: oldState,
 					})
+					reclassify()
 
 					throw error
 				}
