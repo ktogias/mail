@@ -79,7 +79,7 @@
 			<div
 				class="hovering-status"
 				:class="{ 'hover-active': hoveringAvatar && !selected && !compactMode }"
-				@mouseenter="hoveringAvatar = true"
+				@mouseenter="onAvatarMouseEnter"
 				@mouseleave="hoveringAvatar = false">
 				<template v-if="compactMode">
 					<div
@@ -603,6 +603,7 @@ import { buildRecipients as buildReplyRecipients } from '../ReplyBuilder.js'
 import { FOLLOW_UP_TAG_LABEL } from '../store/constants.js'
 import useMainStore from '../store/mainStore.js'
 import { mailboxHasRights } from '../util/acl.js'
+import { isCoarsePointer } from '../util/pointerType.js'
 import { isScrollingRecently } from '../util/scrollActivityTracker.js'
 import { messageDateTime, shortRelativeDatetime } from '../util/shortRelativeDatetime.js'
 import { translateTagDisplayName } from '../util/tag.js'
@@ -1330,6 +1331,20 @@ export default {
 
 		onEnvelopeMouseLeave() {
 			this.cancelHoverPrefetch()
+		},
+
+		onAvatarMouseEnter() {
+			// A synthesized mouseenter fires on touch too -- notably when the
+			// list reflows under a still-held finger right after a
+			// long-press-select inserts the multiselect toolbar at the top,
+			// firing mouseenter on whichever row slid under the finger. That
+			// would flip a NON-selected neighbour's avatar to a check
+			// (reported live). On touch the avatar's check reflects `selected`
+			// only -- there is no hover preview to show.
+			if (isCoarsePointer()) {
+				return
+			}
+			this.hoveringAvatar = true
 		},
 
 		onEnvelopeTouchStart(event) {

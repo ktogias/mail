@@ -8,11 +8,15 @@ import { createPinia, setActivePinia } from 'pinia'
 import Envelope from '../../../components/Envelope.vue'
 import Nextcloud from '../../../mixins/Nextcloud.js'
 import useMainStore from '../../../store/mainStore.js'
+import { isCoarsePointer } from '../../../util/pointerType.js'
 import * as ScrollActivityTracker from '../../../util/scrollActivityTracker.js'
 import * as ViewportPrefetchObserver from '../../../util/viewportPrefetchObserver.js'
 
 vi.mock('../../../util/scrollActivityTracker.js')
 vi.mock('../../../util/viewportPrefetchObserver.js')
+vi.mock('../../../util/pointerType.js', () => ({
+	isCoarsePointer: vi.fn(() => false),
+}))
 
 const localVue = createLocalVue()
 const $route = {
@@ -668,6 +672,27 @@ describe('Envelope', () => {
 			view.vm.onEnvelopeTouchStart({ touches: [{ clientX: 100, clientY: 100 }] })
 
 			expect(view.vm.suppressNextClickAfterLongPress).toBe(false)
+		})
+
+		it('does not flip a non-selected avatar to a check on a synthesized mouseenter on touch (list reflow under a held finger)', () => {
+			isCoarsePointer.mockReturnValue(true)
+			try {
+				const view = mountEnvelope()
+
+				view.vm.onAvatarMouseEnter()
+
+				expect(view.vm.hoveringAvatar).toBe(false)
+			} finally {
+				isCoarsePointer.mockReturnValue(false)
+			}
+		})
+
+		it('still shows the hover check on a real (fine) pointer', () => {
+			const view = mountEnvelope()
+
+			view.vm.onAvatarMouseEnter()
+
+			expect(view.vm.hoveringAvatar).toBe(true)
 		})
 	})
 
