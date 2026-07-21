@@ -18,7 +18,12 @@
 						:account-id="account.accountId"
 						@search-changed="onUpdateSearchQuery" />
 				</div>
+				<div ref="pullToRefreshIndicator" class="pull-to-refresh-indicator" aria-hidden="true">
+					<IconLoading v-if="pullToRefreshSpinning" :size="20" />
+					<IconRefresh v-else :size="20" />
+				</div>
 				<AppContentList
+					ref="envelopeList"
 					v-shortkey.once="shortkeys"
 					class="envelope-list"
 					:show-details="showThread"
@@ -217,17 +222,19 @@
 </template>
 
 <script>
-import { NcAppContent as AppContent, NcAppContentList as AppContentList, NcButton as ButtonVue, isMobile, NcPopover } from '@nextcloud/vue'
+import { NcAppContent as AppContent, NcAppContentList as AppContentList, NcButton as ButtonVue, NcLoadingIcon as IconLoading, isMobile, NcPopover } from '@nextcloud/vue'
 import addressParser from 'address-rfc2822'
 import mitt from 'mitt'
 import { mapStores } from 'pinia'
 import IconInfo from 'vue-material-design-icons/InformationOutline.vue'
+import IconRefresh from 'vue-material-design-icons/Refresh.vue'
 import EmptyMailboxSection from './EmptyMailboxSection.vue'
 import Mailbox from './Mailbox.vue'
 import NoMessageSelected from './NoMessageSelected.vue'
 import SearchMessages from './SearchMessages.vue'
 import SectionTitle from './SectionTitle.vue'
 import Thread from './Thread.vue'
+import { getScrollEventTarget, getScrollTop } from '../directives/infinite-scroll.js'
 import logger from '../logger.js'
 import LoadMoreSentinelMixin from '../mixins/LoadMoreSentinelMixin.js'
 import {
@@ -242,9 +249,16 @@ import {
 	priorityImportantQuery,
 	priorityOtherQuery,
 } from '../util/priorityInbox.js'
+import { enablePullToRefresh } from '../util/pullToRefresh.js'
 import { detect, toHtml, toPlain } from '../util/text.js'
 
 const START_MAILBOX_DEBOUNCE = 5 * 1000
+
+// How long the pull-to-refresh spinner stays visible after release. The
+// refresh itself is a fire-and-forget broadcast to every section (the same
+// path as the `r` shortcut), which reports no single completion signal, so
+// the spinner shows for a short, honest minimum rather than guessing.
+const PULL_REFRESH_SPINNER_MS = 1000
 
 export default {
 	name: 'MailboxThread',
@@ -255,6 +269,8 @@ export default {
 		ButtonVue,
 		EmptyMailboxSection,
 		IconInfo,
+		IconLoading,
+		IconRefresh,
 		Mailbox,
 		NoMessageSelected,
 		NcPopover,
@@ -300,6 +316,8 @@ export default {
 			favoriteInitialPageSize: 5,
 			startMailboxTimer: undefined,
 			hasContent: false,
+			pullToRefreshTeardown: undefined,
+			pullToRefreshSpinning: false,
 		}
 	},
 
@@ -556,14 +574,48 @@ export default {
 		// actually rendered, so $refs.loadMoreSentinel resolves to
 		// whichever one is currently active.
 		this.registerLoadMoreSentinel(this.$refs.loadMoreSentinel, this.onScroll)
+
+		// Pull-to-refresh lives here, on the ONE component that owns the
+		// scroller -- not per Mailbox section. The list stacks several
+		// Mailbox instances (Favorites/Important/Other) each preceded by a
+		// section title inside the same scroller, so no single section's
+		// top ever sits at the scroller's top edge; a per-section "am I the
+		// topmost" check never armed (the original bug). Here the condition
+		// is simply "scrolled to the very top", and the refresh broadcasts
+		// to every section via the same bus the `r` shortcut already uses.
+		const scroller = this.$refs.envelopeList?.$el
+		if (scroller) {
+			const container = getScrollEventTarget(scroller)
+			this.pullToRefreshTeardown = enablePullToRefresh(container, this.$refs.pullToRefreshIndicator, {
+				canStart: () => getScrollTop(container) === 0,
+				onRefresh: () => this.onPullToRefresh(),
+			})
+		}
 	},
 
 	beforeDestroy() {
 		clearTimeout(this.startMailboxTimer)
 		this.unregisterLoadMoreSentinel()
+		this.pullToRefreshTeardown?.()
 	},
 
 	methods: {
+		// Broadcasts a refresh to every rendered section (the `r`-shortcut
+		// path -> each Mailbox's own sync(false)). That's fire-and-forget
+		// with no single completion signal, so the spinner is shown for a
+		// short fixed minimum -- the list itself updates whenever the
+		// per-section syncs land, independently of the spinner.
+		onPullToRefresh() {
+			this.pullToRefreshSpinning = true
+			this.bus.emit('shortcut', { srcKey: 'refresh' })
+			return new Promise((resolve) => {
+				setTimeout(() => {
+					this.pullToRefreshSpinning = false
+					resolve()
+				}, PULL_REFRESH_SPINNER_MS)
+			})
+		},
+
 		getGroupedEnvelopes(envelopes, syncTimestamp) {
 			return groupEnvelopesByDate(envelopes, syncTimestamp, this.sortOrder)
 		},
@@ -773,8 +825,8 @@ export default {
 	min-height: 0;
 	contain: none !important;
 	// Suppresses the browser's own native pull-to-refresh/bounce at this
-	// container's scroll boundaries so it doesn't race PullToRefreshMixin's
-	// own touch-driven gesture (src/mixins/PullToRefreshMixin.js).
+	// container's scroll boundaries so it doesn't race our own touch-driven
+	// pull-to-refresh gesture (onPullToRefresh via util/pullToRefresh.js).
 	overscroll-behavior-y: contain;
 }
 
@@ -801,6 +853,31 @@ export default {
 	flex-direction: column;
 	height: 100%;
 	overflow: hidden;
+	// Positioning context for the pull-to-refresh indicator below.
+	position: relative;
+}
+
+// Material-style pull-to-refresh spinner: hidden at rest, it emerges from
+// behind the top of the list and slides down as the user pulls (transform/
+// opacity driven by util/pullToRefresh.js), spins in place while refreshing,
+// then retracts. The list content itself does not move (the Android/web
+// convention; iOS instead rubber-bands the content).
+.pull-to-refresh-indicator {
+	position: absolute;
+	top: 0;
+	inset-inline-start: 50%;
+	margin-inline-start: calc(var(--default-clickable-area) / -2);
+	opacity: 0;
+	z-index: 100;
+	pointer-events: none;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: var(--default-clickable-area);
+	height: var(--default-clickable-area);
+	border-radius: 50%;
+	background-color: var(--color-main-background);
+	box-shadow: 0 0 4px 0 var(--color-box-shadow);
 }
 
 :deep(.app-details-toggle) {

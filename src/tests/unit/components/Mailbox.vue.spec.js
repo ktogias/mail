@@ -11,19 +11,11 @@ import MailboxLockedError from '../../../errors/MailboxLockedError.js'
 import MailboxNotCachedError from '../../../errors/MailboxNotCachedError.js'
 import Nextcloud from '../../../mixins/Nextcloud.js'
 import useMainStore from '../../../store/mainStore.js'
-import { enablePullToRefresh as enablePullToRefreshMock } from '../../../util/pullToRefresh.js'
 
 vi.mock('@nextcloud/dialogs', async (importOriginal) => ({
 	...(await importOriginal()),
 	showUndo: vi.fn(),
 	showError: vi.fn(),
-}))
-
-// Real touch-drag geometry is meaningless in jsdom (same reasoning
-// IdleTailTrimMixin's own tests already document) -- capture the onRefresh
-// callback PullToRefreshMixin wires up instead of simulating touch events.
-vi.mock('../../../util/pullToRefresh.js', () => ({
-	enablePullToRefresh: vi.fn(() => () => {}),
 }))
 
 const localVue = createLocalVue()
@@ -543,39 +535,6 @@ describe('Mailbox', () => {
 			watcher.call(view.vm, undefined, '2') // the thread actually closed
 			await view.vm.$nextTick()
 			expect(spy).toHaveBeenCalledTimes(1)
-		})
-	})
-
-	describe('PullToRefreshMixin: pull-to-refresh triggers the same sync() the r shortcut uses', () => {
-		it('calls sync(false) -- not sync(true) -- when the wired-up onRefresh callback runs', async () => {
-			const view = mountMailbox()
-			const syncSpy = vi.spyOn(view.vm, 'sync').mockResolvedValue()
-
-			expect(enablePullToRefreshMock).toHaveBeenCalled()
-			const { onRefresh } = enablePullToRefreshMock.mock.calls.at(-1)[2]
-			await onRefresh()
-
-			expect(syncSpy).toHaveBeenCalledWith(false)
-		})
-
-		it('does not throw when sync() rejects', async () => {
-			const view = mountMailbox()
-			vi.spyOn(view.vm, 'sync').mockRejectedValue(new Error('network error'))
-
-			const { onRefresh } = enablePullToRefreshMock.mock.calls.at(-1)[2]
-			await expect(onRefresh()).resolves.not.toThrow()
-		})
-
-		it('canStart() is false once scrolled away from the top', () => {
-			const view = mountMailbox()
-
-			const result = view.vm.isTopmostPullToRefreshTarget({ getBoundingClientRect: () => ({ top: 0 }) })
-
-			// jsdom's getScrollTop always reports 0 -- confirms the geometry
-			// check itself runs and returns a boolean without throwing;
-			// real scroll-position math is meaningless in jsdom (same
-			// pragmatic approach IdleTailTrimMixin's own tests already use).
-			expect(typeof result).toBe('boolean')
 		})
 	})
 

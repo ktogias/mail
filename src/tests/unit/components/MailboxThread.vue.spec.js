@@ -169,6 +169,31 @@ describe('MailboxThread', () => {
 		})
 	})
 
+	describe('pull-to-refresh (owned here, not per Mailbox section)', () => {
+		// The list stacks several Mailbox sections, each preceded by a
+		// section title inside one shared scroller, so a per-section "am I
+		// at the scroller top" check never armed. Ownership is here, on the
+		// single scroller owner; refresh broadcasts to every section via the
+		// same 'refresh' shortcut bus event the `r` key already uses.
+		afterEach(() => {
+			vi.useRealTimers()
+		})
+
+		it('broadcasts a refresh to every section and shows the spinner for a fixed minimum', () => {
+			vi.useFakeTimers()
+			const wrapper = mountThread()
+			const emitSpy = vi.spyOn(wrapper.vm.bus, 'emit')
+
+			wrapper.vm.onPullToRefresh()
+
+			expect(emitSpy).toHaveBeenCalledWith('shortcut', { srcKey: 'refresh' })
+			expect(wrapper.vm.pullToRefreshSpinning).toBe(true)
+
+			vi.advanceTimersByTime(1000)
+			expect(wrapper.vm.pullToRefreshSpinning).toBe(false)
+		})
+	})
+
 	it("applies the sort-favorites 'not:starred' filter before any child Mailbox mounts", () => {
 		// Vue mounts children bottom-up (child created+mounted, THEN
 		// parent mounted()) -- setting searchQuery in mounted() meant
