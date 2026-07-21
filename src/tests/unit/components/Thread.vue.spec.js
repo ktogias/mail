@@ -1445,19 +1445,42 @@ describe('Thread', () => {
 			vi.useRealTimers()
 		})
 
-		it('marks the whole thread as spam by junking the not-yet-junk messages (no navigation)', async () => {
+		it('marks the whole thread as spam behind the undo window and advances, moving to Junk when one is configured', async () => {
+			vi.useFakeTimers()
+			store.junkMoveDestinationMailboxId = vi.fn().mockReturnValue(88)
 			store.toggleEnvelopeJunk = vi.fn().mockResolvedValue()
+			showUndo.mockClear()
 			const view = mountThread(4003)
 			// Fixture messages carry no $junk flag -> all three get junked
 			expect(view.vm.threadIsJunk).toBe(false)
 
 			view.vm.junkThread()
-			await view.vm.$nextTick()
 
+			// Advances right away (no list context here -> closes the pane), and
+			// the real, folder-moving junk toggle is deferred behind the undo window
+			expect(view.vm.$router.replace).toHaveBeenCalledWith(expect.objectContaining({ name: 'mailbox' }))
+			expect(store.toggleEnvelopeJunk).not.toHaveBeenCalled()
+
+			await vi.advanceTimersByTimeAsync(10000)
 			expect(store.toggleEnvelopeJunk).toHaveBeenCalledTimes(3)
-			expect(store.toggleEnvelopeJunk).toHaveBeenCalledWith(expect.objectContaining({ removeEnvelope: false }))
-			// A flag toggle stays in place -- no navigation
+			expect(store.toggleEnvelopeJunk).toHaveBeenCalledWith(expect.objectContaining({ removeEnvelope: true }))
+			vi.useRealTimers()
+		})
+
+		it('marks the thread as spam in place (no move, no advance) when no Junk mailbox is configured', async () => {
+			vi.useFakeTimers()
+			store.junkMoveDestinationMailboxId = vi.fn().mockReturnValue(null)
+			store.toggleEnvelopeJunk = vi.fn().mockResolvedValue()
+			const view = mountThread(4003)
+
+			view.vm.junkThread()
+
+			// Nothing moves folders, so it stays put -- no navigation
 			expect(view.vm.$router.replace).not.toHaveBeenCalled()
+
+			await vi.advanceTimersByTimeAsync(10000)
+			expect(store.toggleEnvelopeJunk).toHaveBeenCalledWith(expect.objectContaining({ removeEnvelope: false }))
+			vi.useRealTimers()
 		})
 
 		it('snoozes the whole thread behind the undo window, creating the snooze mailbox if needed, and closes the pane', async () => {

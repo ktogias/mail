@@ -728,19 +728,37 @@ export default {
 			this.advanceAfterRemoval()
 		},
 
-		// Mark every message in the thread as spam / not-spam. In this fork
-		// junk is only a flag (it never moves the message to a folder -- see
-		// toggleEnvelopeJunk()), so this stays in place, no navigation, no
-		// undo, exactly like markThreadSeen(). Only the messages whose state
-		// differs from the target are toggled.
+		// Mark every message in the thread as spam / not-spam. Junking moves
+		// the messages to the account's Junk mailbox (and un-junking moves
+		// them back to the inbox) whenever one is configured, so the thread
+		// leaves the current list -- exactly like single-message junk and the
+		// other whole-thread removal actions. Mirror them: hide it at once
+		// behind the undo window and advance, instead of only flipping a flag
+		// and lingering in the list until the server-side move syncs back tens
+		// of seconds later. Only the messages whose state differs are toggled.
 		junkThread() {
-			const targetJunk = !this.threadIsJunk
-			Promise.all(this.thread
-				.filter((envelope) => Boolean(envelope.flags?.$junk) !== targetJunk)
-				.map((envelope) => this.mainStore.toggleEnvelopeJunk({ envelope, removeEnvelope: false }))).catch((error) => {
+			const wasJunk = this.threadIsJunk
+			const targetJunk = !wasJunk
+			const envelopes = this.thread.filter((envelope) => Boolean(envelope.flags?.$junk) !== targetJunk)
+			if (envelopes.length === 0) {
+				return
+			}
+			// Whether this toggle actually moves folders (a Junk mailbox is
+			// configured) -- if not, it's a pure flag change that stays put.
+			const removeEnvelope = this.mainStore.junkMoveDestinationMailboxId(envelopes[0]) !== null
+			this.performActionWithUndo({
+				ids: removeEnvelope ? envelopes.map((envelope) => envelope.databaseId) : [],
+				message: wasJunk ? t('mail', 'Thread marked as not spam') : t('mail', 'Thread marked as spam'),
+				action: async () => {
+					await Promise.all(envelopes.map((envelope) => this.mainStore.toggleEnvelopeJunk({ envelope, removeEnvelope })))
+				},
+			}).catch((error) => {
 				logger.error('could not update thread spam status', { error })
 				showError(t('mail', 'Could not update spam status'))
 			})
+			if (removeEnvelope) {
+				this.advanceAfterRemoval()
+			}
 		},
 
 		setCustomSnoozeDateTime(event) {
