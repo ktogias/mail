@@ -4458,11 +4458,31 @@ export default function mainStoreActions() {
 						continue
 					}
 
-					Vue.set(
-						mailbox.envelopeLists,
-						listId,
-						shouldContain ? uniq(orderByDateInt(withoutSelf.concat([envelope.databaseId]))) : withoutSelf,
-					)
+					let nextIds
+					if (!shouldContain) {
+						nextIds = withoutSelf
+					} else if (!isThreaded) {
+						nextIds = uniq(orderByDateInt(withoutSelf.concat([envelope.databaseId])))
+					} else {
+						// Keep exactly one entry per thread: the newest loaded
+						// member. A reply reclassified into an existential bucket
+						// must REPLACE the thread's older representative, not sit
+						// beside it -- the list renders one row per id with no
+						// render-time thread-collapse, an invariant otherwise
+						// only maintained by appendOrReplaceEnvelopeId() during
+						// sync. threadRootId is null for thread-less mail, so
+						// fall back to a per-id key (matching that helper) rather
+						// than collapsing unrelated thread-less messages.
+						const threadKey = (id) => this.envelopes[id]?.threadRootId ?? `id:${id}`
+						const ownKey = envelope.threadRootId ?? `id:${envelope.databaseId}`
+						const sameThread = withoutSelf.filter((id) => threadKey(id) === ownKey)
+						const others = withoutSelf.filter((id) => threadKey(id) !== ownKey)
+						const dateOf = (id) => this.envelopes[id]?.dateInt ?? 0
+						const representative = [envelope.databaseId, ...sameThread]
+							.reduce((newest, id) => (dateOf(id) > dateOf(newest) ? id : newest))
+						nextIds = uniq(orderByDateInt(others.concat([representative])))
+					}
+					Vue.set(mailbox.envelopeLists, listId, nextIds)
 				}
 			}
 		},
@@ -4555,28 +4575,52 @@ export default function mainStoreActions() {
 			// reclassification only runs for genuinely NEW envelopes and
 			// REAL flag changes (updateEnvelopeMutation's isEqual guard),
 			// never once per envelope per routine tick.
+			// Known thread members (cross-folder, by threadRootId), resolved
+			// at most once and only when a token actually needs sibling
+			// evidence -- the self-only fast paths still avoid the O(store)
+			// scan entirely. Affordable because this runs only for genuinely
+			// NEW envelopes and REAL flag changes (the isEqual guard at the
+			// reclassify call sites), never once per envelope per routine tick.
+			let resolvedMembers
+			const membersToCheck = () => {
+				if (resolvedMembers === undefined) {
+					const members = this.getEnvelopesByThreadRootId(envelope.accountId, envelope.threadRootId)
+					resolvedMembers = members.length > 0 ? members : [envelope]
+				}
+				return resolvedMembers
+			}
+
+			// Partition tokens (not:starred, is:pi-other) mirror the server's
+			// NOT EXISTS: ANY known thread member carrying the positive flag
+			// excludes the whole thread, definitively -- a proof, not a guess,
+			// so it applies to sync-driven readings too (the server agrees).
 			const partitionTokens = tokens.filter((token) => knownTokenPredicates[token].positive !== undefined)
-			if (partitionTokens.length > 0) {
-				const knownMembers = this.getEnvelopesByThreadRootId(envelope.accountId, envelope.threadRootId)
-				const membersToCheck = knownMembers.length > 0 ? knownMembers : [envelope]
-				for (const token of partitionTokens) {
-					if (knownTokenPredicates[token].positive(envelope.flags)
-						|| membersToCheck.some((member) => knownTokenPredicates[token].positive(member.flags))) {
-						return false
-					}
+			for (const token of partitionTokens) {
+				if (knownTokenPredicates[token].positive(envelope.flags)
+					|| membersToCheck().some((member) => knownTokenPredicates[token].positive(member.flags))) {
+					return false
 				}
 			}
 
 			// Existential tokens (is:starred, is:pi-important): this
 			// envelope matching alone proves the thread does, via itself.
-			// Combined with no partition token having disqualified the
-			// thread above, that's the best local answer available --
-			// authoritative when there are no unseen siblings, and
-			// self-correcting via the bucket's own sync when there are
-			// (prefer-to-over-include, the same eventually-consistent
-			// trade-off this mechanism has always made for ADDs).
 			const existentialTokens = tokens.filter((token) => knownTokenPredicates[token].positive === undefined)
 			if (existentialTokens.every((token) => knownTokenPredicates[token].matches(envelope.flags))) {
+				return true
+			}
+
+			// Symmetric to the partition NOT EXISTS proof: ANY known thread
+			// member satisfying every existential token proves the thread
+			// matches -- a proof, not a guess. This is what lets a new reply
+			// to an already-starred/important thread join that thread's
+			// existential bucket at once (reclassify below then thread-
+			// collapses it in as the newest representative), instead of
+			// leaving the section row's "latest message" stale until the next
+			// server sync. A pure positive addition -- it only ever keeps/adds
+			// a genuinely-matching thread, never evicts, so it can't
+			// reintroduce the Favorites-flicker the removal ratchet guards.
+			if (existentialTokens.length > 0
+				&& existentialTokens.every((token) => membersToCheck().some((member) => knownTokenPredicates[token].matches(member.flags)))) {
 				return true
 			}
 
