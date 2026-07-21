@@ -6,6 +6,16 @@
 	<div>
 		<transition name="multiselect-header">
 			<div v-if="selectMode" key="multiselect-header" class="multiselect-header">
+				<NcButton
+					class="multiselect-header__unselect"
+					variant="tertiary"
+					:title="n('mail', 'Unselect {number}', 'Unselect {number}', selection.length, { number: selection.length })"
+					@click.prevent="unselectAll">
+					<template #icon>
+						<IconSelect :size="20" />
+					</template>
+					{{ n('mail', 'Unselect {number}', 'Unselect {number}', selection.length, { number: selection.length }) }}
+				</NcButton>
 				<div class="action-buttons">
 					<NcButton
 						v-if="isAtLeastOneSelectedUnread"
@@ -55,13 +65,6 @@
 						<IconFavorite :size="20" />
 					</NcButton>
 
-					<NcButton
-						variant="tertiary"
-						:title="n('mail', 'Unselect {number}', 'Unselect {number}', selection.length, { number: selection.length })"
-						:close-after-click="true"
-						@click.prevent="unselectAll">
-						<IconSelect :size="20" />
-					</NcButton>
 					<NcButton
 						variant="tertiary"
 						:title="n(
@@ -919,14 +922,30 @@ div {
 	display: flex;
 	flex-direction: row;
 	align-items: center;
-	justify-content: center;
 	background-color: var(--color-main-background-translucent);
 	position: sticky;
 	top: 0;
 	height: 48px;
 	z-index: 100;
+	padding-inline: var(--default-grid-baseline);
+	gap: 4px;
+
+	// The "exit selection" control lives on the LEFT with a visible label
+	// ("Unselect N" / «Αναίρεση επιλογής N»), clearly separated from the
+	// per-message action icons on the right -- so it can't be mistaken for a
+	// destructive action (it previously sat unlabelled between the star and
+	// the trash icon and read as delete/archive, reported live). A visible
+	// text label matters here specifically because touch has no tooltip.
+	&__unselect {
+		flex-shrink: 1;
+		min-width: 0;
+	}
+
+	// Pushed to the right; icons never shrink (only the label above does).
 	.action-buttons {
 		display: flex;
+		flex-shrink: 0;
+		margin-inline-start: auto;
 	}
 }
 
