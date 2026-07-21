@@ -148,6 +148,7 @@
 import { NcActions, NcCounterBubble, NcVNodes } from '@nextcloud/vue'
 import DotsHorizontal from 'vue-material-design-icons/DotsHorizontal.vue'
 import EnvelopeSingleClickActions from './EnvelopeSingleClickActions.vue'
+import { isCoarsePointer } from '../util/pointerType.js'
 
 export default {
 	name: 'EnvelopeSkeleton',
@@ -405,6 +406,16 @@ export default {
 		},
 
 		showActions() {
+			// On a touch device the hover/focus reveal is exactly the mobile
+			// tap ambiguity: a tap synthesizes focus (and mouseover), which
+			// would flash the floating actions overlay and race the tap's own
+			// navigation -- the original report behind backlog #18. Touch uses
+			// the deterministic model instead (tap = open, long-press = select,
+			// with the full action toolbar in selection mode -- see
+			// Envelope.vue), so the hover overlay must never appear there.
+			if (isCoarsePointer()) {
+				return
+			}
 			if (this.hasActions) {
 				this.displayActionsOnHoverFocus = true
 			}
@@ -441,6 +452,12 @@ export default {
 		},
 
 		handleMouseover() {
+			// Belt-and-suspenders with showActions()'s own coarse-pointer
+			// guard: a tap synthesizes mouseover too, and this must not flag
+			// the row as hovered (which would keep the overlay logic warm).
+			if (isCoarsePointer()) {
+				return
+			}
 			this.showActions()
 			this.hovered = true
 		},
@@ -751,56 +768,19 @@ export default {
 
 }
 
-@mixin visible-hoverable {
-	visibility: visible;
-	position: absolute;
-	display: flex;
-	background: var(--color-main-background);
-	border-radius: var(--border-radius-element);
-	box-shadow: 0 0 4px 0 var(--color-box-shadow);
-	height: var(--default-clickable-area);
-	inset-inline-end: var(--default-grid-baseline);
-
-	:deep(svg) {
-		fill: var(--color-main-text) !important; // needed to not inherit active styling
-	}
-}
-
 .list-item:hover {
-	.list-item__hoverable {
-		@include visible-hoverable;
-	}
-}
-
-// Hover/focus never reliably reveal this on a touch device (mobile
-// browsers synthesize both ambiguously against a tap's own navigation --
-// see Envelope.vue's onClick()/selectMode handling) -- show it
-// unconditionally here instead. But deliberately NOT the desktop hover
-// treatment above: that is a transient floating card (background + shadow)
-// that REPLACES the details column only while hovering. Made permanent it
-// reads as out-of-place against the rest of the list, and -- because
-// forceDisplayActions keeps the time/unread-dot details visible too (they
-// were never meant to coexist with the card) -- it sits directly on top of
-// them. So here: quiet, blended-in styling (no card, no shadow, muted
-// icon), and reserve room at the row's right edge so the button sits
-// BESIDE the time/unread column rather than over it.
-@media (pointer: coarse) {
-	.list-item__anchor {
-		padding-inline-end: var(--default-clickable-area);
-	}
-
 	.list-item__hoverable {
 		visibility: visible;
 		position: absolute;
 		display: flex;
-		align-items: center;
-		height: 100%;
-		inset-inline-end: 0;
-		background: transparent;
-		box-shadow: none;
+		background: var(--color-main-background);
+		border-radius: var(--border-radius-element);
+		box-shadow: 0 0 4px 0 var(--color-box-shadow);
+		height: var(--default-clickable-area);
+		inset-inline-end: var(--default-grid-baseline);
 
 		:deep(svg) {
-			fill: var(--color-text-maxcontrast) !important;
+			fill: var(--color-main-text) !important; // needed to not inherit active styling
 		}
 	}
 }

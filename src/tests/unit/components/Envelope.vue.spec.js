@@ -657,6 +657,18 @@ describe('Envelope', () => {
 
 			expect(view.emitted('update:selected')).toEqual([[true]])
 		})
+
+		it('clears a stale suppress flag on the next touchstart (a long-press that produced no trailing click must not swallow the next real tap)', () => {
+			const view = mountEnvelope()
+
+			// A long-press fired but its synthesized click never arrived, so
+			// the flag is still set going into the next, unrelated gesture.
+			view.setData({ suppressNextClickAfterLongPress: true })
+
+			view.vm.onEnvelopeTouchStart({ touches: [{ clientX: 100, clientY: 100 }] })
+
+			expect(view.vm.suppressNextClickAfterLongPress).toBe(false)
+		})
 	})
 
 	describe('link()/isActiveThread decouple the row from $route (2026-07-20 open-latency fix)', () => {

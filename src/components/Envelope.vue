@@ -25,7 +25,6 @@
 		:is-read="showImportantIconVariant"
 		:is-important="isImportant"
 		:active="isActiveThread"
-		:force-display-actions="alwaysShowActions"
 		@click.exact="onClick"
 		@click.ctrl.exact.prevent="toggleSelected"
 		@click.shift.exact.prevent="onSelectMultiple"
@@ -604,7 +603,6 @@ import { buildRecipients as buildReplyRecipients } from '../ReplyBuilder.js'
 import { FOLLOW_UP_TAG_LABEL } from '../store/constants.js'
 import useMainStore from '../store/mainStore.js'
 import { mailboxHasRights } from '../util/acl.js'
-import { isCoarsePointer } from '../util/pointerType.js'
 import { isScrollingRecently } from '../util/scrollActivityTracker.js'
 import { messageDateTime, shortRelativeDatetime } from '../util/shortRelativeDatetime.js'
 import { translateTagDisplayName } from '../util/tag.js'
@@ -745,16 +743,6 @@ export default {
 
 		isRTL() {
 			return isRTL()
-		},
-
-		// On a coarse (touch) pointer, hover/focus never reliably reveal
-		// the actions button (mobile browsers synthesize both ambiguously
-		// against the tap's own navigation -- see onClick()'s selectMode
-		// handling below) -- force it always-visible there instead, sized
-		// for a real touch target (EnvelopeSkeleton.vue's coarse-pointer
-		// media query). Desktop mouse behavior (hover-gated) is untouched.
-		alwaysShowActions() {
-			return isCoarsePointer()
 		},
 
 		// In threaded listings this row represents the whole thread (its
@@ -1345,6 +1333,16 @@ export default {
 		},
 
 		onEnvelopeTouchStart(event) {
+			// Clear any stale suppress flag at the very start of a new
+			// gesture. A long-press does not always produce a trailing
+			// synthesized click (some Android/Chrome builds emit
+			// contextmenu, or nothing) -- if it doesn't, the flag would
+			// otherwise linger and wrongly swallow the NEXT real tap,
+			// exactly the "sometimes needs a second press" symptom. The
+			// legitimate case (the long-press's own trailing click) still
+			// works: no new touchstart occurs between that touchend and its
+			// synthesized click, so the flag survives to suppress it.
+			this.suppressNextClickAfterLongPress = false
 			// Long-press-to-select: independent of the prefetch timer
 			// below (its own timer slot, see LongPressMixin) so both can
 			// arm from the very same touchstart without clobbering each

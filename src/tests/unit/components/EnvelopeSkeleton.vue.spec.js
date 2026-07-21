@@ -6,6 +6,11 @@
 import { createLocalVue, shallowMount } from '@vue/test-utils'
 import EnvelopeSkeleton from '../../../components/EnvelopeSkeleton.vue'
 import Nextcloud from '../../../mixins/Nextcloud.js'
+import { isCoarsePointer } from '../../../util/pointerType.js'
+
+vi.mock('../../../util/pointerType.js', () => ({
+	isCoarsePointer: vi.fn(() => false),
+}))
 
 const localVue = createLocalVue()
 localVue.mixin(Nextcloud)
@@ -182,5 +187,46 @@ describe('EnvelopeSkeleton: navigation decoupled from $route (2026-07-20 open-la
 		await view.vm.$nextTick()
 
 		expect(view.find('.list-item__wrapper').classes()).toContain('list-item__wrapper--active')
+	})
+})
+
+describe('EnvelopeSkeleton: hover/focus actions overlay is suppressed on touch (mobile tap ambiguity fix)', () => {
+	// On a touch device a tap synthesizes focus AND mouseover, which would
+	// flash the floating actions overlay and race the tap's own navigation
+	// -- the original report behind backlog #18. Touch uses the deterministic
+	// tap=open / long-press=select model instead, so the hover overlay must
+	// never appear there.
+	function mountRow(propsOverride = {}) {
+		return shallowMount(EnvelopeSkeleton, {
+			propsData: { name: 'Test envelope', ...propsOverride },
+			mocks: { $router: { resolve: vi.fn(() => ({ href: '#' })), push: vi.fn() } },
+			localVue,
+		})
+	}
+
+	afterEach(() => {
+		isCoarsePointer.mockReturnValue(false)
+	})
+
+	it('does not reveal the actions overlay on focus/mouseover when the pointer is coarse', () => {
+		isCoarsePointer.mockReturnValue(true)
+		const view = mountRow()
+		view.vm.hasActions = true
+
+		view.vm.showActions()
+		view.vm.handleMouseover()
+
+		expect(view.vm.displayActionsOnHoverFocus).toBe(false)
+		expect(view.vm.hovered).toBe(false)
+	})
+
+	it('still reveals the actions overlay on a fine (mouse) pointer', () => {
+		isCoarsePointer.mockReturnValue(false)
+		const view = mountRow()
+		view.vm.hasActions = true
+
+		view.vm.showActions()
+
+		expect(view.vm.displayActionsOnHoverFocus).toBe(true)
 	})
 })

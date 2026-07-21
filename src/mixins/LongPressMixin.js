@@ -6,13 +6,17 @@
 // Matches iOS/Android's own long-press convention.
 export const LONG_PRESS_DELAY_MS = 500
 
-// A deliberate, non-zero tolerance -- NOT the same zero-threshold cancel
+// A deliberate, generous tolerance -- NOT the zero-threshold cancel
 // HoverPrefetchMixin's cancelHoverPrefetch() uses for its own much shorter
 // (60ms) touch timer. A 500ms hold is long enough that ordinary hand
-// tremor will very likely produce at least one small touchmove tick before
-// it elapses; reusing a zero-threshold cancel here would make long-press
-// effectively never fire. This is a standard touch-slop-sized value.
-export const LONG_PRESS_MOVE_TOLERANCE_PX = 10
+// tremor readily drifts several px; too tight a threshold cancels a
+// genuine hold and the press falls through to plain navigation instead
+// (reported live as "long-press doesn't always select"). This sits above
+// the platform touch-slop (~8dp) so real holds survive, while a genuine
+// scroll/drag -- which moves much faster and further -- still cancels well
+// before the 500ms elapses (and is additionally guarded by
+// isScrollingRecently() at arm time in Envelope.vue).
+export const LONG_PRESS_MOVE_TOLERANCE_PX = 20
 
 /**
  * A generic long-press timer: arm on touchstart, cancel on meaningful
