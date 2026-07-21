@@ -543,7 +543,13 @@ describe('Mailbox', () => {
 		// same UndoableActionMixin every other delete/archive path uses.
 		beforeEach(() => {
 			store.getEnvelopes = vi.fn().mockReturnValue([
-				{ databaseId: 1, mailboxId: 38 },
+				// accountId matches the outer beforeEach's real account (id 4,
+				// added via addAccountMutation) -- the 'arch' shortcut resolves
+				// the envelope's own account via mainStore.getAccount(accountId)
+				// (a real, unmocked store getter) rather than the component's
+				// own this.account, exactly the unified-mailbox distinction
+				// upstream v5.10.9 introduced (merged in 74e8d8af7).
+				{ databaseId: 1, mailboxId: 38, accountId: 4 },
 			])
 			store.deleteThread = vi.fn().mockResolvedValue()
 			store.moveThread = vi.fn().mockResolvedValue()
@@ -562,7 +568,7 @@ describe('Mailbox', () => {
 				expect(store.deleteThread).not.toHaveBeenCalled()
 
 				await vi.advanceTimersByTimeAsync(10000)
-				expect(store.deleteThread).toHaveBeenCalledWith({ envelope: { databaseId: 1, mailboxId: 38 } })
+				expect(store.deleteThread).toHaveBeenCalledWith({ envelope: { databaseId: 1, mailboxId: 38, accountId: 4 } })
 			} finally {
 				vi.useRealTimers()
 			}
@@ -596,7 +602,7 @@ describe('Mailbox', () => {
 
 				await vi.advanceTimersByTimeAsync(10000)
 				expect(store.moveThread).toHaveBeenCalledWith({
-					envelope: { databaseId: 1, mailboxId: 38 },
+					envelope: { databaseId: 1, mailboxId: 38, accountId: 4 },
 					destMailboxId: 99,
 				})
 			} finally {
