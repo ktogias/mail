@@ -1520,7 +1520,7 @@ $mail-thread-header-inline-start: calc(var(--default-grid-baseline) * 14 + var(-
 #mail-thread-header {
 	display: flex;
 	flex-direction: column;
-	gap: 1px;
+	gap: 0;
 	// Symmetric vertical rhythm: the same 1.5-baseline breathing room above the
 	// subject and below the meta line (was 0 on top vs ~1.5-baseline + the 5px
 	// margin-bottom below -- a lopsided ~1:6 gap). The top padding is the single
@@ -1597,7 +1597,7 @@ $mail-thread-header-inline-start: calc(var(--default-grid-baseline) * 14 + var(-
 		padding: 0;
 		// override the server's oversized h2 -- a compact single line
 		font-size: 16px;
-		line-height: 1.35;
+		line-height: 1.25;
 		font-weight: bold;
 		white-space: nowrap;
 		overflow: hidden;
@@ -1641,6 +1641,23 @@ $mail-thread-header-inline-start: calc(var(--default-grid-baseline) * 14 + var(-
 	flex: 0 0 auto;
 	gap: var(--default-grid-baseline);
 	margin-inline-end: var(--default-grid-baseline);
+}
+
+// Both header rows centre their text against the 44px default clickable area
+// of the buttons beside it -- the promoted ⋮-menu actions on the subject row,
+// prev/next on the meta line -- which leaves a wide empty band under the
+// subject and above the meta line (the "unnecessary gap" between the title and
+// the "N messages · X people" line). On a pointer-driven desktop layout a more
+// compact target is plenty and lets each row hug its own text. Left at the full
+// 44px touch target below the mobile breakpoint, where it matters.
+@media only screen and (min-width: #{variables.$breakpoint-mobile}) {
+	#mail-thread-menu .button-vue,
+	#mail-thread-list-navigation .button-vue {
+		min-height: 32px;
+		height: 32px;
+		min-width: 32px;
+		width: 32px;
+	}
 }
 
 @media only screen and (max-width: #{variables.$breakpoint-mobile}) {
