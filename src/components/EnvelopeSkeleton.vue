@@ -506,11 +506,16 @@ export default {
 	&.active {
 		.list-item {
 			background-color: var(--color-primary-element);
-			&:hover,
 			&:focus-within,
 			&:has(:focus-visible),
 			&:has(:active) {
 				background-color: var(--color-primary-element-hover);
+			}
+			// Hover-only, gated so it doesn't stick after a tap on touch.
+			@media (hover: hover) {
+				&:hover {
+					background-color: var(--color-primary-element-hover);
+				}
 			}
 		}
 
@@ -565,10 +570,17 @@ export default {
 	flex-wrap: nowrap !important;
 	padding: var(--default-grid-baseline);
 
-	&:hover,
 	&:has(:active),
 	&:has(:focus-visible) {
 		background-color: var(--color-background-hover);
+	}
+
+	// Hover-only, gated so the row-highlight doesn't stick after a tap on
+	// touch (see the (hover: hover) note on the name-expansion rule below).
+	@media (hover: hover) {
+		&:hover {
+			background-color: var(--color-background-hover);
+		}
 	}
 
 	&:has(&__anchor:focus-visible) {
@@ -785,12 +797,20 @@ export default {
 	}
 }
 
-.list-item--multiline:hover .list-item-content__name {
-	display: flex;
-	justify-content: space-between;
-	width: 100%;
-	max-width: unset;
-	max-height: calc(var(--default-font-size) * var(--default-line-height));
+// Hover-only: expand the sender line to full width to reveal a long name.
+// Gated behind (hover: hover) so it applies ONLY to a real hovering pointer
+// -- on touch, :hover sticks after a tap (until another element is tapped)
+// and this dropped the name's max-width, letting it overrun and cover the
+// time (reported live: a stuck, expanded "Protoporia bookstores newsletter"
+// title overlapping 21:29, made permanent by fast select/deselect tapping).
+@media (hover: hover) {
+	.list-item--multiline:hover .list-item-content__name {
+		display: flex;
+		justify-content: space-between;
+		width: 100%;
+		max-width: unset;
+		max-height: calc(var(--default-font-size) * var(--default-line-height));
+	}
 }
 
 // Force icon to be in line with the first two lines
