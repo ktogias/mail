@@ -774,12 +774,34 @@ export default {
 
 // Hover/focus never reliably reveal this on a touch device (mobile
 // browsers synthesize both ambiguously against a tap's own navigation --
-// see Envelope.vue's onClick()/selectMode handling) -- unconditional here
-// instead, same size as the desktop hover reveal. The desktop mouse
-// experience above is untouched.
+// see Envelope.vue's onClick()/selectMode handling) -- show it
+// unconditionally here instead. But deliberately NOT the desktop hover
+// treatment above: that is a transient floating card (background + shadow)
+// that REPLACES the details column only while hovering. Made permanent it
+// reads as out-of-place against the rest of the list, and -- because
+// forceDisplayActions keeps the time/unread-dot details visible too (they
+// were never meant to coexist with the card) -- it sits directly on top of
+// them. So here: quiet, blended-in styling (no card, no shadow, muted
+// icon), and reserve room at the row's right edge so the button sits
+// BESIDE the time/unread column rather than over it.
 @media (pointer: coarse) {
+	.list-item__anchor {
+		padding-inline-end: var(--default-clickable-area);
+	}
+
 	.list-item__hoverable {
-		@include visible-hoverable;
+		visibility: visible;
+		position: absolute;
+		display: flex;
+		align-items: center;
+		height: 100%;
+		inset-inline-end: 0;
+		background: transparent;
+		box-shadow: none;
+
+		:deep(svg) {
+			fill: var(--color-text-maxcontrast) !important;
+		}
 	}
 }
 
