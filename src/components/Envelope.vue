@@ -106,6 +106,15 @@
 								:class="{ 'app-content-list-item-avatar-selected': selected }" />
 						</template>
 
+						<template v-else-if="selectMode">
+							<!-- In selection mode, every OTHER row's avatar becomes an
+							     empty "selectable" circle (Material / Google Photos
+							     pattern), so it's obvious the whole list is now in
+							     select-on-tap mode. Selected rows keep the filled
+							     check above. -->
+							<span class="select-affordance" aria-hidden="true" />
+						</template>
+
 						<template v-else>
 							<Avatar
 								:display-name="addresses"
@@ -2011,6 +2020,20 @@ export default {
 	display: flex;
 	align-items: center;
 	justify-content: center;
+}
+
+// The "selectable but not selected" affordance shown on every other row
+// while in selection mode: an empty circle with a primary-colour outline
+// (Material / Google Photos), same footprint as the avatar/check so the
+// row doesn't shift. Theme-aware fill via --color-main-background.
+.select-affordance {
+	box-sizing: border-box;
+	display: block;
+	width: calc(var(--default-grid-baseline) * 10);
+	height: calc(var(--default-grid-baseline) * 10);
+	border-radius: 50%;
+	border: 2px solid var(--color-primary-element);
+	background-color: var(--color-main-background);
 }
 
 .list-item--compact {

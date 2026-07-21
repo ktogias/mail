@@ -696,6 +696,49 @@ describe('Envelope', () => {
 		})
 	})
 
+	describe('selection-mode avatar affordance (empty selectable circle on non-selected rows)', () => {
+		function mountEnvelope(propsOverride = {}) {
+			return shallowMount(Envelope, {
+				mocks: { $route },
+				propsData: {
+					mailbox: { specialRole: '', databaseId: 42, myAcls: undefined },
+					selectMode: false,
+					selected: false,
+					data: {
+						accountId: 123,
+						databaseId: 999,
+						from: [{ email: 'info@test.com' }],
+						flags: { seen: false, flagged: false, $junk: false, answered: false, hasAttachments: false, draft: false },
+					},
+					...propsOverride,
+				},
+				store,
+				localVue,
+			})
+		}
+
+		it('shows the empty selectable circle on a non-selected row while in selection mode', () => {
+			const view = mountEnvelope({ selectMode: true, selected: false })
+
+			expect(view.find('.select-affordance').exists()).toBe(true)
+			expect(view.findComponent({ name: 'Avatar' }).exists()).toBe(false)
+		})
+
+		it('shows the normal avatar when NOT in selection mode', () => {
+			const view = mountEnvelope({ selectMode: false, selected: false })
+
+			expect(view.find('.select-affordance').exists()).toBe(false)
+			expect(view.findComponent({ name: 'Avatar' }).exists()).toBe(true)
+		})
+
+		it('shows the filled check (not the empty circle) on the selected row itself', () => {
+			const view = mountEnvelope({ selectMode: true, selected: true })
+
+			expect(view.find('.select-affordance').exists()).toBe(false)
+			expect(view.find('.check-icon').exists()).toBe(true)
+		})
+	})
+
 	describe('link()/isActiveThread decouple the row from $route (2026-07-20 open-latency fix)', () => {
 		// Every row used to be a <router-link>, so opening any message
 		// re-rendered the whole list. link() now reads the store's route
