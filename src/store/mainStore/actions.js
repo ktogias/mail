@@ -2646,29 +2646,54 @@ export default function mainStoreActions() {
 				return
 			}
 
-			const oldFlagState = envelope.flags.important
-			this.flagEnvelopeMutation({
-				envelope,
+			// The same physical email can be loaded as several folder
+			// copies -- on Gmail, the INBOX copy and the [Gmail]/Important
+			// copy share one Message-ID, each a separate envelope with its
+			// own, independently-synced flags. Importance is a per-message
+			// attribute the server clears on every copy, so apply the
+			// optimistic flip to the loaded siblings too. Without this a
+			// still-stale Important-folder copy keeps the whole thread
+			// matching is:pi-important (an existential, thread-wide match),
+			// so a just-unmarked message lingers in the Priority Inbox's
+			// Important section -- showing the "conversation has an important
+			// message" outline badge -- until that folder's own next sync,
+			// tens of seconds later. Each copy's own bucket sync remains the
+			// authoritative backstop if the server ever disagrees.
+			const importanceCopies = [envelope]
+			if (envelope.messageId && envelope.threadRootId) {
+				for (const member of this.getEnvelopesByThreadRootId(envelope.accountId, envelope.threadRootId)) {
+					if (member.databaseId !== envelope.databaseId && member.messageId === envelope.messageId) {
+						importanceCopies.push(member)
+					}
+				}
+			}
+			const importanceOldStates = new Map(importanceCopies.map((copy) => [copy.databaseId, copy.flags.important]))
+			importanceCopies.forEach((copy) => this.flagEnvelopeMutation({
+				envelope: copy,
 				flag: 'important',
 				value: important,
-			})
+			}))
 
 			const importantTag = this.getImportantTag
 			const applyTagMutation = (targetImportant) => {
-				if (targetImportant) {
-					this.addEnvelopeTagMutation({ envelope, tagId: importantTag.id })
-				} else {
-					this.removeEnvelopeTagMutation({ envelope, tagId: importantTag.id })
-				}
+				importanceCopies.forEach((copy) => {
+					if (targetImportant) {
+						this.addEnvelopeTagMutation({ envelope: copy, tagId: importantTag.id })
+					} else {
+						this.removeEnvelopeTagMutation({ envelope: copy, tagId: importantTag.id })
+					}
+				})
 			}
 			const reclassify = () => {
-				const mailbox = this.mailboxes[envelope.mailboxId]
-				if (mailbox) {
-					// userInitiated: the removal side (out of Important
-					// when unmarking, out of Other when marking) applies
-					// immediately too -- see threadStillMatchesFlagPredicate().
-					this.reclassifyFlagBucketsMutation({ envelope, sourceMailbox: mailbox, userInitiated: true })
-				}
+				importanceCopies.forEach((copy) => {
+					const mailbox = this.mailboxes[copy.mailboxId]
+					if (mailbox) {
+						// userInitiated: the removal side (out of Important
+						// when unmarking, out of Other when marking) applies
+						// immediately too -- see threadStillMatchesFlagPredicate().
+						this.reclassifyFlagBucketsMutation({ envelope: copy, sourceMailbox: mailbox, userInitiated: true })
+					}
+				})
 			}
 
 			const optimisticTagMutationApplied = !!importantTag
@@ -2708,7 +2733,11 @@ export default function mainStoreActions() {
 					envelope,
 					hasLanded: (authoritative) => authoritative?.flags?.important === important,
 					revert: () => {
-						this.flagEnvelopeMutation({ envelope, flag: 'important', value: oldFlagState })
+						importanceCopies.forEach((copy) => this.flagEnvelopeMutation({
+							envelope: copy,
+							flag: 'important',
+							value: importanceOldStates.get(copy.databaseId),
+						}))
 						if (optimisticTagMutationApplied) {
 							// Undo via the same mutation, not a raw snapshot
 							// restore -- re-records a fresh

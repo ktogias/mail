@@ -1547,6 +1547,35 @@ describe('Vuex store actions', () => {
 			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-other']).toContain(45)
 		})
 
+		it('unmarking important propagates the flip to a stale same-Message-ID folder copy, so the thread leaves is:pi-important at once', async () => {
+			// Gmail: the INBOX copy and the [Gmail]/Important copy share one
+			// Message-ID as two envelopes with independent flags. Unmarking
+			// the INBOX copy must also flip the still-important Important-
+			// folder copy locally, otherwise the thread-wide is:pi-important
+			// match keeps the row in the Important section (with the outline
+			// "conversation has an important message" badge) until that
+			// folder's own sync, tens of seconds later.
+			store.tags[importantTag.id] = importantTag
+			store.mailboxes[12] = { id: '[Gmail]/Important', name: '[Gmail]/Important', databaseId: 12, accountId: 13, envelopeLists: {} }
+			const inboxCopy = { databaseId: 51, accountId: 13, mailboxId: 11, dateInt: 51, messageId: 'shared-mid', threadRootId: 'thr-shared', thread: [51, 52], flags: { flagged: false, important: true }, tags: [importantTag.id] }
+			const importantFolderCopy = { databaseId: 52, accountId: 13, mailboxId: 12, dateInt: 51, messageId: 'shared-mid', threadRootId: 'thr-shared', thread: [51, 52], flags: { flagged: false, important: true }, tags: [importantTag.id] }
+			store.envelopes[51] = inboxCopy
+			store.envelopes[52] = importantFolderCopy
+			store.mailboxes[11].envelopeLists['not:starred is:pi-important'] = [51]
+			store.mailboxes[11].envelopeLists['not:starred is:pi-other'] = []
+			MessageService.setEnvelopeFlags.mockReturnValue(new Promise(() => {}))
+			MessageService.removeEnvelopeTag.mockReturnValue(new Promise(() => {}))
+
+			store.setEnvelopeImportant(inboxCopy, false)
+			await Promise.resolve()
+
+			// The stale sibling was flipped locally...
+			expect(store.envelopes[52].flags.important).toBe(false)
+			// ...so the thread-wide predicate no longer keeps the row listed.
+			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-important']).not.toContain(51)
+			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-other']).toContain(51)
+		})
+
 		it('a sync-driven reading of the same partial-knowledge shape still ratchets (no regression of the Favorites-flicker fix)', () => {
 			seedListedEnvelope(46, { flagged: true, important: false })
 			store.mailboxes[11].envelopeLists['is:starred'] = [46]
