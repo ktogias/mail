@@ -1346,6 +1346,31 @@ describe('Thread', () => {
 			expect(allRead.vm.threadHasUnread).toBe(false)
 		})
 
+		it('caps how many leading actions promote onto the toolbar (threadInlineMenuSize)', () => {
+			// Only the safe, reversible leading actions may leave the ⋮ menu:
+			// mark-all-read (always) + archive (only if the account has an
+			// archive mailbox). The destructive ones after them can never
+			// promote, so the size never exceeds how many of those exist.
+			store.getAccount = vi.fn().mockReturnValue({ archiveMailboxId: 55 })
+			const withArchive = mountThread(4003)
+
+			withArchive.vm.threadHeaderWidth = 320 // narrow split pane
+			expect(withArchive.vm.threadInlineMenuSize).toBe(0)
+
+			withArchive.vm.threadHeaderWidth = 560 // room for one
+			expect(withArchive.vm.threadInlineMenuSize).toBe(1)
+
+			withArchive.vm.threadHeaderWidth = 900 // room for both
+			expect(withArchive.vm.threadInlineMenuSize).toBe(2)
+
+			// No archive mailbox -> only mark-all-read is promotable, so a wide
+			// pane still caps at 1 (archive/move/etc. stay in the menu).
+			store.getAccount = vi.fn().mockReturnValue({ archiveMailboxId: null })
+			const noArchive = mountThread(4003)
+			noArchive.vm.threadHeaderWidth = 900
+			expect(noArchive.vm.threadInlineMenuSize).toBe(1)
+		})
+
 		it('marks all as read by toggling only the messages that are still unread', async () => {
 			store.toggleEnvelopeSeen = vi.fn().mockResolvedValue()
 			const view = mountThread(4003)

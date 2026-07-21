@@ -11,7 +11,7 @@
 			:error="errorTitle ? errorTitle : t('mail', 'Not found')"
 			:message="errorMessage" />
 		<template v-else>
-			<div id="mail-thread-header">
+			<div id="mail-thread-header" ref="threadHeader">
 				<div id="mail-thread-header-top">
 					<div id="mail-thread-header-fields">
 						<h2
@@ -30,13 +30,24 @@
 					<NcActions
 						id="mail-thread-menu"
 						:aria-label="t('mail', 'Thread actions')"
-						:force-menu="true"
+						:inline="threadSnoozeOpen ? 0 : threadInlineMenuSize"
 						variant="tertiary">
 						<template #icon>
 							<DotsVerticalIcon :size="20" />
 						</template>
 						<template v-if="!threadSnoozeOpen">
+							<!-- Only the two safe, reversible, frequently-used actions
+							     (mark-all-read/unread, archive) are eligible to be
+							     promoted out of the ⋮ menu onto the toolbar, and only
+							     when there's room -- see threadInlineMenuSize. They are
+							     first in this list so NcActions' :inline promotes
+							     exactly them. The higher-blast-radius ones below
+							     (move/snooze/junk/delete, each affecting every message
+							     in the thread) always stay in the menu, behind a
+							     deliberate click. -->
 							<NcActionButton
+								type="tertiary-no-background"
+								class="action--primary"
 								:close-after-click="true"
 								@click="markThreadSeen(threadHasUnread)">
 								<template #icon>
@@ -47,6 +58,8 @@
 							</NcActionButton>
 							<NcActionButton
 								v-if="threadAccount && threadAccount.archiveMailboxId"
+								type="tertiary-no-background"
+								class="action--primary"
 								:close-after-click="true"
 								@click="archiveThread">
 								<template #icon>
@@ -272,6 +285,11 @@ export default {
 			subjectExpanded: false,
 			showMoveModal: false,
 			threadSnoozeOpen: false,
+			// Measured width of #mail-thread-header, kept up to date by
+			// redrawMenuBar() (resize + mount). clientWidth isn't reactive on
+			// its own, so mirroring it into data is what lets
+			// threadInlineMenuSize recompute when the pane is resized.
+			threadHeaderWidth: 0,
 			customSnoozeDateTime: new Date(moment().add(2, 'hours').minute(0).second(0).valueOf()),
 			enabledThreadSummary: loadState('mail', 'llm_summaries_available', false),
 			summaryText: '',
@@ -390,6 +408,24 @@ export default {
 			return this.thread.some((envelope) => !envelope.flags?.seen)
 		},
 
+		// How many of the thread ⋮ menu's leading actions to promote onto the
+		// toolbar as standalone buttons (NcActions :inline). Mirrors
+		// ThreadEnvelope's own inlineMenuSize for a single message, but capped:
+		// only the safe/reversible leading actions (mark-all-read, then archive
+		// if this account has an archive mailbox) are ever eligible, so it never
+		// exceeds how many of those are actually rendered -- the destructive
+		// ones that follow them in the list can't be promoted no matter how wide
+		// the pane is. 0 on a narrow reading pane (everything back in the menu).
+		threadInlineMenuSize() {
+			const promotable = 1 + ((this.threadAccount && this.threadAccount.archiveMailboxId) ? 1 : 0)
+			const widthCap = this.threadHeaderWidth >= 700
+				? 2
+				: this.threadHeaderWidth >= 500
+					? 1
+					: 0
+			return Math.min(widthCap, promotable)
+		},
+
 		threadIsJunk() {
 			return this.thread.length > 0 && this.thread.every((envelope) => envelope.flags?.$junk)
 		},
@@ -502,6 +538,22 @@ export default {
 		document.addEventListener('visibilitychange', this.onVisibilityChange)
 	},
 
+	mounted() {
+		// Keep threadInlineMenuSize responsive to pane width. Same shape as
+		// ThreadEnvelope's own inline-menu sizing: measure on resize, plus a
+		// short poll to catch the first non-zero width (the header may not be
+		// laid out yet on the initial tick, especially on a cold open).
+		window.addEventListener('resize', this.redrawMenuBar)
+		this.redrawMenuBar()
+		this.$menuSizeInterval = setInterval(() => {
+			if (this.$refs.threadHeader?.clientWidth > 0) {
+				this.redrawMenuBar()
+				clearInterval(this.$menuSizeInterval)
+				this.$menuSizeInterval = undefined
+			}
+		}, 100)
+	},
+
 	beforeDestroy() {
 		// This pane is v-if-gated (MailboxThread.vue), so a real
 		// destroy here genuinely means no thread is open anymore --
@@ -510,9 +562,22 @@ export default {
 		this.mainStore.setCurrentOpenThreadIdMutation(undefined)
 		window.removeEventListener('keydown', this.handleKeyDown)
 		document.removeEventListener('visibilitychange', this.onVisibilityChange)
+		window.removeEventListener('resize', this.redrawMenuBar)
+		if (this.$menuSizeInterval !== undefined) {
+			clearInterval(this.$menuSizeInterval)
+		}
 	},
 
 	methods: {
+		// Re-measure the header width into reactive state so
+		// threadInlineMenuSize recomputes. Deferred to nextTick so the read
+		// happens after any layout change that triggered it.
+		redrawMenuBar() {
+			this.$nextTick(() => {
+				this.threadHeaderWidth = this.$refs.threadHeader?.clientWidth ?? 0
+			})
+		},
+
 		navigateList(direction) {
 			if ((direction === 'prev' && !this.listNavigation?.hasPrevious)
 				|| (direction === 'next' && !this.listNavigation?.hasNext)) {
@@ -1456,7 +1521,12 @@ $mail-thread-header-inline-start: calc(var(--default-grid-baseline) * 14 + var(-
 	display: flex;
 	flex-direction: column;
 	gap: 1px;
-	padding: 0 0 calc(var(--default-grid-baseline) * 1.5) 0;
+	// Symmetric vertical rhythm: the same 1.5-baseline breathing room above the
+	// subject and below the meta line (was 0 on top vs ~1.5-baseline + the 5px
+	// margin-bottom below -- a lopsided ~1:6 gap). The top padding is the single
+	// source for the subject's top breathing room now (the h2's own padding-top
+	// was removed), so it can't stack unpredictably with a second half-gap.
+	padding: calc(var(--default-grid-baseline) * 1.5) 0 calc(var(--default-grid-baseline) * 1.5) 0;
 	// somehow ios doesn't care about this !important rule
 	// so we have to manually set left/right padding to chidren
 	// for 100% to be used
@@ -1522,7 +1592,9 @@ $mail-thread-header-inline-start: calc(var(--default-grid-baseline) * 14 + var(-
 
 	h2 {
 		margin: 0;
-		padding: calc(var(--default-grid-baseline) / 2) 0 0 0;
+		// Top breathing room lives on #mail-thread-header's padding now (one
+		// source of truth), so no padding here.
+		padding: 0;
 		// override the server's oversized h2 -- a compact single line
 		font-size: 16px;
 		line-height: 1.35;
