@@ -676,6 +676,37 @@ describe('Vuex store actions', () => {
 
 			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['is:pi-important']).toEqual([62, 60])
 		})
+
+		it('withholds a new reply to a starred thread from the Other section the server returned it for (a known sibling is starred)', () => {
+			// The server classifies each message on its own flags, so a new
+			// non-starred reply to a starred thread comes back for the Other
+			// section (not:starred is:pi-other) even though the whole thread
+			// belongs to Favorites -- it must not show as a standalone Other row.
+			store.envelopes[70] = { databaseId: 70, accountId: 13, mailboxId: 11, uid: 70, dateInt: 70000, threadRootId: 'thr-fav', flags: { seen: true, flagged: true, important: false }, tags: {} }
+			store.mailboxes[11].envelopeLists['not:starred is:pi-other'] = []
+			store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['not:starred is:pi-other'] = []
+
+			const reply = { databaseId: 71, mailboxId: 11, uid: 71, dateInt: 71000, threadRootId: 'thr-fav', flags: { seen: false, flagged: false, important: false }, tags: {} }
+			store.addEnvelopesMutation({ query: 'not:starred is:pi-other', envelopes: [reply] })
+
+			// Stored (so threadRootId grouping still shows it inside the thread)...
+			expect(store.envelopes[71]).toBeDefined()
+			// ...but kept out of the Other section rather than a standalone row.
+			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-other']).not.toContain(71)
+			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['not:starred is:pi-other']).not.toContain(71)
+		})
+
+		it('still adds a new reply to the Other section when no thread sibling is starred or important (server trusted)', () => {
+			store.envelopes[80] = { databaseId: 80, accountId: 13, mailboxId: 11, uid: 80, dateInt: 80000, threadRootId: 'thr-other', flags: { seen: true, flagged: false, important: false }, tags: {} }
+			store.mailboxes[11].envelopeLists['not:starred is:pi-other'] = [80]
+			store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['not:starred is:pi-other'] = [80]
+
+			const reply = { databaseId: 81, mailboxId: 11, uid: 81, dateInt: 81000, threadRootId: 'thr-other', flags: { seen: false, flagged: false, important: false }, tags: {} }
+			store.addEnvelopesMutation({ query: 'not:starred is:pi-other', envelopes: [reply] })
+
+			// Thread-collapsed: the newest member represents the thread row.
+			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['not:starred is:pi-other']).toContain(81)
+		})
 	})
 
 	describe('addEnvelopesMutation: new mail in an existing thread invalidates its cached member list and, if open, proactively prefetches the body', () => {

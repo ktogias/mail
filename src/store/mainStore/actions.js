@@ -328,6 +328,22 @@ const MAX_CONCURRENT_SPECULATIVE_MESSAGE_FETCHES = 2
 // unaffected.
 const MAX_CONCURRENT_SPECULATIVE_THREAD_FETCHES = 2
 
+// The four Priority Inbox / Favorites bucket tokens that are really just a
+// boolean predicate over a flag the client already has locally. `matches`
+// is the per-envelope test; `positive` (only on the PARTITION tokens --
+// not:starred, is:pi-other) is the flag whose presence on ANY thread member
+// excludes the whole thread, mirroring the server's NOT EXISTS. Shared by
+// reclassifyFlagBucketsMutation() and addEnvelopesMutation()'s own add-time
+// thread-wide guard so the two can never drift apart.
+function flagPredicateTokenDefinitions() {
+	return {
+		'is:starred': { matches: (flags) => flags?.flagged === true },
+		'not:starred': { matches: (flags) => flags?.flagged !== true, positive: (flags) => flags?.flagged === true },
+		[priorityImportantQuery]: { matches: (flags) => flags?.important === true },
+		[priorityOtherQuery]: { matches: (flags) => flags?.important !== true, positive: (flags) => flags?.important === true },
+	}
+}
+
 // toggleEnvelopeSeen()/toggleEnvelopeJunk()/markEnvelopeFavoriteOrUnfavorite()
 // all optimistically set a flag via flagEnvelopeMutation() and await their
 // own PUT to confirm it -- but a completely independent sync request
@@ -4242,20 +4258,30 @@ export default function mainStoreActions() {
 				const nextTags = withRecentTagOverrides(envelope.databaseId, envelope.tags)
 				Vue.set(this.envelopes, envelope.databaseId, { ...previouslyKnown || {}, ...envelope, flags: nextFlags, tags: nextTags })
 				Vue.set(envelope, 'accountId', mailbox.accountId)
-				this.appendOrReplaceEnvelopeId(workingListFor(mailbox), envelope)
-				if (addToUnifiedMailboxes) {
-					const unifiedAccount = this.accountsUnmapped[UNIFIED_ACCOUNT_ID]
-					unifiedAccount.mailboxes
-						.map((mbId) => this.mailboxes[mbId])
-						.filter((mb) => mb.specialRole && mb.specialRole === mailbox.specialRole)
-						.forEach((unifiedMailbox) => {
-							// Unchanged from before: a blind push, deduped
-							// only by exact id via uniq() below -- not
-							// routed through appendOrReplaceEnvelopeId()'s
-							// thread-dedup logic, same as prior to this
-							// Map-based rewrite.
-							workingListFor(unifiedMailbox).ids.push(envelope.databaseId)
-						})
+				// A new reply the server returned for a PARTITION bucket
+				// (e.g. Other's not:starred is:pi-other) it doesn't thread-wide
+				// belong in -- because a known sibling is starred/important --
+				// is kept out of this bucket now instead of showing as a
+				// standalone row until the next thread-aware sync. It's still
+				// stored above (so threadRootId grouping and the reclassify
+				// below can place it in its real bucket) -- only THIS bucket's
+				// list membership is withheld. Only for genuinely new mail.
+				if (previouslyKnown !== undefined || !this.newEnvelopeExcludedFromPartitionBucket(envelope, listId)) {
+					this.appendOrReplaceEnvelopeId(workingListFor(mailbox), envelope)
+					if (addToUnifiedMailboxes) {
+						const unifiedAccount = this.accountsUnmapped[UNIFIED_ACCOUNT_ID]
+						unifiedAccount.mailboxes
+							.map((mbId) => this.mailboxes[mbId])
+							.filter((mb) => mb.specialRole && mb.specialRole === mailbox.specialRole)
+							.forEach((unifiedMailbox) => {
+								// Unchanged from before: a blind push, deduped
+								// only by exact id via uniq() below -- not
+								// routed through appendOrReplaceEnvelopeId()'s
+								// thread-dedup logic, same as prior to this
+								// Map-based rewrite.
+								workingListFor(unifiedMailbox).ids.push(envelope.databaseId)
+							})
+					}
 				}
 
 				// Runs regardless of addToUnifiedMailboxes: even a
@@ -4376,12 +4402,7 @@ export default function mainStoreActions() {
 			// disproves thread membership definitively, while a member
 			// lacking it proves nothing on its own. Purely existential
 			// tokens (is:starred, is:pi-important) have no `positive` entry.
-			const knownTokenPredicates = {
-				'is:starred': { matches: (flags) => flags?.flagged === true },
-				'not:starred': { matches: (flags) => flags?.flagged !== true, positive: (flags) => flags?.flagged === true },
-				[priorityImportantQuery]: { matches: (flags) => flags?.important === true },
-				[priorityOtherQuery]: { matches: (flags) => flags?.important !== true, positive: (flags) => flags?.important === true },
-			}
+			const knownTokenPredicates = flagPredicateTokenDefinitions()
 			const inboxOnlyTokens = new Set([priorityImportantQuery, priorityOtherQuery])
 			const orderByDateInt = orderBy((id) => this.envelopes[id]?.dateInt ?? 0, this.preferences['sort-order'] === 'newest' ? 'desc' : 'asc')
 
@@ -4573,6 +4594,47 @@ export default function mainStoreActions() {
 				return false
 			}
 			return alreadyListed
+		},
+		/**
+		 * Add-time counterpart to the PARTITION half of
+		 * threadStillMatchesFlagPredicate(). A newly-arrived envelope's own
+		 * bucket is normally taken from the server's response verbatim
+		 * (addEnvelopesMutation() trusts the server for exactly the query it
+		 * asked). But the server classifies each message on its own flags, so
+		 * a new reply to a starred (or important) thread is returned for the
+		 * Other section (not:starred is:pi-other) even though the thread as a
+		 * whole belongs to Favorites -- it then shows as a standalone row in
+		 * Other until that bucket's own next thread-aware sync, tens of
+		 * seconds later. When a thread sibling is already known locally to
+		 * carry the PARTITION-excluding flag, that's the same definitive NOT
+		 * EXISTS proof the removal path uses, so we can keep the reply out of
+		 * the partition bucket at once and let the thread's existential bucket
+		 * (is:starred / is:pi-important) plus threadRootId grouping place it
+		 * correctly. Deliberately narrow: only PARTITION buckets, only a
+		 * definitive sibling/self proof (never the uncertain existential
+		 * branch), only in threaded mode -- everything else trusts the server.
+		 *
+		 * @param {object} envelope The newly-arrived envelope.
+		 * @param {string} listId The bucket's normalized list id.
+		 * @return {boolean} True to keep it out of this partition bucket.
+		 */
+		newEnvelopeExcludedFromPartitionBucket(envelope, listId) {
+			if (this.getPreference('layout-message-view', 'threaded') !== 'threaded' || !envelope.threadRootId) {
+				return false
+			}
+			const tokens = listId.split(' ').filter(Boolean)
+			const knownTokenPredicates = flagPredicateTokenDefinitions()
+			if (tokens.length === 0 || !tokens.every((token) => token in knownTokenPredicates)) {
+				return false
+			}
+			const partitionTokens = tokens.filter((token) => knownTokenPredicates[token].positive !== undefined)
+			if (partitionTokens.length === 0) {
+				return false
+			}
+			const knownMembers = this.getEnvelopesByThreadRootId(envelope.accountId, envelope.threadRootId)
+			const membersToCheck = knownMembers.length > 0 ? knownMembers : [envelope]
+			return partitionTokens.some((token) => knownTokenPredicates[token].positive(envelope.flags)
+				|| membersToCheck.some((member) => knownTokenPredicates[token].positive(member.flags)))
 		},
 		/**
 		 * After a user's OWN explicit flag/importance toggle
