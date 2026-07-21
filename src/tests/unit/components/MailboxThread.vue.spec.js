@@ -173,23 +173,61 @@ describe('MailboxThread', () => {
 		// The list stacks several Mailbox sections, each preceded by a
 		// section title inside one shared scroller, so a per-section "am I
 		// at the scroller top" check never armed. Ownership is here, on the
-		// single scroller owner; refresh broadcasts to every section via the
-		// same 'refresh' shortcut bus event the `r` key already uses.
+		// single scroller owner. The spinner is bound to the ACTUAL sync
+		// completing (not a fixed timer), so it doesn't declare "done"
+		// before new mail lands.
 		afterEach(() => {
 			vi.useRealTimers()
 		})
 
-		it('broadcasts a refresh to every section and shows the spinner for a fixed minimum', () => {
+		it('keeps the spinner up until the real sync resolves -- past the min-visible window, not on a fixed timer', async () => {
 			vi.useFakeTimers()
 			const wrapper = mountThread()
-			const emitSpy = vi.spyOn(wrapper.vm.bus, 'emit')
+			let resolveSync
+			store.syncEnvelopes = vi.fn().mockReturnValue(new Promise((r) => { resolveSync = r }))
+			store.syncMailboxesForAccount = vi.fn().mockResolvedValue()
 
-			wrapper.vm.onPullToRefresh()
+			const done = wrapper.vm.onPullToRefresh()
 
-			expect(emitSpy).toHaveBeenCalledWith('shortcut', { srcKey: 'refresh' })
+			// Past the min-visible window, but the sync is still pending, so
+			// the spinner must NOT have retracted (the whole point of the fix).
+			await vi.advanceTimersByTimeAsync(1500)
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: wrapper.vm.mailbox.databaseId })
 			expect(wrapper.vm.pullToRefreshSpinning).toBe(true)
 
-			vi.advanceTimersByTime(1000)
+			// Sync resolves -> the whole refresh settles and the spinner clears.
+			resolveSync()
+			await vi.advanceTimersByTimeAsync(0)
+			await done
+
+			expect(store.syncMailboxesForAccount).toHaveBeenCalled()
+			expect(wrapper.vm.pullToRefreshSpinning).toBe(false)
+		})
+
+		it('retracts at the max cap if the sync never resolves (no infinite spin)', async () => {
+			vi.useFakeTimers()
+			const wrapper = mountThread()
+			store.syncEnvelopes = vi.fn().mockReturnValue(new Promise(() => {})) // never resolves
+			store.syncMailboxesForAccount = vi.fn().mockResolvedValue()
+
+			const done = wrapper.vm.onPullToRefresh()
+
+			await vi.advanceTimersByTimeAsync(20 * 1000)
+			await done
+
+			expect(wrapper.vm.pullToRefreshSpinning).toBe(false)
+		})
+
+		it('clears the spinner even when the sync rejects (does not hang)', async () => {
+			vi.useFakeTimers()
+			const wrapper = mountThread()
+			store.syncEnvelopes = vi.fn().mockRejectedValue(new Error('network error'))
+			store.syncMailboxesForAccount = vi.fn().mockResolvedValue()
+
+			const done = wrapper.vm.onPullToRefresh()
+			await vi.advanceTimersByTimeAsync(700)
+			await done
+
 			expect(wrapper.vm.pullToRefreshSpinning).toBe(false)
 		})
 	})

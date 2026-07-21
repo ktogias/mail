@@ -254,11 +254,13 @@ import { detect, toHtml, toPlain } from '../util/text.js'
 
 const START_MAILBOX_DEBOUNCE = 5 * 1000
 
-// How long the pull-to-refresh spinner stays visible after release. The
-// refresh itself is a fire-and-forget broadcast to every section (the same
-// path as the `r` shortcut), which reports no single completion signal, so
-// the spinner shows for a short, honest minimum rather than guessing.
-const PULL_REFRESH_SPINNER_MS = 1000
+// The pull-to-refresh spinner is bound to the ACTUAL refresh completing --
+// not a fixed timer -- so it doesn't declare "done" seconds before new mail
+// actually lands (reported live). A short minimum avoids a flash on a fast/
+// cached sync; a generous cap keeps it from spinning forever if a sync hangs
+// (this NAS has documented slow-sync/502 episodes).
+const PULL_REFRESH_MIN_SPINNER_MS = 600
+const PULL_REFRESH_MAX_SPINNER_MS = 20 * 1000
 
 export default {
 	name: 'MailboxThread',
@@ -600,20 +602,32 @@ export default {
 	},
 
 	methods: {
-		// Broadcasts a refresh to every rendered section (the `r`-shortcut
-		// path -> each Mailbox's own sync(false)). That's fire-and-forget
-		// with no single completion signal, so the spinner is shown for a
-		// short fixed minimum -- the list itself updates whenever the
-		// per-section syncs land, independently of the spinner.
-		onPullToRefresh() {
+		// Keeps the spinner up until the refresh genuinely finishes (new
+		// mail fetched AND classified into the sections), bounded by a min
+		// (no flash) and a max (no hang). See the constants above.
+		async onPullToRefresh() {
 			this.pullToRefreshSpinning = true
-			this.bus.emit('shortcut', { srcKey: 'refresh' })
-			return new Promise((resolve) => {
-				setTimeout(() => {
-					this.pullToRefreshSpinning = false
-					resolve()
-				}, PULL_REFRESH_SPINNER_MS)
+			const minVisible = new Promise((resolve) => setTimeout(resolve, PULL_REFRESH_MIN_SPINNER_MS))
+			const cap = new Promise((resolve) => setTimeout(resolve, PULL_REFRESH_MAX_SPINNER_MS))
+			const refreshed = this.refreshCurrentView().catch((error) => {
+				logger.error('pull-to-refresh sync failed', { error })
 			})
+			try {
+				await Promise.all([Promise.race([refreshed, cap]), minVisible])
+			} finally {
+				this.pullToRefreshSpinning = false
+			}
+		},
+
+		// The exact awaitable sync path the manual refresh button
+		// (NewMessageButtonHeader) uses: fetch new envelopes for the current
+		// (possibly virtual/priority) mailbox -- the fan-out surfaces new mail
+		// into every section's bucket via the client-side classifier -- then
+		// refresh mailbox metadata/counts. Awaiting BOTH is what makes the
+		// pull-to-refresh spinner reflect real completion.
+		async refreshCurrentView() {
+			await this.mainStore.syncEnvelopes({ mailboxId: this.mailbox.databaseId })
+			await this.mainStore.syncMailboxesForAccount(this.account)
 		},
 
 		getGroupedEnvelopes(envelopes, syncTimestamp) {
