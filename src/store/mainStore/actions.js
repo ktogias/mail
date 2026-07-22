@@ -19,11 +19,9 @@ import {
 	defaultTo,
 	filter,
 	flatten,
-	gt,
 	head,
 	identity,
 	last,
-	lt,
 	map,
 	pipe,
 	prop,
@@ -31,7 +29,6 @@ import {
 	slice,
 	sortBy,
 	tap,
-	where,
 } from 'ramda'
 import Vue from 'vue'
 import MailboxLockedError from '../../errors/MailboxLockedError.js'
@@ -157,11 +154,91 @@ const findIndividualMailboxes = curry((getMailboxes, specialRole) => pipe(
 ))
 
 function combineEnvelopeLists(sortOrder) {
-	if (sortOrder === 'oldest') {
-		return pipe(flatten, orderBy(prop('dateInt'), 'asc'))
+	const direction = sortOrder === 'oldest' ? 'asc' : 'desc'
+	return pipe(flatten, orderBy([prop('dateInt'), prop('databaseId')], [direction, direction]))
+}
+
+function compareEnvelopeCursors(left, right, sortOrder) {
+	const direction = sortOrder === 'oldest' ? 1 : -1
+	if (left.dateInt !== right.dateInt) {
+		return (left.dateInt - right.dateInt) * direction
+	}
+	return (left.databaseId - right.databaseId) * direction
+}
+
+const SEARCH_RECENT_WINDOW_SECONDS = 30 * 24 * 60 * 60
+const SEARCH_EXTENDED_WINDOW_SECONDS = 180 * 24 * 60 * 60
+
+function usesProgressiveSearch(query, sortOrder) {
+	if (sortOrder !== 'newest' || !hasTextSearchPredicate(query)) {
+		return false
+	}
+	const tokens = query.split(' ').filter(Boolean)
+	return !tokens.some((token) => /^(start|end):/i.test(token))
+}
+
+function progressiveSearchWindows(query, sortOrder, upperBound) {
+	if (!usesProgressiveSearch(query, sortOrder)) {
+		return null
 	}
 
-	return pipe(flatten, orderBy(prop('dateInt'), 'desc'))
+	const recentStart = upperBound - SEARCH_RECENT_WINDOW_SECONDS
+	return [
+		`${query} start:${recentStart} end:${upperBound}`,
+		`${query} start:${upperBound - SEARCH_EXTENDED_WINDOW_SECONDS} end:${recentStart - 1}`,
+	]
+}
+
+function prioritySection(envelope, threaded) {
+	const flags = envelope.flags ?? {}
+	const flagged = threaded ? (flags.hasFlaggedInThread ?? flags.flagged === true) : flags.flagged === true
+	const important = threaded ? (flags.hasImportantInThread ?? flags.important === true) : flags.important === true
+	if (flagged) {
+		return 'favorite'
+	}
+	return important ? 'important' : 'other'
+}
+
+function capProgressiveResults(envelopes, sortOrder, view, prioritySplit) {
+	const unique = [...new Map(combineEnvelopeLists(sortOrder)(envelopes).map((envelope) => [envelope.databaseId, envelope])).values()]
+	if (!prioritySplit) {
+		return sliceToPage(unique)
+	}
+
+	const threaded = view === 'threaded'
+	const sectionCounts = { favorite: 0, important: 0, other: 0 }
+	return unique.filter((envelope) => {
+		const section = prioritySection(envelope, threaded)
+		if (sectionCounts[section] >= PAGE_SIZE) {
+			return false
+		}
+		sectionCounts[section]++
+		return true
+	})
+}
+
+function progressivePageIsComplete(envelopes, view, prioritySplit) {
+	if (!prioritySplit) {
+		return envelopes.length >= PAGE_SIZE
+	}
+	const threaded = view === 'threaded'
+	const counts = { favorite: 0, important: 0, other: 0 }
+	envelopes.forEach((envelope) => counts[prioritySection(envelope, threaded)]++)
+	return Object.values(counts).every((count) => count >= PAGE_SIZE)
+}
+
+async function fetchProgressiveSearchPage({ query, sortOrder, view, upperBound, prioritySplit = false, fetchPage }) {
+	const windows = progressiveSearchWindows(query, sortOrder, upperBound)
+	if (windows === null) {
+		return fetchPage(query)
+	}
+
+	const recent = await fetchPage(windows[0])
+	if (progressivePageIsComplete(recent, view, prioritySplit)) {
+		return capProgressiveResults(recent, sortOrder, view, prioritySplit)
+	}
+	const extended = await fetchPage(windows[1])
+	return capProgressiveResults([recent, extended], sortOrder, view, prioritySplit)
 }
 
 const addMailboxToState = curry((mailboxes, account, mailbox) => {
@@ -290,6 +367,12 @@ const pendingThreadFetches = new Map()
 // in-flight request.
 const pendingUnifiedSyncs = new Map()
 
+// Concurrent Priority/Unified section components searching the same content
+// share one physical request wave. Kept per Pinia store (rather than one
+// process-wide Map) so test stores and independently-mounted app instances
+// cannot reuse each other's results.
+let pendingUnifiedContentSearches = new WeakMap()
+
 // Upper bound for a single message/thread fetch -- see fetchMessage()
 // for the reasoning. Well above the slowest legitimate fetch observed
 // (~25-60s cache-miss body via a slow provider), well below forever.
@@ -361,6 +444,72 @@ function flagPredicateTokenDefinitions() {
 		[priorityImportantQuery]: { matches: (flags) => flags?.important === true },
 		[priorityOtherQuery]: { matches: (flags) => flags?.important !== true, positive: (flags) => flags?.important === true },
 	}
+}
+
+const sharedSearchFlagTokens = new Set([
+	'is:starred',
+	'not:starred',
+	priorityImportantQuery,
+	priorityOtherQuery,
+])
+
+const textSearchPredicatePattern = /^(to|from|cc|bcc|subject|body):/i
+
+function hasTextSearchPredicate(query) {
+	return typeof query === 'string'
+		&& query.split(' ').some((token) => textSearchPredicatePattern.test(token))
+}
+
+/**
+ * Split a Priority/Unified section query into the expensive content part and
+ * the cheap flag predicates that only decide which visual section receives a
+ * result. Structural-only queries deliberately keep their existing path.
+ *
+ * @param {string|undefined} query
+ * @return {{ baseQuery: string, flagTokens: string[] }|null}
+ */
+function sharedContentSearchDescriptor(query) {
+	if (typeof query !== 'string') {
+		return null
+	}
+
+	const tokens = query.split(' ').filter(Boolean)
+	const flagTokens = tokens.filter((token) => sharedSearchFlagTokens.has(token))
+	if (flagTokens.length === 0) {
+		return null
+	}
+
+	const baseQuery = tokens.filter((token) => !sharedSearchFlagTokens.has(token)).join(' ')
+	if (!hasTextSearchPredicate(baseQuery)) {
+		return null
+	}
+
+	return { baseQuery, flagTokens }
+}
+
+function envelopeMatchesSharedSearchSection(envelope, flagTokens, threaded) {
+	const flags = envelope.flags ?? {}
+	const flagged = threaded
+		? (flags.hasFlaggedInThread ?? flags.flagged === true)
+		: flags.flagged === true
+	const important = threaded
+		? (flags.hasImportantInThread ?? flags.important === true)
+		: flags.important === true
+
+	return flagTokens.every((token) => {
+		switch (token) {
+			case 'is:starred':
+				return flagged
+			case 'not:starred':
+				return !flagged
+			case priorityImportantQuery:
+				return important
+			case priorityOtherQuery:
+				return !important
+			default:
+				return false
+		}
+	})
 }
 
 // toggleEnvelopeSeen()/toggleEnvelopeJunk()/markEnvelopeFavoriteOrUnfavorite()
@@ -855,6 +1004,17 @@ const WATCHED_SYNC_CONCURRENCY = 3
 // 3 x this -- keep the product comfortably below the FPM pool size.
 const ENVELOPE_FETCH_CONCURRENCY = 3
 
+// Text predicates are disk-I/O-bound on the small production NAS. Keep their
+// constituent-mailbox wave tighter than ordinary structural listings. This is
+// the source-controlled form of the already-live all-free-text throttle.
+const TEXT_SEARCH_ENVELOPE_FETCH_CONCURRENCY = 2
+
+function envelopeFetchConcurrencyFor(query) {
+	return hasTextSearchPredicate(query)
+		? TEXT_SEARCH_ENVELOPE_FETCH_CONCURRENCY
+		: ENVELOPE_FETCH_CONCURRENCY
+}
+
 // A single, shared concurrency budget for every mapWithConcurrencyLimit()
 // caller combined -- the priority-inbox section fan-out and the
 // watched-mailbox poller each already had their OWN limit
@@ -916,6 +1076,7 @@ let sharedNetworkLimiter = new ConcurrencyLimiter(SHARED_NETWORK_CONCURRENCY)
 // next, silently shrinking its available shared budget.
 export function resetSharedNetworkLimiterForTests() {
 	sharedNetworkLimiter = new ConcurrencyLimiter(SHARED_NETWORK_CONCURRENCY)
+	pendingUnifiedContentSearches = new WeakMap()
 }
 
 /**
@@ -1612,19 +1773,176 @@ export default function mainStoreActions() {
 		isFetchingEnvelopes(mailboxId, query) {
 			return (this.envelopeFetchCounts[mailboxId + '::' + normalizedEnvelopeListId(query)] ?? 0) > 0
 		},
+		replaceKnownEnvelopeListMutation({ mailboxId, query, envelopes }) {
+			const mailbox = this.getMailbox(mailboxId)
+			const orderByDateInt = orderBy(
+				(id) => this.envelopes[id]?.dateInt ?? 0,
+				this.getPreference('sort-order') === 'oldest' ? 'asc' : 'desc',
+			)
+			const ids = envelopes
+				.map((envelope) => envelope.databaseId)
+				.filter((id) => this.envelopes[id] !== undefined)
+
+			Vue.set(mailbox.envelopeLists, normalizedEnvelopeListId(query), uniq(orderByDateInt(ids)))
+		},
+		async fetchSharedUnifiedContentSearch({ mailbox, query, descriptor, signal, searchUpperBound }) {
+			const sortOrder = this.getPreference('sort-order', 'newest')
+			const view = this.getPreference('layout-message-view', 'threaded')
+			let pendingForStore = pendingUnifiedContentSearches.get(this)
+			if (!pendingForStore) {
+				pendingForStore = new Map()
+				pendingUnifiedContentSearches.set(this, pendingForStore)
+			}
+			const key = [mailbox.databaseId, mailbox.specialRole, descriptor.baseQuery, sortOrder, view].join('::')
+			let pending = pendingForStore.get(key)
+
+			if (!pending) {
+				pending = {
+					controller: new AbortController(),
+					consumers: new Set(),
+					settled: false,
+				}
+				const individualMailboxes = findIndividualMailboxes(this.getMailboxes, mailbox.specialRole)(this.getAccounts)
+				pending.promise = mapWithConcurrencyLimit(
+					individualMailboxes,
+					TEXT_SEARCH_ENVELOPE_FETCH_CONCURRENCY,
+					async (individualMailbox) => {
+						try {
+							const envelopes = await fetchProgressiveSearchPage({
+								query: descriptor.baseQuery,
+								sortOrder,
+								view,
+								upperBound: searchUpperBound,
+								prioritySplit: true,
+								fetchPage: (networkQuery) => fetchEnvelopes(
+									individualMailbox.accountId,
+									individualMailbox.databaseId,
+									networkQuery,
+									undefined,
+									PAGE_SIZE,
+									sortOrder,
+									view,
+									undefined,
+									pending.controller.signal,
+									true,
+								),
+							})
+							this.addEnvelopesMutation({
+								query: descriptor.baseQuery,
+								envelopes,
+								addToUnifiedMailboxes: false,
+								replace: true,
+								replaceMailboxId: individualMailbox.databaseId,
+							})
+							return { mailbox: individualMailbox, envelopes, failed: false }
+						} catch (error) {
+							if (axios.isCancel(error) || pending.controller.signal.aborted) {
+								throw error
+							}
+							logger.error(`Failed shared content search for unified constituent mailbox ${individualMailbox.databaseId}: ${error}`, { error })
+							return { mailbox: individualMailbox, envelopes: [], failed: true }
+						}
+					},
+				).finally(() => {
+					pending.settled = true
+					if (pending.consumers.size === 0 && pendingForStore.get(key) === pending) {
+						pendingForStore.delete(key)
+					}
+				})
+				pendingForStore.set(key, pending)
+			}
+
+			const consumer = {}
+			pending.consumers.add(consumer)
+			let active = true
+			let rejectAbort
+			const abortPromise = new Promise((_resolve, reject) => {
+				rejectAbort = reject
+			})
+			function release() {
+				if (!active) {
+					return
+				}
+				active = false
+				signal?.removeEventListener('abort', onAbort)
+				pending.consumers.delete(consumer)
+				if (!pending.settled && pending.consumers.size === 0) {
+					pending.controller.abort()
+				}
+				if (pending.settled && pending.consumers.size === 0 && pendingForStore.get(key) === pending) {
+					pendingForStore.delete(key)
+				}
+			}
+			function onAbort() {
+				const error = new Error('Shared content search was superseded')
+				error.name = 'AbortError'
+				release()
+				rejectAbort(error)
+			}
+			signal?.addEventListener('abort', onAbort, { once: true })
+			if (signal?.aborted) {
+				onAbort()
+			}
+
+			try {
+				const results = await (signal
+					? Promise.race([pending.promise, abortPromise])
+					: pending.promise)
+				const threaded = view === 'threaded'
+				const successfulResults = results.filter((result) => !result.failed)
+				const matchingByMailbox = successfulResults.map((result) => {
+					const envelopes = result.envelopes.filter((envelope) => envelopeMatchesSharedSearchSection(
+						envelope,
+						descriptor.flagTokens,
+						threaded,
+					))
+					this.replaceKnownEnvelopeListMutation({
+						mailboxId: result.mailbox.databaseId,
+						query,
+						envelopes,
+					})
+					return envelopes
+				})
+				const envelopes = sliceToPage(combineEnvelopeLists(sortOrder)(matchingByMailbox))
+				this.replaceKnownEnvelopeListMutation({
+					mailboxId: mailbox.databaseId,
+					query,
+					envelopes,
+				})
+
+				return envelopes
+			} finally {
+				release()
+			}
+		},
 		fetchEnvelopes({
 			mailboxId,
 			query,
 			addToUnifiedMailboxes = true,
 			includeCacheBuster = false,
 			signal,
+			searchUpperBound,
 		}) {
 			query = stripMalformedUndefinedToken(query)
+			searchUpperBound ??= Math.floor(Date.now() / 1000)
 			this.envelopeFetchStartedMutation({ mailboxId, query })
 			return handleHttpAuthErrors(async () => {
 				const mailbox = this.getMailbox(mailboxId)
 
 				if (mailbox.isUnified) {
+					const sharedSearch = sharedContentSearchDescriptor(query)
+					if (sharedSearch) {
+						const envelopes = await this.fetchSharedUnifiedContentSearch({
+							mailbox,
+							query,
+							descriptor: sharedSearch,
+							signal,
+							searchUpperBound,
+						})
+						this.envelopeFetchFinishedMutation({ mailboxId, query })
+						return envelopes
+					}
+
 					// One account's fetch rejecting must not discard every
 					// other account's already-successful envelopes. Promise.all()
 					// rejects as soon as any single promise rejects, so a single
@@ -1640,7 +1958,7 @@ export default function mainStoreActions() {
 					// concurrent slow queries) where every request 504ed.
 					const fetchIndividualLists = (mbs) => mapWithConcurrencyLimit(
 						mbs,
-						ENVELOPE_FETCH_CONCURRENCY,
+						envelopeFetchConcurrencyFor(query),
 						(mb) => this.fetchEnvelopes({
 							mailboxId: mb.databaseId,
 							query,
@@ -1648,6 +1966,7 @@ export default function mainStoreActions() {
 							sort: this.getPreference('sort-order'),
 							view: this.getPreference('layout-message-view'),
 							signal,
+							searchUpperBound,
 						}).catch((error) => {
 							if (axios.isCancel(error)) {
 								// The whole unified fetch was superseded --
@@ -1695,12 +2014,13 @@ export default function mainStoreActions() {
 						// in-flight requests below the FPM pool size.
 						const fetchIndividualLists = (mbs) => mapWithConcurrencyLimit(
 							mbs,
-							ENVELOPE_FETCH_CONCURRENCY,
+							envelopeFetchConcurrencyFor(query),
 							(mb) => this.fetchEnvelopes({
 								mailboxId: mb.databaseId,
 								query,
 								addToUnifiedMailboxes: false,
 								signal,
+								searchUpperBound,
 							}).catch((error) => {
 								if (axios.isCancel(error)) {
 									// Superseded search -- propagate, see
@@ -1725,21 +2045,36 @@ export default function mainStoreActions() {
 					}))
 				}
 
-				return pipe(
-					fetchEnvelopes,
-					andThen(tap((envelopes) => {
-						this.addEnvelopesMutation({
-							query,
-							envelopes,
-							addToUnifiedMailboxes,
-							replace: true,
-							replaceMailboxId: mailboxId,
-						})
-						// Same tick as the list write above -- see the note
-						// on the outer .finally() below for why.
-						this.envelopeFetchFinishedMutation({ mailboxId, query })
-					})),
-				)(mailbox.accountId, mailboxId, query, undefined, PAGE_SIZE, this.getPreference('sort-order'), this.getPreference('layout-message-view'), includeCacheBuster ? mailbox.cacheBuster : undefined, signal)
+				const sortOrder = this.getPreference('sort-order')
+				const view = this.getPreference('layout-message-view')
+				return fetchProgressiveSearchPage({
+					query,
+					sortOrder,
+					view,
+					upperBound: searchUpperBound,
+					fetchPage: (networkQuery) => fetchEnvelopes(
+						mailbox.accountId,
+						mailboxId,
+						networkQuery,
+						undefined,
+						PAGE_SIZE,
+						sortOrder,
+						view,
+						includeCacheBuster ? mailbox.cacheBuster : undefined,
+						signal,
+					),
+				}).then(tap((envelopes) => {
+					this.addEnvelopesMutation({
+						query,
+						envelopes,
+						addToUnifiedMailboxes,
+						replace: true,
+						replaceMailboxId: mailboxId,
+					})
+					// Same tick as the list write above -- see the note
+					// on the outer .finally() below for why.
+					this.envelopeFetchFinishedMutation({ mailboxId, query })
+				}))
 			}).finally(() => {
 				// Safety net for paths that reject before reaching their
 				// own tap() above (including the isUnified/isPriorityInbox
@@ -1798,28 +2133,48 @@ export default function mainStoreActions() {
 					// messages (the tap just did nothing, repeatably).
 					const fetchNextFannedOutPage = async (query, allowRecursiveFetch = rec) => {
 						const getIndivisualLists = curry((query, m) => this.getEnvelopes(m.databaseId, query))
-						const individualCursor = curry((query, m) => prop('dateInt', last(this.getEnvelopes(m.databaseId, query))))
+						const individualCursor = curry((query, m) => last(this.getEnvelopes(m.databaseId, query)))
 						const cursor = individualCursor(query, mailbox)
 
 						if (cursor === undefined) {
-							// An empty list has no tail to page past --
-							// nothing more to load, by definition. The
-							// infinite-scroll observer fires even over an
-							// empty list (e.g. a priority-inbox search with
-							// no matches), and throwing here turned every
-							// such scroll into a console error instead of a
-							// clean "end reached".
+							const sortOrder = this.getPreference('sort-order')
+							if (allowRecursiveFetch && usesProgressiveSearch(query, sortOrder)) {
+								// The bounded 30/180-day foreground search may
+								// legitimately return no rows even though older
+								// history contains matches. Infinite scroll is
+								// the asynchronous continuation: search the full
+								// history now that the empty recent result has
+								// already rendered, still under the shared text
+								// concurrency budget.
+								const individualMailboxes = findIndividualMailboxes(this.getMailboxes, mailbox.specialRole)(this.getAccounts)
+								await mapWithConcurrencyLimit(
+									individualMailboxes,
+									TEXT_SEARCH_ENVELOPE_FETCH_CONCURRENCY,
+									(mb) => this.fetchNextEnvelopes({
+										mailboxId: mb.databaseId,
+										query,
+										quantity,
+										addToUnifiedMailboxes: false,
+									}).catch((error) => {
+										logger.error(`Failed deep search for fanned-out constituent mailbox ${mb.databaseId}: ${error}`, { error })
+										return []
+									}),
+								)
+								const envelopes = slice(0, quantity, combineEnvelopeLists(sortOrder)(individualMailboxes.map(getIndivisualLists(query))))
+								this.addEnvelopesMutation({ query, envelopes, addToUnifiedMailboxes })
+								return envelopes
+							}
+							// A structural query's empty list has no tail to
+							// page past and is a clean end-of-results state.
 							logger.debug('no tail to page past, list is empty', { mailboxId, query })
 							return []
 						}
-						const newestFirst = this.getPreference('sort-order') === 'newest'
+						const sortOrder = this.getPreference('sort-order')
 						const nextLocalEnvelopes = pipe(
 							findIndividualMailboxes(this.getMailboxes, mailbox.specialRole),
 							map(getIndivisualLists(query)),
-							combineEnvelopeLists(this.getPreference('sort-order')),
-							filter(where({
-								dateInt: newestFirst ? gt(cursor) : lt(cursor),
-							})),
+							combineEnvelopeLists(sortOrder),
+							filter((envelope) => compareEnvelopeCursors(envelope, cursor, sortOrder) > 0),
 							slice(0, quantity),
 						)
 						// We know the next envelopes based on local data
@@ -1831,11 +2186,7 @@ export default function mainStoreActions() {
 								return true
 							}
 
-							if (this.getPreference('sort-order') === 'newest') {
-								return c >= last(nextEnvelopes).dateInt
-							} else {
-								return c <= last(nextEnvelopes).dateInt
-							}
+							return c !== undefined && compareEnvelopeCursors(c, last(nextEnvelopes), sortOrder) <= 0
 						})
 
 						const mailboxesToFetch = (accounts) => pipe(
@@ -1891,18 +2242,20 @@ export default function mainStoreActions() {
 				}
 				const lastEnvelopeId = last(list)
 				if (typeof lastEnvelopeId === 'undefined') {
-					// A loaded-but-empty list (as opposed to list === undefined
-					// above, never loaded at all) has no tail to page past --
-					// nothing more to load, by definition, same reasoning as
-					// fetchNextFannedOutPage()'s own empty-cursor guard above.
-					// This is the plain-mailbox counterpart of that same
-					// situation: e.g. a search with zero matches, or (via the
-					// priority-inbox fan-out's recursive per-constituent-
-					// mailbox call) one real mailbox with no messages
-					// matching the current query while others still do.
-					// Rejecting here used to turn a completely ordinary
-					// "nothing more here" into a console error on every
-					// affected mailbox on every scroll tick.
+					if (rec && usesProgressiveSearch(query, this.getPreference('sort-order'))) {
+						return fetchEnvelopes(
+							mailbox.accountId,
+							mailboxId,
+							query,
+							undefined,
+							quantity,
+							this.getPreference('sort-order'),
+							this.getPreference('layout-message-view'),
+						).then((envelopes) => {
+							this.addEnvelopesMutation({ query, envelopes, addToUnifiedMailboxes })
+							return envelopes
+						})
+					}
 					logger.debug('mailbox has no envelopes for this query, nothing more to page past', { mailboxId, query })
 					return Promise.resolve([])
 				}
@@ -1919,6 +2272,10 @@ export default function mainStoreActions() {
 					quantity,
 					this.getPreference('sort-order'),
 					this.getPreference('layout-message-view'),
+					undefined,
+					undefined,
+					false,
+					lastEnvelope.databaseId,
 				).then((envelopes) => {
 					logger.debug(`fetched ${envelopes.length} messages for mailbox ${mailboxId}`, {
 						envelopes,

@@ -60,6 +60,7 @@ class MailSearch implements IMailSearch {
 	 * @param int|null $cursor
 	 * @param int|null $limit
 	 * @param string|null $view
+	 * @param bool $prioritySplit return an exact page for each Priority Inbox section
 	 *
 	 * @return Message[]
 	 *
@@ -74,7 +75,9 @@ class MailSearch implements IMailSearch {
 		?int $cursor,
 		?int $limit,
 		?string $userId,
-		?string $view): array {
+		?string $view,
+		bool $prioritySplit = false,
+		?int $cursorId = null): array {
 		// A mailbox sync lock coordinates concurrent *writes* (two sync
 		// attempts racing on the same mailbox). It was never a correctness
 		// requirement for a *read* -- this method only ever reads from the
@@ -102,6 +105,9 @@ class MailSearch implements IMailSearch {
 		$query = $this->filterStringParser->parse($filter);
 		if ($cursor !== null) {
 			$query->setCursor($cursor);
+			if ($cursorId !== null) {
+				$query->setCursorId($cursorId);
+			}
 		}
 		if ($view !== null) {
 			$query->setThreaded($view === self::VIEW_THREADED);
@@ -122,7 +128,7 @@ class MailSearch implements IMailSearch {
 			$account,
 			$mailbox,
 			$this->messageMapper->findByIds($account->getUserId(),
-				$this->getIdsLocally($account, $mailbox, $query, $sortOrder, $limit),
+				$this->getIdsLocally($account, $mailbox, $query, $sortOrder, $limit, $prioritySplit),
 				$sortOrder,
 			),
 			true,
@@ -154,9 +160,9 @@ class MailSearch implements IMailSearch {
 	 *
 	 * @throws ServiceException
 	 */
-	private function getIdsLocally(Account $account, Mailbox $mailbox, SearchQuery $query, string $sortOrder, ?int $limit): array {
+	private function getIdsLocally(Account $account, Mailbox $mailbox, SearchQuery $query, string $sortOrder, ?int $limit, bool $prioritySplit): array {
 		if (empty($query->getBodies())) {
-			return $this->messageMapper->findIdsByQuery($mailbox, $query, $sortOrder, $limit);
+			return $this->messageMapper->findIdsByQuery($mailbox, $query, $sortOrder, $limit, null, false, $prioritySplit);
 		}
 
 		$fromImap = $this->imapSearchProvider->findMatches(
@@ -164,7 +170,7 @@ class MailSearch implements IMailSearch {
 			$mailbox,
 			$query
 		);
-		return $this->messageMapper->findIdsByQuery($mailbox, $query, $sortOrder, $limit, $fromImap);
+		return $this->messageMapper->findIdsByQuery($mailbox, $query, $sortOrder, $limit, $fromImap, false, $prioritySplit);
 	}
 
 	/**

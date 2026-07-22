@@ -9,6 +9,8 @@ declare(strict_types=1);
 
 namespace OCA\Mail\IMAP\Search;
 
+use DateTime;
+use DateTimeZone;
 use Horde_Imap_Client_Data_Format_Exception;
 use Horde_Imap_Client_Exception;
 use Horde_Imap_Client_Search_Query;
@@ -91,7 +93,13 @@ class Provider {
 	private function buildCacheKey(Account $account, Mailbox $mailbox, SearchQuery $searchQuery): string {
 		$bodies = $searchQuery->getBodies();
 		sort($bodies);
-		return 'imap-body-search-' . md5($account->getId() . '-' . $mailbox->getId() . '-' . implode("\x00", $bodies));
+		return 'imap-body-search-' . md5(implode("\x00", [
+			(string)$account->getId(),
+			(string)$mailbox->getId(),
+			$searchQuery->getStart() ?? '',
+			$searchQuery->getEnd() ?? '',
+			...$bodies,
+		]));
 	}
 
 	/**
@@ -121,7 +129,7 @@ class Provider {
 		// build() choose the *_Nonascii string format variants instead.
 		$query->charset('UTF-8', false);
 
-		return array_reduce(
+		$query = array_reduce(
 			$searchQuery->getBodies(),
 			static function (Horde_Imap_Client_Search_Query $query, string $textToken) {
 				$query->text($textToken, true);
@@ -129,5 +137,28 @@ class Provider {
 			},
 			$query
 		);
+
+		// IMAP's portable date predicates have day granularity. Use a UTC
+		// superset of the exact second-level SQL window: SINCE the day that
+		// contains start, and BEFORE the day after the inclusive end. The
+		// local database query applies the original exact timestamps after
+		// the IMAP UID candidates come back, so boundary-day false positives
+		// cannot leak into the response.
+		$utc = new DateTimeZone('UTC');
+		if ($searchQuery->getStart() !== null) {
+			$start = (new DateTime('@' . $searchQuery->getStart()))
+				->setTimezone($utc)
+				->setTime(0, 0);
+			$query->dateSearch($start, Horde_Imap_Client_Search_Query::DATE_SINCE, true);
+		}
+		if ($searchQuery->getEnd() !== null) {
+			$afterEnd = (new DateTime('@' . $searchQuery->getEnd()))
+				->setTimezone($utc)
+				->setTime(0, 0)
+				->modify('+1 day');
+			$query->dateSearch($afterEnd, Horde_Imap_Client_Search_Query::DATE_BEFORE, true);
+		}
+
+		return $query;
 	}
 }

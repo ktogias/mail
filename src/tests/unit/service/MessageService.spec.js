@@ -54,6 +54,54 @@ describe('service/MessageService test suite', () => {
 		})
 	})
 
+	it('requests an exact server-side Priority Inbox split when asked', async () => {
+		generateUrl.mockReturnValueOnce('/generated-url')
+		axios.get.mockResolvedValueOnce({ data: [] })
+
+		await MessageService.fetchEnvelopes(
+			13,
+			21,
+			'subject:needle',
+			undefined,
+			20,
+			'newest',
+			'threaded',
+			undefined,
+			undefined,
+			true,
+		)
+
+		expect(axios.get).toHaveBeenCalledWith('/generated-url', {
+			params: {
+				mailboxId: 21,
+				filter: 'subject:needle',
+				limit: 20,
+				sort: 'newest',
+				view: 'threaded',
+				prioritySplit: true,
+			},
+		})
+	})
+
+	it('sends the database-id tie breaker with a timestamp cursor', async () => {
+		generateUrl.mockReturnValueOnce('/generated-url')
+		axios.get.mockResolvedValueOnce({ data: [] })
+
+		await MessageService.fetchEnvelopes(13, 21, 'subject:needle', 1700000000, 20, 'newest', 'threaded', undefined, undefined, false, 4321)
+
+		expect(axios.get).toHaveBeenCalledWith('/generated-url', {
+			params: {
+				mailboxId: 21,
+				filter: 'subject:needle',
+				cursor: 1700000000,
+				cursorId: 4321,
+				limit: 20,
+				sort: 'newest',
+				view: 'threaded',
+			},
+		})
+	})
+
 	describe('rethrows the original error instead of crashing when a request never receives a response', () => {
 		// Confirmed live: backgrounding the browser tab on Android mid-load
 		// (or any other network failure with no HTTP response at all --

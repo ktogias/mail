@@ -399,8 +399,8 @@ describe('Vuex store actions', () => {
 		// A slow search across many accounts used to fire every
 		// constituent request simultaneously (worst live case: a
 		// priority search saturated the whole FPM pool and every
-		// request 504ed). Mirrors ENVELOPE_FETCH_CONCURRENCY in
-		// actions.js.
+		// request 504ed). Text predicates intentionally use the tighter
+		// TEXT_SEARCH_ENVELOPE_FETCH_CONCURRENCY budget.
 		for (let i = 0; i < 5; i++) {
 			const account = {
 				id: 100 + i,
@@ -439,13 +439,13 @@ describe('Vuex store actions', () => {
 		})
 
 		await vi.waitFor(() => {
-			if (pendingResolvers.length < 3) {
+			if (pendingResolvers.length < 2) {
 				throw new Error(`only ${pendingResolvers.length} constituent fetches have started so far`)
 			}
 		})
 
-		expect(pendingResolvers.length).toBe(3)
-		expect(maxConcurrent).toBe(3)
+		expect(pendingResolvers.length).toBe(2)
+		expect(maxConcurrent).toBe(2)
 
 		// Draining the first wave lets the remaining 2 start without
 		// ever exceeding the cap.
@@ -455,8 +455,202 @@ describe('Vuex store actions', () => {
 		}
 		await fetchPromise
 
-		expect(maxConcurrent).toBe(3)
+		expect(maxConcurrent).toBe(2)
 		expect(MessageService.fetchEnvelopes).toHaveBeenCalledTimes(5)
+	})
+
+	describe('shared Priority/Unified content search', () => {
+		const favoriteQuery = 'subject:needle match:anyof is:starred'
+		const importantQuery = 'subject:needle match:anyof not:starred is:pi-important'
+		const otherQuery = 'subject:needle match:anyof not:starred is:pi-other'
+
+		beforeEach(() => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			for (const [accountId, mailboxId] of [[13, 5], [17, 10]]) {
+				const account = { id: accountId, personalNamespace: '', mailboxes: [] }
+				store.addAccountMutation(account)
+				store.addMailboxMutation({
+					account,
+					mailbox: { id: 'INBOX', name: 'INBOX', databaseId: mailboxId, accountId, specialRole: 'inbox' },
+				})
+			}
+		})
+
+		function searchResults(mailboxId) {
+			return [
+				{
+					databaseId: mailboxId * 100 + 1,
+					mailboxId,
+					dateInt: 300 + mailboxId,
+					threadRootId: `favorite-${mailboxId}`,
+					// The representative itself is not starred; an older
+					// member is. Classification must use the server-provided
+					// thread aggregate, not this row's own flag.
+					flags: { flagged: false, important: false, hasFlaggedInThread: true, hasImportantInThread: false },
+					tags: {},
+				},
+				{
+					databaseId: mailboxId * 100 + 2,
+					mailboxId,
+					dateInt: 200 + mailboxId,
+					threadRootId: `important-${mailboxId}`,
+					flags: { flagged: false, important: false, hasFlaggedInThread: false, hasImportantInThread: true },
+					tags: {},
+				},
+				{
+					databaseId: mailboxId * 100 + 3,
+					mailboxId,
+					dateInt: 100 + mailboxId,
+					threadRootId: `other-${mailboxId}`,
+					flags: { flagged: false, important: false, hasFlaggedInThread: false, hasImportantInThread: false },
+					tags: {},
+				},
+			]
+		}
+
+		it('runs one content query per physical mailbox and classifies the shared result into all three sections', async () => {
+			MessageService.fetchEnvelopes.mockImplementation(async (accountId, mailboxId) => searchResults(mailboxId))
+
+			const [favorites, important, other] = await Promise.all([
+				store.fetchEnvelopes({ mailboxId: UNIFIED_INBOX_ID, query: favoriteQuery }),
+				store.fetchEnvelopes({ mailboxId: UNIFIED_INBOX_ID, query: importantQuery }),
+				store.fetchEnvelopes({ mailboxId: UNIFIED_INBOX_ID, query: otherQuery }),
+			])
+
+			// Two physical INBOXes, one shared wave per exact time window --
+			// still independent of the three visual section consumers.
+			expect(MessageService.fetchEnvelopes).toHaveBeenCalledTimes(4)
+			for (const call of MessageService.fetchEnvelopes.mock.calls) {
+				expect(call[2]).toMatch(/^subject:needle match:anyof start:\d+ end:\d+$/)
+				expect(call[4]).toBe(PAGE_SIZE)
+				expect(call[9]).toBe(true)
+			}
+			expect(favorites.map((envelope) => envelope.databaseId).sort((a, b) => a - b)).toEqual([501, 1001])
+			expect(important.map((envelope) => envelope.databaseId).sort((a, b) => a - b)).toEqual([502, 1002])
+			expect(other.map((envelope) => envelope.databaseId).sort((a, b) => a - b)).toEqual([503, 1003])
+			expect(store.mailboxes[5].envelopeLists[favoriteQuery]).toEqual([501])
+			expect(store.mailboxes[5].envelopeLists[importantQuery]).toEqual([502])
+			expect(store.mailboxes[5].envelopeLists[otherQuery]).toEqual([503])
+			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists[favoriteQuery]).toEqual([1001, 501])
+			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists[importantQuery]).toEqual([1002, 502])
+			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists[otherQuery]).toEqual([1003, 503])
+		})
+
+		it('keeps structural-only section filters on the established independent-query path', async () => {
+			MessageService.fetchEnvelopes.mockResolvedValue([])
+
+			await Promise.all([
+				store.fetchEnvelopes({ mailboxId: UNIFIED_INBOX_ID, query: 'start:1700000000 is:starred' }),
+				store.fetchEnvelopes({ mailboxId: UNIFIED_INBOX_ID, query: 'start:1700000000 is:pi-important' }),
+			])
+
+			expect(MessageService.fetchEnvelopes).toHaveBeenCalledTimes(4)
+			const queries = MessageService.fetchEnvelopes.mock.calls.map((call) => call[2]).sort()
+			expect(queries).toEqual([
+				'start:1700000000 is:pi-important',
+				'start:1700000000 is:pi-important',
+				'start:1700000000 is:starred',
+				'start:1700000000 is:starred',
+			])
+		})
+
+		it('does not cancel the shared physical search while another section still needs it', async () => {
+			// Use one physical mailbox to make the single underlying request
+			// and its signal unambiguous.
+			store.accountsUnmapped[17].mailboxes = []
+			let resolveSearch
+			let physicalSignal
+			let physicalCalls = 0
+			MessageService.fetchEnvelopes.mockImplementation((accountId, mailboxId, query, cursor, limit, sort, view, cacheBuster, signal) => {
+				physicalCalls++
+				if (physicalCalls === 1) {
+					physicalSignal = signal
+					return new Promise((resolve) => {
+						resolveSearch = resolve
+					})
+				}
+				return Promise.resolve([])
+			})
+			const favoriteController = new AbortController()
+			const importantController = new AbortController()
+
+			const favorite = store.fetchEnvelopes({ mailboxId: UNIFIED_INBOX_ID, query: favoriteQuery, signal: favoriteController.signal })
+			const favoriteRejected = expect(favorite).rejects.toThrow('superseded')
+			const important = store.fetchEnvelopes({ mailboxId: UNIFIED_INBOX_ID, query: importantQuery, signal: importantController.signal })
+			favoriteController.abort()
+
+			await favoriteRejected
+			expect(physicalSignal.aborted).toBe(false)
+			resolveSearch(searchResults(5))
+			await expect(important).resolves.toHaveLength(1)
+			expect(MessageService.fetchEnvelopes).toHaveBeenCalledTimes(2)
+		})
+	})
+
+	describe('progressive newest-first text search', () => {
+		let dateNowSpy
+
+		beforeEach(() => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			store.preferences['sort-order'] = 'newest'
+			store.preferences['layout-message-view'] = 'threaded'
+			const account = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: { id: 'INBOX', name: 'INBOX', databaseId: 21, accountId: 13, specialRole: 'inbox' },
+			})
+			dateNowSpy = vi.spyOn(Date, 'now').mockReturnValue(2_000_000_000_000)
+		})
+
+		afterEach(() => dateNowSpy.mockRestore())
+
+		it('returns recent matches first and extends exactly to 180 days when the page is sparse', async () => {
+			const recent = mockEnvelope(21, 2)
+			const older = mockEnvelope(21, 1)
+			MessageService.fetchEnvelopes
+				.mockResolvedValueOnce([recent])
+				.mockResolvedValueOnce([older])
+
+			const result = await store.fetchEnvelopes({ mailboxId: 21, query: 'subject:needle' })
+
+			expect(result.map((envelope) => envelope.databaseId)).toEqual([recent.databaseId, older.databaseId])
+			expect(MessageService.fetchEnvelopes.mock.calls.map((call) => call[2])).toEqual([
+				'subject:needle start:1997408000 end:2000000000',
+				'subject:needle start:1984448000 end:1997407999',
+			])
+			expect(store.mailboxes[21].envelopeLists['subject:needle']).toEqual([recent.databaseId, older.databaseId])
+		})
+
+		it('does not touch the older window after a full recent page', async () => {
+			MessageService.fetchEnvelopes.mockResolvedValueOnce(Array.from({ length: PAGE_SIZE }, (_, index) => mockEnvelope(21, index + 1)))
+
+			const result = await store.fetchEnvelopes({ mailboxId: 21, query: 'from:needle' })
+
+			expect(result).toHaveLength(PAGE_SIZE)
+			expect(MessageService.fetchEnvelopes).toHaveBeenCalledTimes(1)
+			expect(MessageService.fetchEnvelopes.mock.calls[0][2]).toBe('from:needle start:1997408000 end:2000000000')
+		})
+
+		it('preserves an explicit user date bound as one exact request', async () => {
+			MessageService.fetchEnvelopes.mockResolvedValueOnce([])
+
+			await store.fetchEnvelopes({ mailboxId: 21, query: 'subject:needle start:1700000000' })
+
+			expect(MessageService.fetchEnvelopes).toHaveBeenCalledTimes(1)
+			expect(MessageService.fetchEnvelopes.mock.calls[0][2]).toBe('subject:needle start:1700000000')
+		})
+
+		it('continues into full history asynchronously when both foreground windows are empty', async () => {
+			const deepMatch = mockEnvelope(21, 1)
+			MessageService.fetchEnvelopes.mockImplementation(async (accountId, mailboxId, query) => query === 'body:needle' ? [deepMatch] : [])
+
+			await expect(store.fetchEnvelopes({ mailboxId: 21, query: 'body:needle' })).resolves.toEqual([])
+			await expect(store.fetchNextEnvelopes({ mailboxId: 21, query: 'body:needle', quantity: PAGE_SIZE })).resolves.toEqual([deepMatch])
+
+			expect(MessageService.fetchEnvelopes).toHaveBeenCalledTimes(3)
+			expect(MessageService.fetchEnvelopes.mock.calls[2][2]).toBe('body:needle')
+		})
 	})
 
 	describe('fetchEnvelopes marks its list as in-flight', () => {
@@ -1815,7 +2009,7 @@ describe('Vuex store actions', () => {
 
 		expect(MessageService.fetchEnvelopes).toHaveBeenCalledTimes(1)
 		expect(MessageService.fetchEnvelopes)
-			.toHaveBeenNthCalledWith(1, 13, 11, undefined, 300000, PAGE_SIZE, 'newest', 'threaded')
+			.toHaveBeenNthCalledWith(1, 13, 11, undefined, 300000, PAGE_SIZE, 'newest', 'threaded', undefined, undefined, false, 11030)
 		expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists[''].toSorted()).toEqual([
 			// Initial envelopes
 			...msgs1.map(mockEnvelope(11)),
@@ -1974,9 +2168,9 @@ describe('Vuex store actions', () => {
 
 		expect(MessageService.fetchEnvelopes).toHaveBeenCalledTimes(2)
 		expect(MessageService.fetchEnvelopes)
-			.toHaveBeenNthCalledWith(1, 13, 11, undefined, 300000, PAGE_SIZE, 'newest', 'threaded')
+			.toHaveBeenNthCalledWith(1, 13, 11, undefined, 300000, PAGE_SIZE, 'newest', 'threaded', undefined, undefined, false, 11030)
 		expect(MessageService.fetchEnvelopes)
-			.toHaveBeenNthCalledWith(2, 26, 21, undefined, 600000, PAGE_SIZE, 'newest', 'threaded')
+			.toHaveBeenNthCalledWith(2, 26, 21, undefined, 600000, PAGE_SIZE, 'newest', 'threaded', undefined, undefined, false, 21060)
 		expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists[''].toSorted()).toEqual([
 			// Initial envelopes
 			...page1.map(mockEnvelope(11)),

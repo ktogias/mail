@@ -147,6 +147,55 @@ class ProviderTest extends TestCase {
 		self::assertSame($capturedKeys[0], $capturedKeys[1]);
 	}
 
+	public function testDateWindowsHaveDistinctCacheKeys(): void {
+		$account = $this->account(13);
+		$mailbox = $this->mailbox(149, 'INBOX');
+		$imapClient = $this->createMock(Horde_Imap_Client_Socket::class);
+		$this->clientFactory->method('getClient')->willReturn($imapClient);
+		$imapClient->expects(self::exactly(2))
+			->method('search')
+			->willReturn(['match' => (object)['ids' => []]]);
+
+		$store = [];
+		$this->cache->method('get')->willReturnCallback(function ($key) use (&$store) {
+			return $store[$key] ?? null;
+		});
+		$this->cache->method('set')->willReturnCallback(function ($key, $value) use (&$store) {
+			$store[$key] = $value;
+			return true;
+		});
+		$recent = $this->searchQuery('needle');
+		$recent->setStart('1700000000');
+		$recent->setEnd('1702592000');
+		$older = $this->searchQuery('needle');
+		$older->setStart('1690000000');
+		$older->setEnd('1699999999');
+
+		$this->provider->findMatches($account, $mailbox, $recent);
+		$this->provider->findMatches($account, $mailbox, $older);
+	}
+
+	public function testBodySearchCarriesDateWindowToImap(): void {
+		$account = $this->account(13);
+		$mailbox = $this->mailbox(149, 'INBOX');
+		$imapClient = $this->createMock(Horde_Imap_Client_Socket::class);
+		$this->clientFactory->method('getClient')->willReturn($imapClient);
+		$built = null;
+		$imapClient->method('search')->willReturnCallback(function ($mailboxName, $query) use (&$built) {
+			$built = (string)$query;
+			return ['match' => (object)['ids' => []]];
+		});
+		$query = $this->searchQuery('needle');
+		// 14-Nov-2023 22:13 UTC through 15-Nov-2023 22:13 UTC.
+		$query->setStart('1700000000');
+		$query->setEnd('1700086400');
+
+		$this->provider->findMatches($account, $mailbox, $query);
+
+		self::assertStringContainsString('SENTSINCE 14-Nov-2023', $built);
+		self::assertStringContainsString('SENTBEFORE 16-Nov-2023', $built);
+	}
+
 	/**
 	 * Confirmed live: a Greek search term ("Ισηοπ") failed instantly
 	 * (well under a second, no network I/O at all) with

@@ -773,6 +773,34 @@ class MessageMapperTest extends TestCase {
 		$this->assertEquals([10, 9, 8], $first);
 	}
 
+	public function testFindIdsByQueryCompositeCursorDoesNotSkipSentAtTies(): void {
+		$mailbox = new Mailbox();
+		$mailbox->setId(22);
+		$qb = $this->db->getQueryBuilder();
+		foreach (range(1, 5) as $id) {
+			$qb->insert($this->mapper->getTableName())->values([
+				'id' => $id,
+				'uid' => $qb->createNamedParameter(2000 + $id, IQueryBuilder::PARAM_INT),
+				'message_id' => $qb->createNamedParameter("<cursor-tie{$id}@example.com>"),
+				'mailbox_id' => $qb->createNamedParameter($mailbox->getId(), IQueryBuilder::PARAM_INT),
+				'subject' => $qb->createNamedParameter("CURSOR $id"),
+				'sent_at' => $qb->createNamedParameter(1700000000, IQueryBuilder::PARAM_INT),
+			])->executeStatement();
+		}
+
+		$firstQuery = new SearchQuery();
+		self::assertSame([5, 4], $this->mapper->findIdsByQuery($mailbox, $firstQuery, 'DESC', 2));
+		$secondQuery = new SearchQuery();
+		$secondQuery->setCursor(1700000000);
+		$secondQuery->setCursorId(4);
+		self::assertSame([3, 2, 1], $this->mapper->findIdsByQuery($mailbox, $secondQuery, 'DESC', 3));
+
+		$oldestQuery = new SearchQuery();
+		$oldestQuery->setCursor(1700000000);
+		$oldestQuery->setCursorId(2);
+		self::assertSame([3, 4, 5], $this->mapper->findIdsByQuery($mailbox, $oldestQuery, 'ASC', 3));
+	}
+
 	/**
 	 * A thread's newest message represents the whole thread in threaded
 	 * view (see the m2 self-join in findIdsByQuery()). An unread filter
@@ -969,6 +997,62 @@ class MessageMapperTest extends TestCase {
 		$importantQuery = new SearchQuery();
 		$importantQuery->addFlag(Flag::is(Flag::IMPORTANT));
 		self::assertEquals([21], $this->mapper->findIdsByQuery($mailbox, $importantQuery, $sortOrder, null, null));
+	}
+
+	/**
+	 * A bounded generic over-fetch cannot guarantee a page for a rare
+	 * section: the first favorite can be older than any fixed shared limit.
+	 * The priority split ranks the one content-match relation per section,
+	 * so the result remains exact without evaluating the text predicate three
+	 * times. The favorite thread also proves classification is thread-wide.
+	 */
+	public function testFindIdsByQueryPrioritySplitReturnsAnExactPagePerSection(): void {
+		$mailbox = new Mailbox();
+		$mailbox->setId(2);
+		$qb = $this->db->getQueryBuilder();
+		$rows = [
+			// Favorite thread: only its older member is flagged. The newest
+			// representative (111) must still rank in Favorites.
+			[110, 510, 100, true, false, 'priority-favorite'],
+			[111, 511, 200, false, false, 'priority-favorite'],
+			// Second favorite and two important messages.
+			[112, 512, 150, true, false, null],
+			[120, 520, 300, false, true, null],
+			[121, 521, 400, false, true, null],
+		];
+		// Seven newer Other messages ensure that the rare favorites lie
+		// beyond a naive 3 * page-size generic prefix when page size is 2.
+		foreach (range(130, 136) as $id) {
+			$rows[] = [$id, 500 + $id, 500 + (($id - 130) * 100), false, false, null];
+		}
+
+		foreach ($rows as [$id, $uid, $sentAt, $flagged, $important, $threadRootId]) {
+			$values = [
+				'id' => $qb->createNamedParameter($id, IQueryBuilder::PARAM_INT),
+				'uid' => $qb->createNamedParameter($uid, IQueryBuilder::PARAM_INT),
+				'message_id' => $qb->createNamedParameter("<priority-$id@example.test>"),
+				'mailbox_id' => $qb->createNamedParameter(2, IQueryBuilder::PARAM_INT),
+				'subject' => $qb->createNamedParameter('Priority split needle'),
+				'sent_at' => $qb->createNamedParameter($sentAt, IQueryBuilder::PARAM_INT),
+				'flag_flagged' => $qb->createNamedParameter($flagged, IQueryBuilder::PARAM_BOOL),
+				'flag_important' => $qb->createNamedParameter($important, IQueryBuilder::PARAM_BOOL),
+			];
+			if ($threadRootId !== null) {
+				$values['thread_root_id'] = $qb->createNamedParameter($threadRootId);
+			}
+			$qb->insert($this->mapper->getTableName())->values($values)->executeStatement();
+		}
+
+		$query = new SearchQuery();
+		$query->addSubject('needle');
+
+		$expected = [136, 135, 121, 120, 111, 112];
+		self::assertSame($expected, $this->mapper->findIdsByQuery($mailbox, $query, 'DESC', 2, null, false, true));
+		// Body searches supply UID hits in bounded parameter chunks. A
+		// subject OR body query repeats the subject matches in every chunk;
+		// the final merge must de-duplicate them and retain the same exact
+		// per-section ordering.
+		self::assertSame($expected, $this->mapper->findIdsByQuery($mailbox, $query, 'DESC', 2, range(1, 1001), false, true));
 	}
 
 	/**
@@ -1253,11 +1337,10 @@ class MessageMapperTest extends TestCase {
 	/**
 	 * findByIds() (used to load full envelopes, e.g. for a folder listing)
 	 * must annotate each loaded message with whether ITS thread contains
-	 * any unseen message -- not just whether the loaded message itself is
-	 * unseen -- so the frontend can show a thread's row as unread even when
-	 * only an older message (not the one actually displayed) is unseen.
+	 * any unseen, flagged, or important message -- not just the flags of the
+	 * one row displayed for that thread.
 	 */
-	public function testFindByIdsAnnotatesHasUnseenInThread(): void {
+	public function testFindByIdsAnnotatesThreadWideFlags(): void {
 		$qb = $this->db->getQueryBuilder();
 
 		$values = [
@@ -1271,6 +1354,8 @@ class MessageMapperTest extends TestCase {
 				'sent_at' => $qb->createNamedParameter(1000, IQueryBuilder::PARAM_INT),
 				'thread_root_id' => $qb->createNamedParameter('thread-a'),
 				'flag_seen' => $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL),
+				'flag_flagged' => $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL),
+				'flag_important' => $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL),
 			],
 			[
 				'id' => 21,
@@ -1281,6 +1366,8 @@ class MessageMapperTest extends TestCase {
 				'sent_at' => $qb->createNamedParameter(2000, IQueryBuilder::PARAM_INT),
 				'thread_root_id' => $qb->createNamedParameter('thread-a'),
 				'flag_seen' => $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL),
+				'flag_flagged' => $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL),
+				'flag_important' => $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL),
 			],
 			// Standalone, unseen -- must annotate itself as unseen.
 			[
@@ -1291,6 +1378,8 @@ class MessageMapperTest extends TestCase {
 				'subject' => $qb->createNamedParameter('Standalone'),
 				'sent_at' => $qb->createNamedParameter(3000, IQueryBuilder::PARAM_INT),
 				'flag_seen' => $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL),
+				'flag_flagged' => $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL),
+				'flag_important' => $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL),
 			],
 			// Thread C: both seen -- must not be annotated as unseen.
 			[
@@ -1302,6 +1391,8 @@ class MessageMapperTest extends TestCase {
 				'sent_at' => $qb->createNamedParameter(4000, IQueryBuilder::PARAM_INT),
 				'thread_root_id' => $qb->createNamedParameter('thread-c'),
 				'flag_seen' => $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL),
+				'flag_flagged' => $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL),
+				'flag_important' => $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL),
 			],
 			[
 				'id' => 24,
@@ -1312,6 +1403,8 @@ class MessageMapperTest extends TestCase {
 				'sent_at' => $qb->createNamedParameter(5000, IQueryBuilder::PARAM_INT),
 				'thread_root_id' => $qb->createNamedParameter('thread-c'),
 				'flag_seen' => $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL),
+				'flag_flagged' => $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL),
+				'flag_important' => $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL),
 			],
 		];
 
@@ -1322,8 +1415,12 @@ class MessageMapperTest extends TestCase {
 
 		$messages = $this->mapper->findByIds('test-user', [20, 21, 22, 23, 24], 'ASC');
 		$hasUnseenById = [];
+		$hasFlaggedById = [];
+		$hasImportantById = [];
 		foreach ($messages as $message) {
 			$hasUnseenById[$message->getId()] = $message->getHasUnseenInThread();
+			$hasFlaggedById[$message->getId()] = $message->getHasFlaggedInThread();
+			$hasImportantById[$message->getId()] = $message->getHasImportantInThread();
 		}
 
 		self::assertTrue($hasUnseenById[20], 'the older, actually-unseen message in thread A');
@@ -1331,6 +1428,14 @@ class MessageMapperTest extends TestCase {
 		self::assertTrue($hasUnseenById[22], 'the standalone unseen message');
 		self::assertFalse($hasUnseenById[23], "thread C's older message -- thread C has no unseen message");
 		self::assertFalse($hasUnseenById[24], "thread C's newest message -- thread C has no unseen message");
+		self::assertTrue($hasFlaggedById[20]);
+		self::assertTrue($hasFlaggedById[21], "thread A's newest reply inherits the older member's favorite status");
+		self::assertTrue($hasImportantById[20], "thread A's older message inherits the newest member's importance");
+		self::assertTrue($hasImportantById[21]);
+		self::assertFalse($hasFlaggedById[22]);
+		self::assertFalse($hasImportantById[22]);
+		self::assertFalse($hasFlaggedById[23]);
+		self::assertFalse($hasImportantById[24]);
 	}
 
 	public function testDeleteByUid(): void {

@@ -145,7 +145,8 @@ class MicrosoftIntegration {
 
 	/**
 	 * @param bool $force See GoogleIntegration::refresh()'s $force doc
-	 *   comment -- same reasoning, same fix, for Microsoft accounts.
+	 *                    comment -- same expiry bypass and single-flight rule for
+	 *                    Microsoft accounts.
 	 */
 	public function refresh(Account $account, bool $force = false): Account {
 		$oauthRefreshToken = $account->getMailAccount()->getOauthRefreshToken();
@@ -165,7 +166,12 @@ class MicrosoftIntegration {
 		$lockCache = $this->cacheFactory->createDistributed('mail_oauth_refresh_lock');
 		$lockKey = 'microsoft_account_' . $account->getId();
 		$gotLock = !($lockCache instanceof IMemcache) || $lockCache->add($lockKey, true, self::REFRESH_LOCK_TTL);
-		if (!$gotLock && !$force) {
+		if (!$gotLock) {
+			if ($force) {
+				$this->logger->info('Skipped forced Microsoft OAuth refresh because another request owns the account lock', [
+					'accountId' => $account->getId(),
+				]);
+			}
 			return $account;
 		}
 

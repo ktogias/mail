@@ -189,6 +189,54 @@ class MailSearchTest extends TestCase {
 		$this->assertCount(2, $messages);
 	}
 
+	public function testFindMessagesRequestsAnExactPrioritySplit(): void {
+		$account = $this->createMock(Account::class);
+		$account->method('getUserId')->willReturn('admin');
+		$mailbox = new Mailbox();
+		$query = new SearchQuery();
+		$query->addSubject('needle');
+		$this->filterStringParser->expects($this->once())
+			->method('parse')
+			->with('subject:needle')
+			->willReturn($query);
+		$this->messageMapper->expects($this->once())
+			->method('findIdsByQuery')
+			->with($mailbox, $query, 'DESC', 20, null, false, true)
+			->willReturn([]);
+		$this->previewEnhancer->expects($this->once())
+			->method('process')
+			->willReturnArgument(2);
+
+		$messages = $this->search->findMessages(
+			$account,
+			$mailbox,
+			'DESC',
+			'subject:needle',
+			null,
+			20,
+			'admin',
+			'threaded',
+			true,
+		);
+
+		self::assertSame([], $messages);
+	}
+
+	public function testFindMessagesSetsCompositeCursor(): void {
+		$account = $this->createMock(Account::class);
+		$account->method('getUserId')->willReturn('admin');
+		$mailbox = new Mailbox();
+		$query = new SearchQuery();
+		$this->filterStringParser->method('parse')->willReturn($query);
+		$this->messageMapper->expects($this->once())
+			->method('findIdsByQuery')
+			->with($mailbox, self::callback(static fn (SearchQuery $actual): bool => $actual->getCursor() === 1700000000 && $actual->getCursorId() === 4321), 'DESC', 20, null, false, false)
+			->willReturn([]);
+		$this->previewEnhancer->method('process')->willReturnArgument(2);
+
+		$this->search->findMessages($account, $mailbox, 'DESC', null, 1700000000, 20, 'admin', 'threaded', false, 4321);
+	}
+
 	public function testFindText() {
 		$account = $this->createMock(Account::class);
 		$account->expects($this->once())

@@ -126,6 +126,20 @@ class GoogleIntegrationTest extends TestCase {
 		self::assertSame('encrypted-old-access-token', $result->getMailAccount()->getOauthAccessToken());
 	}
 
+	public function testForcedRefreshDoesNotBypassAnotherRequestLock(): void {
+		$this->timeFactory->method('getTime')->willReturn(1000);
+		$this->lockCache->expects(self::once())
+			->method('add')
+			->with('google_account_13', true, 30)
+			->willReturn(false);
+
+		$this->clientService->expects(self::never())->method('newClient');
+
+		$result = $this->integration->refresh($this->accountAboutToExpire(), true);
+
+		self::assertSame('encrypted-old-access-token', $result->getMailAccount()->getOauthAccessToken());
+	}
+
 	public function testDoesNotEvenAttemptTheLockWhenTheTokenIsNotNearExpiry(): void {
 		$this->timeFactory->method('getTime')->willReturn(1000);
 		$mailAccount = new MailAccount();

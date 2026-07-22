@@ -15,12 +15,14 @@ use OCA\Mail\Account;
 use OCA\Mail\Db\MailAccount;
 use OCA\Mail\Db\MailAccountMapper;
 use OCA\Mail\IMAP\HordeImapClient;
+use OCA\Mail\IMAP\ImapConnectionSemaphore;
 use OCA\Mail\Integration\GoogleIntegration;
 use OCA\Mail\Integration\MicrosoftIntegration;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\IMemcache;
 use OCP\Security\ICrypto;
 use PHPUnit\Framework\MockObject\MockObject;
+use Psr\Log\LoggerInterface;
 
 /**
  * Testable subclass that stubs out the real IMAP connection. $succeeds
@@ -323,7 +325,89 @@ class HordeImapClientTest extends TestCase {
 		$mailAccount->setInboundHost('imap.gmail.com');
 		$mailAccount->setAuthMethod('xoauth2');
 		$mailAccount->setOauthAccessToken('encrypted-old-access-token');
+		$mailAccount->setOauthTokenTtl($this->now + 10 * 60);
 		return new Account($mailAccount);
+	}
+
+	public function testConcurrencyLimitFailsBeforeImapAndDoesNotCountAsAuthFailure(): void {
+		$occupier = new ImapConnectionSemaphore($this->cache, 'account-concurrency', 1);
+		$occupier->acquire();
+		$this->client->enableConnectionSemaphore(new ImapConnectionSemaphore($this->cache, 'account-concurrency', 1));
+
+		try {
+			$this->client->attemptLogin();
+			self::fail('expected the concurrency-limited attempt to throw');
+		} catch (Horde_Imap_Client_Exception $e) {
+			self::assertSame(Horde_Imap_Client_Exception::SERVER_CONNECT, $e->getCode());
+			self::assertSame('IMAP account concurrency limit reached', $e->getMessage());
+		}
+
+		self::assertSame(0, $this->client->imapLoginCalls);
+		self::assertNull($this->cache->get('testhash_failures'));
+	}
+
+	public function testFailedLoginReleasesItsConcurrencySlot(): void {
+		$this->client->enableConnectionSemaphore(new ImapConnectionSemaphore($this->cache, 'account-concurrency', 1));
+		$this->client->succeeds = false;
+
+		try {
+			$this->client->attemptLogin();
+		} catch (Horde_Imap_Client_Exception) {
+			// Expected auth rejection.
+		}
+		$nextConnection = new ImapConnectionSemaphore($this->cache, 'account-concurrency', 1);
+
+		self::assertTrue($nextConnection->acquire());
+	}
+
+	public function testSuccessfulLoginHoldsItsSlotUntilLogout(): void {
+		$this->client->enableConnectionSemaphore(new ImapConnectionSemaphore($this->cache, 'account-concurrency', 1));
+		$this->client->succeeds = true;
+		$this->client->attemptLogin();
+		$nextConnection = new ImapConnectionSemaphore($this->cache, 'account-concurrency', 1);
+
+		self::assertFalse($nextConnection->acquire());
+
+		$this->client->logout();
+
+		self::assertTrue($nextConnection->acquire());
+	}
+
+	public function testAuthTelemetryContainsOnlyWhitelistedMetadata(): void {
+		$account = $this->googleAccount();
+		$googleIntegration = $this->createMock(GoogleIntegration::class);
+		$microsoftIntegration = $this->createMock(MicrosoftIntegration::class);
+		$mailAccountMapper = $this->createMock(MailAccountMapper::class);
+		$crypto = $this->createMock(ICrypto::class);
+		$logger = $this->createMock(LoggerInterface::class);
+		$this->client->enableAuthRetry($account, $googleIntegration, $microsoftIntegration, $mailAccountMapper, $crypto);
+		$this->client->enableAuthTelemetry($logger);
+		$this->client->succeeds = false;
+		$googleIntegration->method('isGoogleOauthAccount')->willReturn(false);
+		$microsoftIntegration->method('isMicrosoftOauthAccount')->willReturn(false);
+		$logger->expects(self::once())
+			->method('warning')
+			->with(
+				'IMAP authentication rejected for account {accountId}',
+				self::callback(function (array $context): bool {
+					self::assertSame(13, $context['accountId']);
+					self::assertSame('imap.gmail.com', $context['host']);
+					self::assertSame('xoauth2', $context['authMethod']);
+					self::assertSame('initial', $context['retryPhase']);
+					self::assertSame('5-30m', $context['tokenTtlBucket']);
+					self::assertArrayNotHasKey('exception', $context);
+					$serialized = json_encode($context, JSON_THROW_ON_ERROR);
+					self::assertStringNotContainsString('ktogias@gmail.com', $serialized);
+					self::assertStringNotContainsString('encrypted-old-access-token', $serialized);
+					return true;
+				}),
+			);
+
+		try {
+			$this->client->attemptLogin();
+		} catch (Horde_Imap_Client_Exception) {
+			// Expected auth rejection.
+		}
 	}
 
 	/**

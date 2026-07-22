@@ -25,11 +25,15 @@ use OCP\ICacheFactory;
 use OCP\IConfig;
 use OCP\IMemcache;
 use OCP\Security\ICrypto;
+use Psr\Log\LoggerInterface;
 use function hash;
 use function implode;
-use function json_encode;
+use function min;
 
 class IMAPClientFactory {
+	private const DEFAULT_ACCOUNT_CONCURRENCY = 3;
+	private const MAX_ACCOUNT_CONCURRENCY = 10;
+
 	/** @var array<string, int> */
 	private array $loginCounts = [];
 
@@ -57,6 +61,7 @@ class IMAPClientFactory {
 		private GoogleIntegration $googleIntegration,
 		private MicrosoftIntegration $microsoftIntegration,
 		private MailAccountMapper $mailAccountMapper,
+		private LoggerInterface $logger,
 	) {
 		$this->crypto = $crypto;
 		$this->config = $config;
@@ -125,14 +130,7 @@ class IMAPClientFactory {
 				$decryptedAccessToken,
 			);
 		}
-		$paramHash = hash(
-			'sha512',
-			implode('-', [
-				$this->config->getSystemValueString('secret'),
-				$account->getId(),
-				json_encode($params)
-			]),
-		);
+		$rateLimiterHash = $this->buildRateLimiterHash($account);
 		if ($useCache) {
 			$params['cache'] = [
 				'backend' => $this->hordeCacheFactory->newCache($account),
@@ -147,7 +145,20 @@ class IMAPClientFactory {
 
 		$rateLimitingCache = $this->cacheFactory->createDistributed('mail_imap_ratelimit');
 		if ($rateLimitingCache instanceof IMemcache) {
-			$client->enableRateLimiter($rateLimitingCache, $paramHash, $this->timeFactory);
+			$client->enableRateLimiter($rateLimitingCache, $rateLimiterHash, $this->timeFactory);
+		}
+
+		$accountConcurrency = $this->config->getSystemValueInt(
+			'app.mail.imap.account-concurrency',
+			self::DEFAULT_ACCOUNT_CONCURRENCY,
+		);
+		$concurrencyCache = $this->cacheFactory->createDistributed('mail_imap_concurrency');
+		if ($accountConcurrency > 0 && $concurrencyCache instanceof IMemcache) {
+			$client->enableConnectionSemaphore(new ImapConnectionSemaphore(
+				$concurrencyCache,
+				$rateLimiterHash,
+				min($accountConcurrency, self::MAX_ACCOUNT_CONCURRENCY),
+			));
 		}
 
 		// Lets _login() force a real token refresh and retry once, itself,
@@ -155,8 +166,36 @@ class IMAPClientFactory {
 		// enableAuthRetry()'s own comment. Wired unconditionally: the
 		// underlying logic already no-ops cleanly for a non-OAuth account.
 		$client->enableAuthRetry($account, $this->googleIntegration, $this->microsoftIntegration, $this->mailAccountMapper, $this->crypto);
+		$client->enableAuthTelemetry($this->logger);
 
 		return $client;
+	}
+
+	/**
+	 * Build one stable circuit-breaker identity for an IMAP endpoint.
+	 *
+	 * The previous hash included the full Horde parameter array, including
+	 * the decrypted password/access token. Every OAuth refresh therefore
+	 * moved the same account to a fresh failure bucket and discarded its
+	 * backoff history. Credentials are deliberately excluded: a successful
+	 * login clears the stable streak, while repeated failures must accumulate
+	 * across token rotations.
+	 */
+	private function buildRateLimiterHash(Account $account): string {
+		$mailAccount = $account->getMailAccount();
+		return hash(
+			'sha512',
+			implode("\0", [
+				'imap-rate-limit-v2',
+				$this->config->getSystemValueString('secret'),
+				(string)$account->getId(),
+				$mailAccount->getInboundHost(),
+				(string)$mailAccount->getInboundPort(),
+				$mailAccount->getInboundSslMode(),
+				$mailAccount->getInboundUser(),
+				$mailAccount->getAuthMethod(),
+			]),
+		);
 	}
 
 	public function recordLogin(string $host): void {

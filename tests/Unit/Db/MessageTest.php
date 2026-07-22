@@ -154,4 +154,15 @@ class MessageTest extends TestCase {
 
 		$this->assertTrue($message->jsonSerialize()['fetchAvatarFromClient']);
 	}
+
+	public function testSerializesThreadWidePriorityFlags(): void {
+		$message = new Message();
+		$message->setHasFlaggedInThread(true);
+		$message->setHasImportantInThread(true);
+
+		$flags = $message->jsonSerialize()['flags'];
+
+		$this->assertTrue($flags['hasFlaggedInThread']);
+		$this->assertTrue($flags['hasImportantInThread']);
+	}
 }

@@ -30,6 +30,7 @@ use OCP\IConfig;
 use OCP\Security\ICrypto;
 use OCP\Server;
 use PHPUnit\Framework\MockObject\MockObject;
+use Psr\Log\LoggerInterface;
 use function ltrim;
 
 class IMAPClientFactoryTest extends TestCase {
@@ -50,6 +51,7 @@ class IMAPClientFactoryTest extends TestCase {
 	private GoogleIntegration|MockObject $googleIntegration;
 	private MicrosoftIntegration|MockObject $microsoftIntegration;
 	private MailAccountMapper|MockObject $mailAccountMapper;
+	private LoggerInterface|MockObject $logger;
 
 	protected function setUp(): void {
 		parent::setUp();
@@ -63,6 +65,7 @@ class IMAPClientFactoryTest extends TestCase {
 		$this->googleIntegration = $this->createMock(GoogleIntegration::class);
 		$this->microsoftIntegration = $this->createMock(MicrosoftIntegration::class);
 		$this->mailAccountMapper = $this->createMock(MailAccountMapper::class);
+		$this->logger = $this->createMock(LoggerInterface::class);
 
 		$this->factory = new IMAPClientFactory(
 			$this->crypto,
@@ -74,6 +77,7 @@ class IMAPClientFactoryTest extends TestCase {
 			$this->googleIntegration,
 			$this->microsoftIntegration,
 			$this->mailAccountMapper,
+			$this->logger,
 		);
 	}
 

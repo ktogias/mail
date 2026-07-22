@@ -20,7 +20,7 @@ namespace OCA\Mail;
  *     bcc: list<array{label: string, email: string}>,
  *     subject: string,
  *     dateInt: int<0, max>,
- *     flags: array{seen: bool, flagged: bool, answered: bool, deleted: bool, draft: bool, forwarded: bool, hasAttachments: bool, mdnsent: bool, important: bool},
+ *     flags: array{seen: bool, flagged: bool, answered: bool, deleted: bool, draft: bool, forwarded: bool, hasAttachments: bool, mdnsent: bool, important: bool, hasUnseenInThread: bool, hasFlaggedInThread: bool, hasImportantInThread: bool},
  *     hasHtmlBody?: bool,
  *     body?: string,
  *     dispositionNotificationTo: string,

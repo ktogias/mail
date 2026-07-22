@@ -39,11 +39,13 @@ use function array_map;
 use function array_merge;
 use function array_udiff;
 use function get_class;
+use function in_array;
 use function ltrim;
 use function mb_convert_encoding;
 use function mb_strcut;
 use function OCA\Mail\array_flat_map;
 use function strlen;
+use function usort;
 
 /**
  * @template-extends QBMapper<Message>
@@ -1116,7 +1118,7 @@ class MessageMapper extends QBMapper {
 	 *                            the next background tick (confirmed
 	 *                            live).
 	 */
-	public function findIdsByQuery(Mailbox $mailbox, SearchQuery $query, string $sortOrder, ?int $limit, ?array $uids = null, bool $uidsRestrict = false): array {
+	public function findIdsByQuery(Mailbox $mailbox, SearchQuery $query, string $sortOrder, ?int $limit, ?array $uids = null, bool $uidsRestrict = false, bool $prioritySplit = false): array {
 		$qb = $this->db->getQueryBuilder();
 
 		// No DISTINCT needed: recipient matches are EXISTS probes (see
@@ -1229,13 +1231,32 @@ class MessageMapper extends QBMapper {
 		}
 
 		if ($query->getCursor() !== null && $sortOrder === IMailSearch::ORDER_NEWEST_FIRST) {
-			$select->andWhere(
-				$qb->expr()->lt('m.sent_at', $qb->createNamedParameter($query->getCursor(), IQueryBuilder::PARAM_INT))
-			);
+			$cursorTime = $qb->createNamedParameter($query->getCursor(), IQueryBuilder::PARAM_INT);
+			if ($query->getCursorId() === null) {
+				// Backwards-compatible timestamp-only cursor for older clients.
+				$select->andWhere($qb->expr()->lt('m.sent_at', $cursorTime));
+			} else {
+				$select->andWhere($qb->expr()->orX(
+					$qb->expr()->lt('m.sent_at', $cursorTime),
+					$qb->expr()->andX(
+						$qb->expr()->eq('m.sent_at', $cursorTime),
+						$qb->expr()->lt('m.id', $qb->createNamedParameter($query->getCursorId(), IQueryBuilder::PARAM_INT)),
+					),
+				));
+			}
 		} elseif ($query->getCursor() !== null && $sortOrder === IMailSearch::ORDER_OLDEST_FIRST) {
-			$select->andWhere(
-				$qb->expr()->gt('m.sent_at', $qb->createNamedParameter($query->getCursor(), IQueryBuilder::PARAM_INT))
-			);
+			$cursorTime = $qb->createNamedParameter($query->getCursor(), IQueryBuilder::PARAM_INT);
+			if ($query->getCursorId() === null) {
+				$select->andWhere($qb->expr()->gt('m.sent_at', $cursorTime));
+			} else {
+				$select->andWhere($qb->expr()->orX(
+					$qb->expr()->gt('m.sent_at', $cursorTime),
+					$qb->expr()->andX(
+						$qb->expr()->eq('m.sent_at', $cursorTime),
+						$qb->expr()->gt('m.id', $qb->createNamedParameter($query->getCursorId(), IQueryBuilder::PARAM_INT)),
+					),
+				));
+			}
 		}
 
 		if ($query->getThreaded() && (!empty($query->getFlags()) || !empty($query->getFlagExpressions()) || !empty($query->getThreadExcludedFlags()))) {
@@ -1316,6 +1337,12 @@ class MessageMapper extends QBMapper {
 			$select->andWhere($qb->expr()->isNull('m2.id'));
 		}
 
+		if ($prioritySplit) {
+			$select->addSelect($qb->createFunction(
+				$this->prioritySectionExpression($qb, $query->getThreaded()) . ' AS priority_section'
+			));
+		}
+
 		// See findAllIds()'s own comment: sent_at alone ties whenever
 		// several messages land in the same second, and combined with
 		// the LIMIT below that makes the specific subset returned
@@ -1329,11 +1356,14 @@ class MessageMapper extends QBMapper {
 			$select->addOrderBy('m.id', 'DESC');
 		}
 
-		if ($limit !== null) {
+		if ($limit !== null && !$prioritySplit) {
 			$select->setMaxResults($limit);
 		}
 
-		return $this->executeWithSearchTimeout(function () use ($qb, $select, $uids) {
+		return $this->executeWithSearchTimeout(function () use ($qb, $select, $uids, $prioritySplit, $sortOrder, $limit) {
+			if ($prioritySplit) {
+				return $this->executePrioritySplitQuery($qb, $select, $sortOrder, $limit ?? 20, $uids);
+			}
 			if ($uids !== null) {
 				return array_flat_map(function (array $chunk) use ($qb, $select) {
 					$qb->setParameter('uids', $chunk, IQueryBuilder::PARAM_INT_ARRAY);
@@ -1343,6 +1373,103 @@ class MessageMapper extends QBMapper {
 
 			return array_map(static fn (Message $message) => $message->getId(), $this->findEntities($select));
 		});
+	}
+
+	/**
+	 * Classify one content-match relation into the three disjoint Priority
+	 * Inbox sections. The expression mirrors SearchQuery's thread-wide flag
+	 * semantics: Favorite wins, then Important, then Other.
+	 */
+	private function prioritySectionExpression(IQueryBuilder $qb, bool $threaded): string {
+		if (!$threaded) {
+			return 'CASE'
+				. ' WHEN ' . $qb->expr()->eq('m.flag_flagged', $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL)) . ' THEN 0'
+				. ' WHEN ' . $qb->expr()->eq('m.flag_important', $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL)) . ' THEN 1'
+				. ' ELSE 2 END';
+		}
+
+		$threadHasFlag = function (string $column) use ($qb): string {
+			$inner = $this->db->getQueryBuilder();
+			$inner->select($inner->expr()->literal(1))
+				->from($this->getTableName(), 'ps')
+				->where(
+					$inner->expr()->eq('ps.mailbox_id', 'm.mailbox_id', IQueryBuilder::PARAM_INT),
+					$inner->expr()->orX(
+						$inner->expr()->eq('ps.id', 'm.id', IQueryBuilder::PARAM_INT),
+						$inner->expr()->eq('ps.thread_root_id', 'm.thread_root_id', IQueryBuilder::PARAM_STR),
+					),
+					$inner->expr()->eq('ps.' . $column, $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL)),
+				);
+
+			return 'EXISTS (' . $inner->getSQL() . ')';
+		};
+
+		return 'CASE'
+			. ' WHEN ' . $threadHasFlag('flag_flagged') . ' THEN 0'
+			. ' WHEN ' . $threadHasFlag('flag_important') . ' THEN 1'
+			. ' ELSE 2 END';
+	}
+
+	/**
+	 * Execute the expensive content predicate once and use a window rank to
+	 * retain an exact page for each Priority Inbox section. When live IMAP
+	 * body matches need more than one UID parameter chunk, each chunk keeps
+	 * its own top N; their union necessarily contains the global top N and is
+	 * merged deterministically below.
+	 *
+	 * @param int[]|null $uids
+	 * @return int[]
+	 */
+	private function executePrioritySplitQuery(IQueryBuilder $qb, IQueryBuilder $select, string $sortOrder, int $limit, ?array $uids): array {
+		$direction = $sortOrder === IMailSearch::ORDER_OLDEST_FIRST ? 'ASC' : 'DESC';
+		$select->resetQueryPart('orderBy');
+
+		$innerSql = $select->getSQL();
+		$rankedSql = 'SELECT priority_matches.id, priority_matches.sent_at, priority_matches.priority_section,'
+			. ' ROW_NUMBER() OVER (PARTITION BY priority_matches.priority_section'
+			. ' ORDER BY priority_matches.sent_at ' . $direction . ', priority_matches.id ' . $direction . ') AS priority_rank'
+			. ' FROM (' . $innerSql . ') priority_matches';
+		$sql = 'SELECT priority_ranked.id, priority_ranked.sent_at, priority_ranked.priority_section'
+			. ' FROM (' . $rankedSql . ') priority_ranked'
+			. ' WHERE priority_ranked.priority_rank <= ' . max(1, $limit);
+
+		$rowsById = [];
+		$execute = function () use ($qb, $sql, &$rowsById): void {
+			$result = $this->db->executeQuery($sql, $qb->getParameters(), $qb->getParameterTypes());
+			foreach ($result->fetchAllAssociative() as $row) {
+				$rowsById[(int)$row['id']] = $row;
+			}
+			$result->closeCursor();
+		};
+
+		if ($uids === null) {
+			$execute();
+		} else {
+			foreach (array_chunk($uids, 1000) as $chunk) {
+				$qb->setParameter('uids', $chunk, IQueryBuilder::PARAM_INT_ARRAY);
+				$execute();
+			}
+		}
+
+		$rows = array_values($rowsById);
+		usort($rows, static function (array $left, array $right) use ($direction): int {
+			$comparison = ((int)$left['sent_at'] <=> (int)$right['sent_at'])
+				?: ((int)$left['id'] <=> (int)$right['id']);
+			return $direction === 'ASC' ? $comparison : -$comparison;
+		});
+
+		$counts = [0, 0, 0];
+		$ids = [];
+		foreach ($rows as $row) {
+			$section = (int)$row['priority_section'];
+			if ($counts[$section] >= $limit) {
+				continue;
+			}
+			$counts[$section]++;
+			$ids[] = (int)$row['id'];
+		}
+
+		return $ids;
 	}
 
 	/**
@@ -1750,7 +1877,7 @@ class MessageMapper extends QBMapper {
 	 */
 	public function findRelatedData(array $messages, string $userId): array {
 		$messages = $this->findRecipients($messages);
-		$messages = $this->applyHasUnseenInThread($messages);
+		$messages = $this->applyThreadFlagAggregates($messages);
 		$tags = $this->tagMapper->getAllTagsForMessages($messages, $userId);
 		/** @var Message $message */
 		$messages = array_map(static function ($message) use ($tags) {
@@ -1762,17 +1889,19 @@ class MessageMapper extends QBMapper {
 	}
 
 	/**
-	 * A thread's newest message is what's shown as a single row in
-	 * threaded listings (see the m2 self-join in findIdsByQuery()), but its
-	 * own flag_seen only reflects that one message. Compute whether ANY
-	 * message in its thread is still unseen, so the frontend can show the
-	 * whole thread as unread even when its newest reply has already been
-	 * read -- the same thread-wide semantics as the "unread" filter.
+	 * A thread's newest message is what's shown as a single row in threaded
+	 * listings (see the m2 self-join in findIdsByQuery()), but its own flags
+	 * only describe that one message. Compute whether ANY member is unseen,
+	 * flagged, or important in one indexed pass over the returned threads.
+	 * Besides preserving unread rendering, the latter two values let a single
+	 * content search be partitioned into Favorites/Important/Other locally,
+	 * with exactly the same thread-wide semantics as the server's EXISTS and
+	 * NOT EXISTS flag filters.
 	 *
 	 * @param Message[] $messages
 	 * @return Message[]
 	 */
-	private function applyHasUnseenInThread(array $messages): array {
+	private function applyThreadFlagAggregates(array $messages): array {
 		$threadRootIdsByMailbox = [];
 		foreach ($messages as $message) {
 			$threadRootId = $message->getThreadRootId();
@@ -1782,18 +1911,29 @@ class MessageMapper extends QBMapper {
 		}
 
 		$unseenThreadKeys = [];
+		$flaggedThreadKeys = [];
+		$importantThreadKeys = [];
+		$isTrue = static fn ($value): bool => in_array($value, [true, 1, '1', 't', 'true'], true);
 		foreach ($threadRootIdsByMailbox as $mailboxId => $threadRootIds) {
 			$qb = $this->db->getQueryBuilder();
-			$qb->selectDistinct('thread_root_id')
+			$qb->select('thread_root_id', 'flag_seen', 'flag_flagged', 'flag_important')
 				->from($this->getTableName())
 				->where(
 					$qb->expr()->eq('mailbox_id', $qb->createNamedParameter($mailboxId, IQueryBuilder::PARAM_INT)),
 					$qb->expr()->in('thread_root_id', $qb->createNamedParameter(array_values(array_unique($threadRootIds)), IQueryBuilder::PARAM_STR_ARRAY)),
-					$qb->expr()->eq('flag_seen', $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL)),
 				);
 			$result = $qb->executeQuery();
-			while (($threadRootId = $result->fetchOne()) !== false) {
-				$unseenThreadKeys[$mailboxId . ':' . $threadRootId] = true;
+			while (($row = $result->fetchAssociative()) !== false) {
+				$key = $mailboxId . ':' . $row['thread_root_id'];
+				if (!$isTrue($row['flag_seen'])) {
+					$unseenThreadKeys[$key] = true;
+				}
+				if ($isTrue($row['flag_flagged'])) {
+					$flaggedThreadKeys[$key] = true;
+				}
+				if ($isTrue($row['flag_important'])) {
+					$importantThreadKeys[$key] = true;
+				}
 			}
 			$result->closeCursor();
 		}
@@ -1804,8 +1944,13 @@ class MessageMapper extends QBMapper {
 				// Not grouped with anything (see findIdsByQuery()'s self-join
 				// for why), so the thread's status is just its own.
 				$message->setHasUnseenInThread($message->getFlagSeen() !== true);
+				$message->setHasFlaggedInThread($message->getFlagFlagged() === true);
+				$message->setHasImportantInThread($message->getFlagImportant() === true);
 			} else {
-				$message->setHasUnseenInThread(isset($unseenThreadKeys[$message->getMailboxId() . ':' . $threadRootId]));
+				$key = $message->getMailboxId() . ':' . $threadRootId;
+				$message->setHasUnseenInThread(isset($unseenThreadKeys[$key]));
+				$message->setHasFlaggedInThread(isset($flaggedThreadKeys[$key]));
+				$message->setHasImportantInThread(isset($importantThreadKeys[$key]));
 			}
 		}
 

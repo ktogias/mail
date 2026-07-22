@@ -20,6 +20,8 @@ use OCA\Mail\Integration\MicrosoftIntegration;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\IMemcache;
 use OCP\Security\ICrypto;
+use Psr\Log\LoggerInterface;
+use Throwable;
 use function min;
 use function random_int;
 
@@ -39,6 +41,8 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 	private ?MicrosoftIntegration $microsoftIntegration = null;
 	private ?MailAccountMapper $mailAccountMapper = null;
 	private ?ICrypto $crypto = null;
+	private ?LoggerInterface $logger = null;
+	private ?ImapConnectionSemaphore $connectionSemaphore = null;
 
 	public function __construct(
 		array $params,
@@ -80,8 +84,36 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 		$this->crypto = $crypto;
 	}
 
+	public function enableAuthTelemetry(LoggerInterface $logger): void {
+		$this->logger = $logger;
+	}
+
+	public function enableConnectionSemaphore(ImapConnectionSemaphore $semaphore): void {
+		$this->connectionSemaphore = $semaphore;
+	}
+
+	#[\Override]
+	public function logout() {
+		try {
+			parent::logout();
+		} finally {
+			$this->connectionSemaphore?->release();
+		}
+	}
+
+	public function __destruct() {
+		$this->connectionSemaphore?->release();
+	}
+
 	#[\Override]
 	public function login() {
+		// Horde calls this before every operation, even on an already
+		// authenticated object. Besides enforcing the initial limit, this
+		// refreshes the owned slot's TTL during a long-lived request.
+		if ($this->_isAuthenticated) {
+			$this->acquireConnectionSlot();
+		}
+
 		// Horde calls login() at the start of EVERY operation; it is
 		// idempotent and returns immediately when the session is already
 		// authenticated. Sending ID unconditionally after it therefore
@@ -218,7 +250,7 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 	 */
 	private function attemptLoginWithRateLimiting(bool $allowAuthRetry) {
 		if ($this->rateLimiterCache === null) {
-			return $this->imapLogin();
+			return $this->imapLoginWithConnectionSlot();
 		}
 
 		$failureCountKey = $this->hash . '_failures';
@@ -235,7 +267,7 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 		}
 
 		try {
-			$result = $this->imapLogin();
+			$result = $this->imapLoginWithConnectionSlot();
 			// Success -- whatever caused any earlier failures has
 			// cleared up. Clear the streak immediately rather than
 			// leaving a now-healthy account to wait out whatever was
@@ -247,6 +279,7 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 			if (!$this->isRetryableAuthFailure($e)) {
 				throw $e;
 			}
+			$this->logAuthRejection($e, $allowAuthRetry ? 'initial' : 'post_refresh');
 
 			if ($allowAuthRetry && $this->forceRefreshTokenAndUpdateClient()) {
 				// Confirmed live, repeatedly, across several different
@@ -269,7 +302,9 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 				// the same try block); a retry that also fails falls
 				// through to the failure bookkeeping below exactly once,
 				// not twice, since allowAuthRetry is false this time.
-				return $this->attemptLoginWithRateLimiting(false);
+				$result = $this->attemptLoginWithRateLimiting(false);
+				$this->logAuthRetryRecovered();
+				return $result;
 			}
 
 			$failures = ((int)$this->rateLimiterCache->get($failureCountKey)) + 1;
@@ -280,6 +315,78 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 			}
 			throw $e;
 		}
+	}
+
+	private function imapLoginWithConnectionSlot() {
+		$this->acquireConnectionSlot();
+
+		try {
+			return $this->imapLogin();
+		} catch (Throwable $e) {
+			$this->connectionSemaphore?->release();
+			throw $e;
+		}
+	}
+
+	private function acquireConnectionSlot(): void {
+		if ($this->connectionSemaphore !== null && !$this->connectionSemaphore->acquire()) {
+			$this->logger?->notice('IMAP account concurrency limit reached for account {accountId}', [
+				'accountId' => $this->account?->getId(),
+				'host' => $this->account?->getMailAccount()->getInboundHost(),
+				'limit' => $this->connectionSemaphore->getLimit(),
+			]);
+			throw new Horde_Imap_Client_Exception(
+				'IMAP account concurrency limit reached',
+				Horde_Imap_Client_Exception::SERVER_CONNECT,
+			);
+		}
+	}
+
+	private function logAuthRejection(Horde_Imap_Client_Exception $e, string $retryPhase): void {
+		if ($this->logger === null || $this->account === null) {
+			return;
+		}
+
+		$this->logger->warning('IMAP authentication rejected for account {accountId}', [
+			'accountId' => $this->account->getId(),
+			'host' => $this->account->getMailAccount()->getInboundHost(),
+			'authMethod' => $this->account->getMailAccount()->getAuthMethod(),
+			'retryPhase' => $retryPhase,
+			'tokenTtlBucket' => $this->getTokenTtlBucket(),
+			'hordeCode' => $e->getCode(),
+			'reason' => $e->getMessage(),
+		]);
+	}
+
+	private function logAuthRetryRecovered(): void {
+		if ($this->logger === null || $this->account === null) {
+			return;
+		}
+
+		$this->logger->info('IMAP authentication recovered after one OAuth refresh for account {accountId}', [
+			'accountId' => $this->account->getId(),
+			'host' => $this->account->getMailAccount()->getInboundHost(),
+			'authMethod' => $this->account->getMailAccount()->getAuthMethod(),
+		]);
+	}
+
+	private function getTokenTtlBucket(): string {
+		$tokenTtl = $this->account?->getMailAccount()->getOauthTokenTtl();
+		if ($tokenTtl === null || $this->timeFactory === null) {
+			return 'unknown';
+		}
+
+		$remaining = $tokenTtl - $this->timeFactory->getTime();
+		if ($remaining <= 0) {
+			return 'expired';
+		}
+		if ($remaining <= 5 * 60) {
+			return '0-5m';
+		}
+		if ($remaining <= 30 * 60) {
+			return '5-30m';
+		}
+		return '30m+';
 	}
 
 	private function isRetryableAuthFailure(Horde_Imap_Client_Exception $e): bool {

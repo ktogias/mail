@@ -145,16 +145,11 @@ class GoogleIntegration {
 	}
 
 	/**
-	 * @param bool $force Skip the expiry check and the lock's "someone
-	 *   else is already refreshing" early-out, and always attempt the
-	 *   network call. Meant only for ImapToDbSynchronizer's retry after
-	 *   an actual IMAP authentication rejection has already been
-	 *   observed: at that point REFRESH_BUFFER_SECONDS didn't save this
-	 *   request (see its own doc comment for why that can still
-	 *   happen), the caller already knows its current token doesn't
-	 *   work, and getting a working one back matters more than avoiding
-	 *   an extra call to Google's token endpoint -- a cost that's
-	 *   negligible given how rarely this path is reached.
+	 * @param bool $force Skip the expiry check after an actual IMAP
+	 *                    authentication rejection. Forced callers still obey the
+	 *                    distributed lock: exactly one request may contact Google's token
+	 *                    endpoint, while concurrent losers fail fast and pick up the
+	 *                    winner's persisted token on a subsequent request.
 	 */
 	public function refresh(Account $account, bool $force = false): Account {
 		$oauthRefreshToken = $account->getMailAccount()->getOauthRefreshToken();
@@ -184,15 +179,19 @@ class GoogleIntegration {
 		// they already have and picks up the refreshed one on their own
 		// next request, by which point REFRESH_BUFFER_SECONDS has
 		// generally given the winner's refresh time to land in the
-		// database (see REFRESH_BUFFER_SECONDS for why). A forced
-		// refresh still takes the lock as a courtesy (it costs nothing
-		// when uncontended), but never backs off just because someone
-		// else holds it -- unlike the normal path, it can't fall back on
-		// "the token I already have is still good enough".
+		// database (see REFRESH_BUFFER_SECONDS for why). Forced refreshes
+		// must use the same single-flight rule: bypassing this lock caused
+		// every denied FPM request to rotate the token independently and
+		// amplify transient provider throttling.
 		$lockCache = $this->cacheFactory->createDistributed('mail_oauth_refresh_lock');
 		$lockKey = 'google_account_' . $account->getId();
 		$gotLock = !($lockCache instanceof IMemcache) || $lockCache->add($lockKey, true, self::REFRESH_LOCK_TTL);
-		if (!$gotLock && !$force) {
+		if (!$gotLock) {
+			if ($force) {
+				$this->logger->info('Skipped forced Google OAuth refresh because another request owns the account lock', [
+					'accountId' => $account->getId(),
+				]);
+			}
 			return $account;
 		}
 

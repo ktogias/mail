@@ -41,6 +41,8 @@ interface IMailSearch {
 	 * @param int|null $limit
 	 * @param string|null $userId
 	 * @param string|null $view
+	 * @param bool $prioritySplit return an exact page for each Priority Inbox section
+	 * @param int|null $cursorId database-id tie breaker for the timestamp cursor
 	 *
 	 * @return Message[]
 	 *
@@ -54,7 +56,9 @@ interface IMailSearch {
 		?int $cursor,
 		?int $limit,
 		?string $userId,
-		?string $view): array;
+		?string $view,
+		bool $prioritySplit = false,
+		?int $cursorId = null): array;
 
 	/**
 	 * Run a search through all mailboxes of a user.

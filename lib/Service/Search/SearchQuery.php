@@ -13,6 +13,9 @@ class SearchQuery {
 	/** @var int|null */
 	private $cursor;
 
+	/** @var int|null */
+	private $cursorId;
+
 	private bool $threaded = true;
 
 	/** @var Flag[] */
@@ -87,6 +90,18 @@ class SearchQuery {
 	 */
 	public function setCursor(int $cursor): void {
 		$this->cursor = $cursor;
+	}
+
+	/**
+	 * Database id of the row at the timestamp cursor. Together with
+	 * $cursor this forms a stable keyset cursor for sent_at ties.
+	 */
+	public function getCursorId(): ?int {
+		return $this->cursorId;
+	}
+
+	public function setCursorId(int $cursorId): void {
+		$this->cursorId = $cursorId;
 	}
 
 	public function getThreaded(): bool {

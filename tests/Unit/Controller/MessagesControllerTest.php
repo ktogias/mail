@@ -1522,6 +1522,8 @@ class MessagesControllerTest extends TestCase {
 				20,
 				$this->userId,
 				'threaded',
+				false,
+				null,
 			)->willReturn($messages);
 
 		$actualResponse = $this->controller->index(100, null, null, 20, null, $cacheBuster);
@@ -1703,6 +1705,7 @@ class MessagesControllerTest extends TestCase {
 				$expectedLimit,
 				$this->userId,
 				'threaded',
+				false,
 			)->willReturn([]);
 
 		$this->controller->index(100, null, null, $limit);

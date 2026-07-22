@@ -66,6 +66,7 @@ class Caching {
 			Server::get(GoogleIntegration::class),
 			Server::get(MicrosoftIntegration::class),
 			Server::get(MailAccountMapper::class),
+			Server::get(LoggerInterface::class),
 		);
 		return [$imapClient, $cacheFactory];
 	}

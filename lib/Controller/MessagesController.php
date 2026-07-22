@@ -110,6 +110,8 @@ class MessagesController extends Controller {
 	 * @param int|null $limit
 	 * @param string $view returns messages in requested view ('singleton' or 'threaded')
 	 * @param string|null $v Cache buster version to guarantee unique urls (will trigger HTTP caching if set)
+	 * @param bool $prioritySplit return one exact page per Priority Inbox section
+	 * @param int|null $cursorId database-id tie breaker for the timestamp cursor
 	 *
 	 * @return JSONResponse
 	 *
@@ -122,7 +124,9 @@ class MessagesController extends Controller {
 		?string $filter = null,
 		?int $limit = null,
 		?string $view = null,
-		?string $v = null): JSONResponse {
+		?string $v = null,
+		bool $prioritySplit = false,
+		?int $cursorId = null): JSONResponse {
 		if ($this->userId === null) {
 			return new JSONResponse([], Http::STATUS_UNAUTHORIZED);
 		}
@@ -149,7 +153,9 @@ class MessagesController extends Controller {
 			$cursor,
 			$limit,
 			$effectiveUserId,
-			$view
+			$view,
+			$prioritySplit,
+			$cursorId,
 		);
 
 		$response = new JSONResponse($messages);

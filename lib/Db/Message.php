@@ -158,6 +158,16 @@ class Message extends Entity implements JsonSerializable {
 	 */
 	private $hasUnseenInThread = false;
 
+	/**
+	 * Thread-wide counterparts of this row's own favorite/important flags.
+	 * They are computed at read time together with hasUnseenInThread and let
+	 * the client classify one unfiltered content-search result into Priority
+	 * Inbox sections without repeating the expensive content predicate once
+	 * per section.
+	 */
+	private bool $hasFlaggedInThread = false;
+	private bool $hasImportantInThread = false;
+
 	public function __construct() {
 		$this->from = new AddressList([]);
 		$this->to = new AddressList([]);
@@ -349,6 +359,22 @@ class Message extends Entity implements JsonSerializable {
 		return $this->hasUnseenInThread;
 	}
 
+	public function setHasFlaggedInThread(bool $hasFlaggedInThread): void {
+		$this->hasFlaggedInThread = $hasFlaggedInThread;
+	}
+
+	public function getHasFlaggedInThread(): bool {
+		return $this->hasFlaggedInThread;
+	}
+
+	public function setHasImportantInThread(bool $hasImportantInThread): void {
+		$this->hasImportantInThread = $hasImportantInThread;
+	}
+
+	public function getHasImportantInThread(): bool {
+		return $this->hasImportantInThread;
+	}
+
 	#[\Override]
 	#[ReturnTypeWillChange]
 	public function jsonSerialize() {
@@ -377,6 +403,8 @@ class Message extends Entity implements JsonSerializable {
 				'$notjunk' => ($this->getFlagNotjunk() === true),
 				'$mdnsent' => ($this->getFlagMdnsent() === true),
 				'hasUnseenInThread' => $this->hasUnseenInThread,
+				'hasFlaggedInThread' => $this->hasFlaggedInThread,
+				'hasImportantInThread' => $this->hasImportantInThread,
 			],
 			'tags' => $indexed,
 			'from' => $this->getFrom()->jsonSerialize(),

@@ -41,7 +41,7 @@ export function fetchEnvelope(accountId, id) {
 		})
 }
 
-export function fetchEnvelopes(accountId, mailboxId, query, cursor, limit, sort, view, cacheBuster, signal) {
+export function fetchEnvelopes(accountId, mailboxId, query, cursor, limit, sort, view, cacheBuster, signal, prioritySplit = false, cursorId) {
 	const url = generateUrl('/apps/mail/api/messages')
 	const params = {
 		mailboxId,
@@ -55,6 +55,9 @@ export function fetchEnvelopes(accountId, mailboxId, query, cursor, limit, sort,
 	}
 	if (cursor) {
 		params.cursor = cursor
+		if (cursorId) {
+			params.cursorId = cursorId
+		}
 	}
 	if (sort) {
 		params.sort = sort
@@ -64,6 +67,9 @@ export function fetchEnvelopes(accountId, mailboxId, query, cursor, limit, sort,
 	}
 	if (cacheBuster) {
 		params.v = cacheBuster
+	}
+	if (prioritySplit) {
+		params.prioritySplit = true
 	}
 
 	return axios
