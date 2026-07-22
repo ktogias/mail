@@ -31,6 +31,25 @@
 					:aria-level="2"
 					@shortkey.native="onShortcut">
 					<template v-if="!mailbox.isPriorityInbox">
+						<!-- Persistent, dismissable status banner: this folder
+						     is still importing its older messages in the
+						     background (BackfillJob). Rendered here in the
+						     parent, above every section (Favorites and the rest),
+						     so it sits at the very top of the folder -- inside a
+						     child Mailbox it landed below the Favorites list. -->
+						<div v-if="showBackfillBanner" class="backfill-banner">
+							<IconLoading :size="18" class="backfill-banner__spinner" />
+							<span class="backfill-banner__text">{{ backfillBannerText }}</span>
+							<ButtonVue
+								type="tertiary"
+								:aria-label="t('mail', 'Dismiss')"
+								:title="t('mail', 'Dismiss')"
+								@click="dismissBackfillBanner">
+								<template #icon>
+									<IconClose :size="20" />
+								</template>
+							</ButtonVue>
+						</div>
 						<div
 							v-if="sortFavorites"
 							v-show="hasFavoriteEnvelopes"
@@ -226,6 +245,7 @@ import { NcAppContent as AppContent, NcAppContentList as AppContentList, NcButto
 import addressParser from 'address-rfc2822'
 import mitt from 'mitt'
 import { mapStores } from 'pinia'
+import IconClose from 'vue-material-design-icons/Close.vue'
 import IconInfo from 'vue-material-design-icons/InformationOutline.vue'
 import IconRefresh from 'vue-material-design-icons/Refresh.vue'
 import EmptyMailboxSection from './EmptyMailboxSection.vue'
@@ -270,6 +290,7 @@ export default {
 		AppContentList,
 		ButtonVue,
 		EmptyMailboxSection,
+		IconClose,
 		IconInfo,
 		IconLoading,
 		IconRefresh,
@@ -486,6 +507,38 @@ export default {
 
 		sortOrder() {
 			return this.mainStore.getPreference('sort-order', 'newest')
+		},
+
+		// The "still importing older messages" banner. Reads straight off the
+		// mailbox metadata (Mailbox::jsonSerialize's isCached/total, plus the
+		// controller-added `cached` for incomplete mailboxes) -- NOT the sync
+		// response, which for an uncached mailbox throws before it can carry
+		// any stats (exactly the mailboxes that need this banner). Rendered by
+		// this parent, not the child Mailbox, so it sits above every section
+		// (Favorites and the rest) at the very top of the folder. Only while
+		// the folder is genuinely still backfilling (isCached === false --
+		// gate on === false, not falsy, so a mailbox whose metadata hasn't
+		// loaded yet doesn't flash it), only once there's a list to sit above
+		// (hasEnvelopes), and only until the user dismisses it. The
+		// non-priority template branch already guarantees this is a real,
+		// single mailbox (the virtual unified/Priority Inbox, where a single
+		// X-of-Y across many folders is meaningless, is the other branch).
+		showBackfillBanner() {
+			return this.mailbox?.isCached === false
+				&& (this.mailbox?.total ?? 0) > 0
+				&& this.hasEnvelopes
+				&& !this.mainStore.backfillBannerDismissed[this.mailbox.databaseId]
+		},
+
+		backfillBannerText() {
+			const cached = this.mailbox?.cached
+			if (cached === null || cached === undefined) {
+				return t('mail', 'Still importing older messages …')
+			}
+			return t('mail', 'Still importing older messages ({cached} of {total})', {
+				cached: cached.toLocaleString(),
+				total: (this.mailbox?.total ?? 0).toLocaleString(),
+			})
 		},
 	},
 
@@ -775,6 +828,10 @@ export default {
 		onUpdateSearchQuery(query) {
 			this.searchQuery = query
 		},
+
+		dismissBackfillBanner() {
+			this.mainStore.dismissBackfillBannerMutation(this.mailbox.databaseId)
+		},
 	},
 }
 </script>
@@ -900,5 +957,31 @@ export default {
 
 :deep(.app-content-wrapper.app-content-wrapper--no-split.app-content-wrapper--show-details) {
 	overflow-y: scroll !important;
+}
+
+// "Still importing older messages" status banner -- a quiet info bar at the
+// very top of the folder (above every section), not an alert. Muted
+// background/text so it reads as ambient status, not something demanding
+// action.
+.backfill-banner {
+	display: flex;
+	align-items: center;
+	gap: var(--default-grid-baseline);
+	padding: calc(var(--default-grid-baseline) * 2);
+	padding-inline-start: calc(var(--default-grid-baseline) * 3);
+	background-color: var(--color-background-hover);
+	border-radius: var(--border-radius-element, var(--border-radius-large));
+	margin: var(--default-grid-baseline);
+	color: var(--color-text-maxcontrast);
+	font-size: var(--default-font-size);
+
+	&__spinner {
+		flex: 0 0 auto;
+	}
+
+	&__text {
+		flex: 1 1 auto;
+		min-width: 0;
+	}
 }
 </style>

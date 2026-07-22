@@ -7,24 +7,6 @@
 	<div
 		class="mailbox"
 		:class="{ 'empty-content': (!hasMessages && !loadingEnvelopes) || error }">
-		<!-- Persistent, dismissable status banner: this folder is still
-		     importing its older messages in the background (BackfillJob).
-		     Sits at the top of the list so it's seen on open without
-		     scrolling; stays while the import runs, its count climbs live,
-		     and it hides itself once the folder finishes. -->
-		<div v-if="showBackfillBanner" class="backfill-banner">
-			<IconLoading :size="18" class="backfill-banner__spinner" />
-			<span class="backfill-banner__text">{{ backfillBannerText }}</span>
-			<NcButton
-				variant="tertiary"
-				:aria-label="t('mail', 'Dismiss')"
-				:title="t('mail', 'Dismiss')"
-				@click="dismissBackfillBanner">
-				<template #icon>
-					<IconClose :size="20" />
-				</template>
-			</NcButton>
-		</div>
 		<Error
 			v-if="error"
 			:error="errorTitle"
@@ -70,10 +52,8 @@
 
 <script>
 import { showError, showWarning } from '@nextcloud/dialogs'
-import { NcLoadingIcon as IconLoading, NcButton } from '@nextcloud/vue'
 import { mapStores } from 'pinia'
 import { findIndex, propEq } from 'ramda'
-import IconClose from 'vue-material-design-icons/Close.vue'
 import EmptyMailbox from './EmptyMailbox.vue'
 import EmptyMailboxSection from './EmptyMailboxSection.vue'
 import EnvelopeList from './EnvelopeList.vue'
@@ -101,11 +81,8 @@ export default {
 		EmptyMailbox,
 		EnvelopeList,
 		Error,
-		IconClose,
-		IconLoading,
 		Loading,
 		LoadingSkeleton,
-		NcButton,
 		SectionTitle,
 	},
 
@@ -213,36 +190,6 @@ export default {
 		...mapStores(useMainStore),
 		sortOrder() {
 			return this.mainStore.getPreference('sort-order', 'newest')
-		},
-
-		// The "still importing older messages" banner. Reads straight off the
-		// mailbox metadata (Mailbox::jsonSerialize's isCached/total, plus the
-		// controller-added `cached` for incomplete mailboxes) -- NOT the sync
-		// response, which for an uncached mailbox throws before it can carry
-		// any stats (exactly the mailboxes that need this banner). Only for a
-		// real, single mailbox (not the virtual unified/Priority Inbox, where
-		// a single X-of-Y across many folders is meaningless), only while the
-		// folder is genuinely still backfilling (isCached === false -- gate on
-		// === false, not falsy, so a mailbox whose metadata hasn't loaded yet
-		// doesn't flash it), only once there's a list to sit above
-		// (hasMessages), and only until the user dismisses it.
-		showBackfillBanner() {
-			return !this.isPriorityInbox
-				&& this.hasMessages
-				&& this.mailbox?.isCached === false
-				&& (this.mailbox?.total ?? 0) > 0
-				&& !this.mainStore.backfillBannerDismissed[this.mailbox.databaseId]
-		},
-
-		backfillBannerText() {
-			const cached = this.mailbox?.cached
-			if (cached === null || cached === undefined) {
-				return t('mail', 'Still importing older messages …')
-			}
-			return t('mail', 'Still importing older messages ({cached} of {total})', {
-				cached: cached.toLocaleString(),
-				total: (this.mailbox?.total ?? 0).toLocaleString(),
-			})
 		},
 
 		envelopes() {
@@ -448,10 +395,6 @@ export default {
 	},
 
 	methods: {
-		dismissBackfillBanner() {
-			this.mainStore.dismissBackfillBannerMutation(this.mailbox.databaseId)
-		},
-
 		initializeCache() {
 			this.loadingCacheInitialization = true
 			this.error = false
@@ -992,30 +935,5 @@ export default {
 	height: 100%;
 	display: flex;
 	justify-content: center;
-}
-
-// "Still importing older messages" status banner -- a quiet info bar at the
-// top of the list, not an alert. Muted background/text so it reads as
-// ambient status, not something demanding action.
-.backfill-banner {
-	display: flex;
-	align-items: center;
-	gap: var(--default-grid-baseline);
-	padding: calc(var(--default-grid-baseline) * 2);
-	padding-inline-start: calc(var(--default-grid-baseline) * 3);
-	background-color: var(--color-background-hover);
-	border-radius: var(--border-radius-element, var(--border-radius-large));
-	margin: var(--default-grid-baseline);
-	color: var(--color-text-maxcontrast);
-	font-size: var(--default-font-size);
-
-	&__spinner {
-		flex: 0 0 auto;
-	}
-
-	&__text {
-		flex: 1 1 auto;
-		min-width: 0;
-	}
 }
 </style>
