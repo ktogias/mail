@@ -4291,6 +4291,40 @@ export default function mainStoreActions() {
 				return workingLists.get(targetMailbox)
 			}
 
+			// Thread-root -> members lookup for newEnvelopeExcludedFromPartitionBucket()
+			// below. That check used to re-scan the ENTIRE envelope store
+			// (Object.values(this.envelopes).filter(...) via
+			// getEnvelopesByThreadRootId()) once PER new envelope in the batch --
+			// O(batch * store). On a large store (Gmail + a body search) that was a
+			// 15-30s main-thread freeze, caught in a Firefox profile as a single
+			// 32s stall inside this exact call chain (addEnvelopesMutation ->
+			// newEnvelopeExcludedFromPartitionBucket -> getEnvelopesByThreadRootId).
+			// Build a threadRootId index once, lazily (skipped entirely when the
+			// batch is all updates), and reuse it. Every envelope in a single
+			// addEnvelopesMutation call shares the same list/flag partition, so a
+			// same-batch sibling can never be the starred/important one that
+			// excludes another -- only already-stored siblings can, and the index
+			// captures those.
+			let threadMembersIndex
+			const partitionThreadMembers = (accountId, threadRootId) => {
+				if (!threadMembersIndex) {
+					threadMembersIndex = new Map()
+					for (const stored of Object.values(this.envelopes)) {
+						if (!stored.threadRootId) {
+							continue
+						}
+						const key = `${stored.accountId} ${stored.threadRootId}`
+						const bucket = threadMembersIndex.get(key)
+						if (bucket) {
+							bucket.push(stored)
+						} else {
+							threadMembersIndex.set(key, [stored])
+						}
+					}
+				}
+				return threadMembersIndex.get(`${accountId} ${threadRootId}`) ?? []
+			}
+
 			envelopes.forEach((envelope) => {
 				const mailbox = this.mailboxes[envelope.mailboxId]
 
@@ -4328,7 +4362,7 @@ export default function mainStoreActions() {
 				// stored above (so threadRootId grouping and the reclassify
 				// below can place it in its real bucket) -- only THIS bucket's
 				// list membership is withheld. Only for genuinely new mail.
-				if (previouslyKnown !== undefined || !this.newEnvelopeExcludedFromPartitionBucket(envelope, listId)) {
+				if (previouslyKnown !== undefined || !this.newEnvelopeExcludedFromPartitionBucket(envelope, listId, partitionThreadMembers)) {
 					this.appendOrReplaceEnvelopeId(workingListFor(mailbox), envelope)
 					if (addToUnifiedMailboxes) {
 						const unifiedAccount = this.accountsUnmapped[UNIFIED_ACCOUNT_ID]
@@ -4700,9 +4734,13 @@ export default function mainStoreActions() {
 		 *
 		 * @param {object} envelope The newly-arrived envelope.
 		 * @param {string} listId The bucket's normalized list id.
+		 * @param {(accountId: (number|string), threadRootId: string) => object[]} [threadMembersLookup]
+		 *   Optional resolver. addEnvelopesMutation() passes a batch-scoped,
+		 *   O(1)-lookup index so this stays cheap in a loop; without it we fall
+		 *   back to the O(store) getEnvelopesByThreadRootId() scan.
 		 * @return {boolean} True to keep it out of this partition bucket.
 		 */
-		newEnvelopeExcludedFromPartitionBucket(envelope, listId) {
+		newEnvelopeExcludedFromPartitionBucket(envelope, listId, threadMembersLookup) {
 			if (this.getPreference('layout-message-view', 'threaded') !== 'threaded' || !envelope.threadRootId) {
 				return false
 			}
@@ -4715,7 +4753,9 @@ export default function mainStoreActions() {
 			if (partitionTokens.length === 0) {
 				return false
 			}
-			const knownMembers = this.getEnvelopesByThreadRootId(envelope.accountId, envelope.threadRootId)
+			const knownMembers = threadMembersLookup
+				? threadMembersLookup(envelope.accountId, envelope.threadRootId)
+				: this.getEnvelopesByThreadRootId(envelope.accountId, envelope.threadRootId)
 			const membersToCheck = knownMembers.length > 0 ? knownMembers : [envelope]
 			return partitionTokens.some((token) => knownTokenPredicates[token].positive(envelope.flags)
 				|| membersToCheck.some((member) => knownTokenPredicates[token].positive(member.flags)))
