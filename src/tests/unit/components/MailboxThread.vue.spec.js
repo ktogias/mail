@@ -184,7 +184,9 @@ describe('MailboxThread', () => {
 			vi.useFakeTimers()
 			const wrapper = mountThread()
 			let resolveSync
-			store.syncEnvelopes = vi.fn().mockReturnValue(new Promise((r) => { resolveSync = r }))
+			store.syncEnvelopes = vi.fn().mockReturnValue(new Promise((r) => {
+				resolveSync = r
+			}))
 			store.syncMailboxesForAccount = vi.fn().mockResolvedValue()
 
 			const done = wrapper.vm.onPullToRefresh()
@@ -291,6 +293,95 @@ describe('MailboxThread', () => {
 			await wrapper.vm.$nextTick()
 
 			expect(wrapper.vm.searchQuery).toBeUndefined()
+		})
+	})
+
+	describe('backfill-progress banner ("still importing older messages")', () => {
+		// Lives here in the parent (not the child Mailbox) so it renders above
+		// every section -- inside the child it landed below the Favorites list
+		// (reported live). Shown for a real, non-priority mailbox that's
+		// genuinely still backfilling (mailbox metadata isCached === false)
+		// once there's a list to sit above, until dismissed. Priority gating is
+		// the template's (the v-else branch has no banner), so those cases are
+		// asserted on the rendered DOM, the rest on showBackfillBanner directly.
+		function mountThreadFor(mailbox) {
+			return shallowMount(MailboxThread, {
+				propsData: {
+					account: store.accountsUnmapped[0],
+					mailbox,
+				},
+				store,
+				localVue,
+				mocks: { $route: { params: {} } },
+				stubs: {
+					AppContent: { template: '<div><slot name="list" /><slot /></div>' },
+					AppContentList: { template: '<div><slot /></div>' },
+				},
+			})
+		}
+
+		function regularMailbox(overrides = {}) {
+			return { databaseId: 38, name: 'Junk', envelopeLists: {}, isCached: false, total: 98000, cached: 5000, ...overrides }
+		}
+
+		beforeEach(() => {
+			// A non-empty list under the banner (hasEnvelopes true).
+			store.getEnvelopes = vi.fn().mockReturnValue([{ databaseId: 1 }])
+		})
+
+		it('shows while the mailbox is incomplete and has messages', () => {
+			const wrapper = mountThreadFor(regularMailbox())
+
+			expect(wrapper.vm.showBackfillBanner).toBe(true)
+			expect(wrapper.find('.backfill-banner').exists()).toBe(true)
+			// Text is produced (exact number formatting depends on locale/t());
+			// the count-carrying branch is exercised (cached present, not null).
+			expect(typeof wrapper.vm.backfillBannerText).toBe('string')
+			expect(wrapper.vm.backfillBannerText.length).toBeGreaterThan(0)
+		})
+
+		it('falls back to the count-less text when cached is unknown', () => {
+			const wrapper = mountThreadFor(regularMailbox({ cached: null }))
+
+			expect(wrapper.vm.showBackfillBanner).toBe(true)
+			expect(typeof wrapper.vm.backfillBannerText).toBe('string')
+		})
+
+		it('hides once the backfill is complete (isCached true)', () => {
+			const wrapper = mountThreadFor(regularMailbox({ isCached: true }))
+
+			expect(wrapper.vm.showBackfillBanner).toBe(false)
+			expect(wrapper.find('.backfill-banner').exists()).toBe(false)
+		})
+
+		it('is not rendered in the Priority Inbox (virtual mailbox -- an X-of-Y figure is meaningless there)', () => {
+			// The priority mailbox takes the v-else template branch, which has
+			// no banner at all -- regardless of its metadata.
+			const priority = store.mailboxes[PRIORITY_INBOX_ID]
+			priority.isCached = false
+			priority.total = 98000
+			priority.cached = 5000
+
+			const wrapper = mountThreadFor(priority)
+
+			expect(wrapper.find('.backfill-banner').exists()).toBe(false)
+		})
+
+		it('hides when the mailbox metadata has not loaded (isCached undefined, not false)', () => {
+			const wrapper = mountThreadFor(regularMailbox({ isCached: undefined }))
+
+			expect(wrapper.vm.showBackfillBanner).toBe(false)
+		})
+
+		it('hides after the user dismisses it for the session', () => {
+			const mailbox = regularMailbox()
+			const wrapper = mountThreadFor(mailbox)
+			expect(wrapper.vm.showBackfillBanner).toBe(true)
+
+			wrapper.vm.dismissBackfillBanner()
+
+			expect(store.backfillBannerDismissed[mailbox.databaseId]).toBe(true)
+			expect(wrapper.vm.showBackfillBanner).toBe(false)
 		})
 	})
 })
