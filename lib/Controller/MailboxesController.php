@@ -124,10 +124,24 @@ class MailboxesController extends Controller {
 		$account = $this->accountService->find($effectiveUserId, $accountId);
 
 		$mailboxes = $this->mailManager->getMailboxes($account, $forceSync);
+		// Add the locally-cached message count (the "X" of the "X of Y"
+		// backfill-progress banner -- see Mailbox.vue) to any mailbox still
+		// finishing its initial import. Done here rather than in the pure
+		// jsonSerialize() because it needs a DB COUNT, and scoped to
+		// incomplete mailboxes so the (cheap, indexed) count stops running for
+		// each folder the moment it finishes backfilling. A fully-cached
+		// mailbox is serialized untouched.
+		$serialised = array_map(function (Mailbox $mailbox) {
+			$data = $mailbox->jsonSerialize();
+			if (!$mailbox->isCached()) {
+				$data['cached'] = $this->mailManager->getMailboxLocalMessageCount($mailbox);
+			}
+			return $data;
+		}, $mailboxes);
 		return new JSONResponse([
 			'id' => $accountId,
 			'email' => $account->getEmail(),
-			'mailboxes' => $mailboxes,
+			'mailboxes' => $serialised,
 			'delimiter' => $mailboxes[0]?->getDelimiter(),
 		]);
 	}

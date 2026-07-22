@@ -215,18 +215,21 @@ export default {
 			return this.mainStore.getPreference('sort-order', 'newest')
 		},
 
-		// The "still importing older messages" banner. Only for a real,
-		// single mailbox (not the virtual unified/Priority Inbox, where a
-		// single X-of-Y backfill figure would be meaningless), only while
-		// the folder is genuinely still backfilling (backfillComplete is
-		// set to false ONLY by a sync that reported it incomplete -- gate
-		// on === false, not falsy, so a mailbox that never reported it
-		// doesn't flash the banner), only once there's actually a list to
-		// sit above (hasMessages), and only until the user dismisses it.
+		// The "still importing older messages" banner. Reads straight off the
+		// mailbox metadata (Mailbox::jsonSerialize's isCached/total, plus the
+		// controller-added `cached` for incomplete mailboxes) -- NOT the sync
+		// response, which for an uncached mailbox throws before it can carry
+		// any stats (exactly the mailboxes that need this banner). Only for a
+		// real, single mailbox (not the virtual unified/Priority Inbox, where
+		// a single X-of-Y across many folders is meaningless), only while the
+		// folder is genuinely still backfilling (isCached === false -- gate on
+		// === false, not falsy, so a mailbox whose metadata hasn't loaded yet
+		// doesn't flash it), only once there's a list to sit above
+		// (hasMessages), and only until the user dismisses it.
 		showBackfillBanner() {
 			return !this.isPriorityInbox
 				&& this.hasMessages
-				&& this.mailbox?.backfillComplete === false
+				&& this.mailbox?.isCached === false
 				&& (this.mailbox?.total ?? 0) > 0
 				&& !this.mainStore.backfillBannerDismissed[this.mailbox.databaseId]
 		},

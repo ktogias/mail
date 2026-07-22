@@ -94,12 +94,12 @@ describe('Mailbox', () => {
 
 	describe('backfill-progress banner ("still importing older messages")', () => {
 		// Shown only for a real, non-priority mailbox that's genuinely still
-		// backfilling (backfillComplete === false) and has a list to sit
-		// above, until dismissed. Drives showBackfillBanner directly (the
+		// backfilling (mailbox metadata isCached === false) and has a list to
+		// sit above, until dismissed. Drives showBackfillBanner directly (the
 		// computed), the same pragmatic level the rest of this file uses.
-		function seedBackfilling(view, { complete = false, total = 98000, cached = 5000 } = {}) {
+		function seedBackfilling(view, { isCached = false, total = 98000, cached = 5000 } = {}) {
 			store.getEnvelopes = vi.fn().mockReturnValue([{ databaseId: 1 }])
-			mailbox.backfillComplete = complete
+			mailbox.isCached = isCached
 			mailbox.total = total
 			mailbox.cached = cached
 			return view
@@ -124,9 +124,9 @@ describe('Mailbox', () => {
 			expect(typeof view.vm.backfillBannerText).toBe('string')
 		})
 
-		it('hides once the backfill is complete', () => {
+		it('hides once the backfill is complete (isCached true)', () => {
 			const view = mountMailbox()
-			seedBackfilling(view, { complete: true })
+			seedBackfilling(view, { isCached: true })
 
 			expect(view.vm.showBackfillBanner).toBe(false)
 		})
@@ -138,10 +138,10 @@ describe('Mailbox', () => {
 			expect(view.vm.showBackfillBanner).toBe(false)
 		})
 
-		it('hides when the mailbox never reported progress (backfillComplete undefined, not false)', () => {
+		it('hides when the mailbox metadata has not loaded (isCached undefined, not false)', () => {
 			const view = mountMailbox()
 			store.getEnvelopes = vi.fn().mockReturnValue([{ databaseId: 1 }])
-			// no backfillComplete set at all
+			// no isCached set at all
 
 			expect(view.vm.showBackfillBanner).toBe(false)
 		})

@@ -213,7 +213,7 @@ class MailboxSyncTest extends TestCase {
 
 	public function testSyncStats(): void {
 		$client = $this->createStub(Horde_Imap_Client_Socket::class);
-		$stats = new MailboxStats(42, 10, null);
+		$stats = new MailboxStats(42, 10);
 		$mailbox = new Mailbox();
 		$mailbox->setName('mailbox');
 		$this->folderMapper->expects($this->once())

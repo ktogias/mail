@@ -45,6 +45,17 @@ interface IMailManager {
 	public function getMailboxes(Account $account, bool $forceSync = false): array;
 
 	/**
+	 * Number of messages currently imported into the local DB for a mailbox
+	 * -- the "X" of the "X of Y" backfill-progress indicator, meaningful only
+	 * while a mailbox is still finishing its initial import (isCached()===false).
+	 *
+	 * @param Mailbox $mailbox
+	 *
+	 * @return int
+	 */
+	public function getMailboxLocalMessageCount(Mailbox $mailbox): int;
+
+	/**
 	 * @param Account $account
 	 * @param string $name
 	 * @param string[] $specialUse
