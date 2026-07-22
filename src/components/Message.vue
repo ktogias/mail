@@ -27,6 +27,7 @@
 			<Imip
 				v-for="scheduling in message.scheduling"
 				:key="scheduling.id"
+				:account="account"
 				:scheduling="scheduling" />
 		</div>
 		<MessageHTMLBody
@@ -161,6 +162,18 @@ export default {
 
 	computed: {
 		...mapStores(useMainStore),
+
+		/**
+		 * The account that received this message -- used by the iMIP invitation
+		 * widget for its per-account calendar settings (default calendar, allow
+		 * accepting unmatched invitations).
+		 *
+		 * @return {object|undefined}
+		 */
+		account() {
+			return this.mainStore.getAccount(this.envelope.accountId)
+		},
+
 		from() {
 			return this.message.from.length === 0 ? '?' : this.message.from[0].label || this.message.from[0].email
 		},

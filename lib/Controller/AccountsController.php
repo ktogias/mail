@@ -218,6 +218,8 @@ class AccountsController extends Controller {
 		?bool $searchBody = null,
 		?bool $classificationEnabled = null,
 		?bool $imipCreate = null,
+		?bool $imipAllowUnmatched = null,
+		?string $defaultCalendarUrl = null,
 	): JSONResponse {
 		$effectiveUserId = $this->delegationService->resolveAccountUserId($id, $this->userId);
 		$account = $this->accountService->find($effectiveUserId, $id);
@@ -272,6 +274,13 @@ class AccountsController extends Controller {
 		}
 		if ($imipCreate !== null) {
 			$dbAccount->setImipCreate($imipCreate);
+		}
+		if ($imipAllowUnmatched !== null) {
+			$dbAccount->setImipAllowUnmatched($imipAllowUnmatched);
+		}
+		if ($defaultCalendarUrl !== null) {
+			// Empty string clears the per-account default (fall back to app default).
+			$dbAccount->setDefaultCalendarUrl($defaultCalendarUrl === '' ? null : $defaultCalendarUrl);
 		}
 		$result = new JSONResponse(
 			new Account($this->accountService->save($dbAccount))

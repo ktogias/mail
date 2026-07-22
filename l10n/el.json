@@ -1,4 +1,8 @@
 { "translations": {
+    "Allow accepting invitations even if no participant matches this account (forwards, mailing lists)" : "Να επιτρέπεται η αποδοχή προσκλήσεων ακόμη κι αν κανένας συμμετέχων δεν ταιριάζει με αυτόν τον λογαριασμό (προωθήσεις, λίστες)",
+    "Default calendar for events and invitations" : "Προεπιλεγμένο ημερολόγιο για συμβάντα και προσκλήσεις",
+    "Use app default" : "Χρήση προεπιλογής εφαρμογής",
+    "None of this account's addresses is a participant. Accepting adds you and notifies the organizer." : "Καμία διεύθυνση αυτού του λογαριασμού δεν είναι συμμετέχων. Η αποδοχή σε προσθέτει και ειδοποιεί τον διοργανωτή.",
     "Embedded message %s" : "Ενσωματωμένο μήνυμα %s",
     "Important mail" : "Σημαντική αλληλογραφία",
     "No message found yet" : "Δε βρέθηκε μήνυμα ακόμη.",
