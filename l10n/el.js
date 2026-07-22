@@ -290,6 +290,8 @@ OC.L10N.register(
     "Marked as important" : "Σημειώθηκε ως σημαντικό",
     "Marked as unimportant" : "Σημειώθηκε ως μη σημαντικό",
     "Added to favorites" : "Προστέθηκε στα αγαπημένα",
+    "Still importing older messages ({cached} of {total})" : "Γίνεται ακόμη εισαγωγή παλαιότερων μηνυμάτων ({cached} από {total})",
+    "Still importing older messages …" : "Γίνεται ακόμη εισαγωγή παλαιότερων μηνυμάτων …",
     "Removed from favorites" : "Αφαιρέθηκε από τα αγαπημένα",
     "Thread marked as spam" : "Το νήμα σημειώθηκε ως ανεπιθύμητο",
     "Thread marked as not spam" : "Το νήμα σημειώθηκε ως μη ανεπιθύμητο",

@@ -85,6 +85,11 @@ export default defineStore('main', {
 			// Thread.vue::prefetchListNeighborhood() and Mailbox.vue's
 			// own ReturnScrollAnchorMixin -- see mainStore/actions.js.
 			lastOpenedFromList: null,
+			// Mailbox ids whose "still importing older messages" banner the
+			// user has dismissed this session -- see
+			// dismissBackfillBannerMutation()/Mailbox.vue. Session-only, never
+			// persisted; a plain object keyed by mailbox id.
+			backfillBannerDismissed: {},
 			preferences: {},
 			accountsUnmapped: {
 				[UNIFIED_ACCOUNT_ID]: {
