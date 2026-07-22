@@ -987,6 +987,27 @@ describe('Vuex store actions', () => {
 			// Thread-collapsed: the newest member represents the thread row.
 			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['not:starred is:pi-other']).toContain(81)
 		})
+
+		it('keys the batch thread-members index per thread: a starred sibling in one thread does not leak into another', () => {
+			// Guards the O(1) batch index (partitionThreadMembers) added to
+			// replace the per-envelope full-store scan: a starred sibling must
+			// only affect its OWN threadRootId. Two threads, one with a starred
+			// sibling (thr-a) and one without (thr-b), both get a new reply in the
+			// same batch/bucket.
+			store.envelopes[90] = { databaseId: 90, accountId: 13, mailboxId: 11, uid: 90, dateInt: 90000, threadRootId: 'thr-a', flags: { seen: true, flagged: true, important: false }, tags: {} }
+			store.envelopes[91] = { databaseId: 91, accountId: 13, mailboxId: 11, uid: 91, dateInt: 91000, threadRootId: 'thr-b', flags: { seen: true, flagged: false, important: false }, tags: {} }
+			store.mailboxes[11].envelopeLists['not:starred is:pi-other'] = [91]
+			store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['not:starred is:pi-other'] = [91]
+
+			const replyA = { databaseId: 92, mailboxId: 11, uid: 92, dateInt: 92000, threadRootId: 'thr-a', flags: { seen: false, flagged: false, important: false }, tags: {} }
+			const replyB = { databaseId: 93, mailboxId: 11, uid: 93, dateInt: 93000, threadRootId: 'thr-b', flags: { seen: false, flagged: false, important: false }, tags: {} }
+			store.addEnvelopesMutation({ query: 'not:starred is:pi-other', envelopes: [replyA, replyB] })
+
+			// thr-a has a starred sibling -> its reply is withheld from Other.
+			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['not:starred is:pi-other']).not.toContain(92)
+			// thr-b has no starred sibling -> its reply is added (index didn't leak).
+			expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists['not:starred is:pi-other']).toContain(93)
+		})
 	})
 
 	describe('addEnvelopesMutation: new mail in an existing thread invalidates its cached member list and, if open, proactively prefetches the body', () => {

@@ -4,6 +4,7 @@
  */
 import axios from '@nextcloud/axios'
 import { generateUrl } from '@nextcloud/router'
+import pLimit from 'p-limit'
 import { curry } from 'ramda'
 import { convertAxiosError } from '../errors/convert.js'
 import MalformedSyncResponseError from '../errors/MalformedSyncResponseError.js'
@@ -15,6 +16,22 @@ const amendEnvelopeWithIds = curry((accountId, envelope) => ({
 	accountId,
 	...envelope,
 }))
+
+// A `body:` search is the one envelope query that is NOT a local-DB lookup: it
+// makes a live IMAP SEARCH on the mail server -- an order of magnitude slower
+// (tens of seconds on a large folder) -- and holds a PHP-FPM worker the entire
+// time. The priority/unified inbox fans a single user search out across every
+// section (Favorites/Important/Other) AND every constituent mailbox at once, so
+// one search became 5+ concurrent multi-second IMAP searches that saturated the
+// small dedicated mail FPM pool (4 workers); everything else then queued and
+// 504'd (observed live 2026-07-22, confirmed in a Firefox profile + FPM slow
+// log). Cap concurrent live body searches app-wide so they queue instead of
+// stampeding the pool -- crucially leaving workers free for interactive
+// operations (opening a message, other accounts' syncs). Ordinary local-DB
+// envelope fetches are never throttled.
+const BODY_SEARCH_MAX_CONCURRENCY = 2
+const bodySearchLimit = pLimit(BODY_SEARCH_MAX_CONCURRENCY)
+const isLiveBodySearch = (query) => typeof query === 'string' && /(?:^|\s)body:/.test(query)
 
 export function fetchEnvelope(accountId, id) {
 	const url = generateUrl('/apps/mail/api/messages/{id}', {
@@ -72,7 +89,7 @@ export function fetchEnvelopes(accountId, mailboxId, query, cursor, limit, sort,
 		params.prioritySplit = true
 	}
 
-	return axios
+	const run = () => axios
 		.get(url, {
 			params,
 			signal,
@@ -88,6 +105,12 @@ export function fetchEnvelopes(accountId, mailboxId, query, cursor, limit, sort,
 			}
 			throw convertAxiosError(error)
 		})
+
+	// Live body searches queue behind the shared limiter; everything else runs
+	// immediately. A queued search that gets aborted before it starts still
+	// resolves instantly when dequeued -- axios rejects an already-aborted
+	// signal without touching the network, so it never occupies a worker.
+	return isLiveBodySearch(query) ? bodySearchLimit(run) : run()
 }
 export async function fetchThread(id, { signal } = {}) {
 	const url = generateUrl('apps/mail/api/messages/{id}/thread', {

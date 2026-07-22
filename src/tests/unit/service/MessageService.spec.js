@@ -188,4 +188,60 @@ describe('service/MessageService test suite', () => {
 				.rejects.toThrow('Malformed sync response for mailbox 21')
 		})
 	})
+
+	describe('live body-search concurrency cap', () => {
+		const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
+		const deferred = () => {
+			let resolve
+			const promise = new Promise((r) => {
+				resolve = r
+			})
+			return { promise, resolve: (v) => resolve(v) }
+		}
+
+		it('caps concurrent live body searches at 2 and queues the rest', async () => {
+			generateUrl.mockReturnValue('/url')
+			const d = [deferred(), deferred(), deferred(), deferred()]
+			let i = 0
+			axios.get.mockImplementation(() => d[i++].promise)
+
+			const running = [0, 1, 2, 3].map(() => MessageService.fetchEnvelopes(13, 21, 'body:etsi'))
+			await flush()
+
+			// Only two of the four live searches are in flight; the pool keeps
+			// its remaining workers free.
+			expect(axios.get).toHaveBeenCalledTimes(2)
+
+			// One finishes -> the next queued search starts.
+			d[0].resolve({ data: [] })
+			await flush()
+			expect(axios.get).toHaveBeenCalledTimes(3)
+
+			d[1].resolve({ data: [] })
+			d[2].resolve({ data: [] })
+			d[3].resolve({ data: [] })
+			await Promise.allSettled(running)
+		})
+
+		it('never throttles ordinary (local-DB) envelope fetches', async () => {
+			generateUrl.mockReturnValue('/url')
+			const busy = [deferred(), deferred()]
+			let c = 0
+			axios.get.mockImplementation(() => (c < 2 ? busy[c++].promise : Promise.resolve({ data: [] })))
+
+			// Occupy both body-search slots.
+			const s1 = MessageService.fetchEnvelopes(13, 21, 'body:etsi')
+			const s2 = MessageService.fetchEnvelopes(13, 21, 'body:etsi')
+			await flush()
+			expect(axios.get).toHaveBeenCalledTimes(2)
+
+			// A plain (non-body) query must fire immediately, not queue behind them.
+			await MessageService.fetchEnvelopes(13, 21, 'subject:hello')
+			expect(axios.get).toHaveBeenCalledTimes(3)
+
+			busy[0].resolve({ data: [] })
+			busy[1].resolve({ data: [] })
+			await Promise.allSettled([s1, s2])
+		})
+	})
 })
