@@ -1,3 +1,12 @@
+## 5.10.12 (2026-07-22, resource-constrained deployment fork)
+
+### Observability
+
+* retain fixed, PII-safe search latency histograms in distributed cache for eight days
+* add `occ mail:search:metrics` for p50/p95/p99 upper bounds independent of global log level
+* reserve warning logs for failed or five-second searches
+
+
 ## 5.10.11 (2026-07-22, resource-constrained deployment fork)
 
 ### Observability
@@ -2433,4 +2442,3 @@
 
 * Revert "getStatus()->utf8/utf7imap does not always return with INBOX prefix, let's clean it up for good" ([203ddf5](https://github.com/nextcloud/mail/commit/203ddf5e8da689a2bfdffa8700c13bf444998d14))
 * Revert "Remove wrapping div from backbone view for folders list" ([3098050](https://github.com/nextcloud/mail/commit/3098050b22d5ae619cf27772981fcc2a5e7960d0))
-

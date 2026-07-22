@@ -11,29 +11,44 @@ namespace OCA\Mail\Service\Search;
 
 use OCA\Mail\Db\Mailbox;
 use OCP\AppFramework\Utility\ITimeFactory;
+use OCP\ICacheFactory;
+use OCP\IMemcache;
 use Psr\Log\LoggerInterface;
 use Throwable;
+use function array_fill;
 use function array_sum;
+use function ceil;
 use function count;
+use function gmdate;
 use function implode;
 use function json_encode;
 use function max;
+use function min;
 use function round;
+use function usort;
 
 /**
- * Emits one bounded, PII-safe metric for every physical free-text search.
+ * Records bounded, PII-safe metrics for physical free-text searches.
  *
- * The raw filter and its terms are deliberately never logged. Fixed-shape
- * dimensions make p50/p95/p99 aggregation possible without creating a second
- * high-cardinality database workload on small installations.
+ * Fixed histogram counters live in the distributed cache for eight days. This
+ * captures fast searches even when Nextcloud's production log level suppresses
+ * info messages, without adding database writes or high-cardinality query keys.
+ * Only failures and searches lasting at least five seconds reach the log.
  */
 class SearchTelemetry {
 	private const SLOW_SEARCH_MILLISECONDS = 5000;
 	private const DAY_SECONDS = 24 * 60 * 60;
+	private const RETENTION_SECONDS = 8 * self::DAY_SECONDS;
+	private const MAX_REPORT_DAYS = 8;
+
+	private const PREDICATES = ['to', 'from', 'cc', 'bcc', 'subject', 'body'];
+	private const WINDOW_CLASSES = ['recent_0_30d', 'recent_30_180d', 'deep_180d', 'bounded_other', 'unbounded_or_cursor'];
+	private const HISTOGRAM_UPPER_BOUNDS_MS = [10, 25, 50, 100, 250, 500, 1000, 2000, 5000, 10000, 20000, 60000, 120000];
 
 	public function __construct(
 		private LoggerInterface $logger,
 		private ITimeFactory $time,
+		private ICacheFactory $cacheFactory,
 	) {
 	}
 
@@ -47,29 +62,32 @@ class SearchTelemetry {
 		?int $resultCount,
 		string $status,
 	): void {
-		$shape = $this->queryShape($query);
-		if ($shape === null) {
+		[$shapeMask, $shape, $termCount] = $this->queryShape($query);
+		if ($shapeMask === 0) {
 			return;
 		}
 
 		$durationMs = (int)round(max(0, $durationNanoseconds) / 1_000_000);
-		$termCount = array_sum([
-			count($query->getTo()),
-			count($query->getFrom()),
-			count($query->getCc()),
-			count($query->getBcc()),
-			count($query->getSubjects()),
-			count($query->getBodies()),
-		]);
+		$windowClass = $this->windowClass($query);
+		try {
+			$this->storeHistogram($windowClass, $shapeMask, $prioritySplit, $durationMs, $resultCount, $termCount, $status);
+		} catch (Throwable) {
+			// Metrics must never turn a successful mailbox read into a failure.
+		}
+
+		if ($status === 'ok' && $durationMs < self::SLOW_SEARCH_MILLISECONDS) {
+			return;
+		}
+
 		$metric = [
-			'event' => 'mail_search_metric',
+			'event' => 'mail_search_slow_or_failed',
 			'phase' => 'physical_search',
 			'accountId' => $mailbox->getAccountId(),
 			'mailboxId' => $mailbox->getId(),
 			'queryShape' => $shape,
 			'termCount' => $termCount,
-			'backend' => $query->getBodies() === [] ? 'database' : 'imap_body_and_database',
-			'windowClass' => $this->windowClass($query),
+			'backend' => ($shapeMask & (1 << 5)) !== 0 ? 'imap_body_and_database' : 'database',
+			'windowClass' => $windowClass,
 			'sort' => $sortOrder,
 			'view' => $query->getThreaded() ? 'threaded' : 'singleton',
 			'prioritySplit' => $prioritySplit,
@@ -81,34 +99,161 @@ class SearchTelemetry {
 		];
 
 		try {
-			$message = 'mail_search_metric ' . json_encode($metric, JSON_THROW_ON_ERROR);
-			if ($status !== 'ok' || $durationMs >= self::SLOW_SEARCH_MILLISECONDS) {
-				$this->logger->warning($message);
-			} else {
-				$this->logger->info($message);
-			}
+			$this->logger->warning('mail_search_slow_or_failed ' . json_encode($metric, JSON_THROW_ON_ERROR));
 		} catch (Throwable) {
-			// Observability must never turn a successful mailbox read into an
-			// application failure, including when a custom logger misbehaves.
+			// A custom logger is part of observability, never the search path.
 		}
 	}
 
-	private function queryShape(SearchQuery $query): ?string {
-		$predicates = [];
-		foreach ([
-			'to' => $query->getTo(),
-			'from' => $query->getFrom(),
-			'cc' => $query->getCc(),
-			'bcc' => $query->getBcc(),
-			'subject' => $query->getSubjects(),
-			'body' => $query->getBodies(),
-		] as $name => $terms) {
-			if ($terms !== []) {
-				$predicates[] = $name;
+	/** @return array<int, array<string, int|float|string|bool>> */
+	public function summarize(int $days = 7): array {
+		$cache = $this->cacheFactory->createDistributed('mail_search_metrics');
+		if (!$cache instanceof IMemcache) {
+			return [];
+		}
+
+		$days = min(self::MAX_REPORT_DAYS, max(1, $days));
+		$aggregates = [];
+		for ($dayOffset = 0; $dayOffset < $days; $dayOffset++) {
+			$day = gmdate('Ymd', $this->time->getTime() - $dayOffset * self::DAY_SECONDS);
+			foreach (self::WINDOW_CLASSES as $windowClass) {
+				for ($shapeMask = 1; $shapeMask < (1 << count(self::PREDICATES)); $shapeMask++) {
+					foreach ([false, true] as $prioritySplit) {
+						$prefix = $this->cachePrefix($day, $windowClass, $shapeMask, $prioritySplit);
+						$count = (int)($cache->get($prefix . 'count') ?? 0);
+						if ($count === 0) {
+							continue;
+						}
+						$groupKey = "$windowClass:$shapeMask:" . ($prioritySplit ? '1' : '0');
+						if (!isset($aggregates[$groupKey])) {
+							$aggregates[$groupKey] = [
+								'windowClass' => $windowClass,
+								'shapeMask' => $shapeMask,
+								'prioritySplit' => $prioritySplit,
+								'count' => 0,
+								'errors' => 0,
+								'slow' => 0,
+								'durationMs' => 0,
+								'resultCount' => 0,
+								'termCount' => 0,
+								'histogram' => array_fill(0, count(self::HISTOGRAM_UPPER_BOUNDS_MS), 0),
+							];
+						}
+						$aggregate = &$aggregates[$groupKey];
+						$aggregate['count'] += $count;
+						foreach (['errors', 'slow', 'durationMs', 'resultCount', 'termCount'] as $counter) {
+							$aggregate[$counter] += (int)($cache->get($prefix . $counter) ?? 0);
+						}
+						foreach (self::HISTOGRAM_UPPER_BOUNDS_MS as $bucket => $unused) {
+							$aggregate['histogram'][$bucket] += (int)($cache->get($prefix . "bucket$bucket") ?? 0);
+						}
+						unset($aggregate);
+					}
+				}
 			}
 		}
 
-		return $predicates === [] ? null : implode('+', $predicates);
+		$rows = [];
+		foreach ($aggregates as $aggregate) {
+			$count = $aggregate['count'];
+			$shapeMask = $aggregate['shapeMask'];
+			$rows[] = [
+				'windowClass' => $aggregate['windowClass'],
+				'queryShape' => $this->shapeName($shapeMask),
+				'backend' => ($shapeMask & (1 << 5)) !== 0 ? 'imap_body_and_database' : 'database',
+				'prioritySplit' => $aggregate['prioritySplit'],
+				'count' => $count,
+				'errors' => $aggregate['errors'],
+				'slow' => $aggregate['slow'],
+				'p50UpperMs' => $this->percentileUpperBound($aggregate['histogram'], $count, 0.50),
+				'p95UpperMs' => $this->percentileUpperBound($aggregate['histogram'], $count, 0.95),
+				'p99UpperMs' => $this->percentileUpperBound($aggregate['histogram'], $count, 0.99),
+				'avgMs' => round($aggregate['durationMs'] / $count, 1),
+				'avgResults' => round($aggregate['resultCount'] / $count, 1),
+				'avgTerms' => round($aggregate['termCount'] / $count, 1),
+			];
+		}
+		usort($rows, static fn (array $a, array $b): int => [$b['p95UpperMs'], $b['count']] <=> [$a['p95UpperMs'], $a['count']]);
+		return $rows;
+	}
+
+	private function storeHistogram(string $windowClass, int $shapeMask, bool $prioritySplit, int $durationMs, ?int $resultCount, int $termCount, string $status): void {
+		$cache = $this->cacheFactory->createDistributed('mail_search_metrics');
+		if (!$cache instanceof IMemcache) {
+			return;
+		}
+		$prefix = $this->cachePrefix(gmdate('Ymd', $this->time->getTime()), $windowClass, $shapeMask, $prioritySplit);
+		$this->increment($cache, $prefix . 'count', 1);
+		$this->increment($cache, $prefix . 'durationMs', $durationMs);
+		$this->increment($cache, $prefix . 'resultCount', max(0, $resultCount ?? 0));
+		$this->increment($cache, $prefix . 'termCount', $termCount);
+		if ($status !== 'ok') {
+			$this->increment($cache, $prefix . 'errors', 1);
+		}
+		if ($durationMs >= self::SLOW_SEARCH_MILLISECONDS) {
+			$this->increment($cache, $prefix . 'slow', 1);
+		}
+		$this->increment($cache, $prefix . 'bucket' . $this->histogramBucket($durationMs), 1);
+	}
+
+	private function increment(IMemcache $cache, string $key, int $step): void {
+		$cache->add($key, 0, self::RETENTION_SECONDS);
+		$cache->inc($key, $step);
+	}
+
+	private function cachePrefix(string $day, string $windowClass, int $shapeMask, bool $prioritySplit): string {
+		return "$day:$windowClass:$shapeMask:" . ($prioritySplit ? '1:' : '0:');
+	}
+
+	/** @return array{int, string, int} */
+	private function queryShape(SearchQuery $query): array {
+		$predicates = [
+			$query->getTo(),
+			$query->getFrom(),
+			$query->getCc(),
+			$query->getBcc(),
+			$query->getSubjects(),
+			$query->getBodies(),
+		];
+		$shapeMask = 0;
+		foreach ($predicates as $bit => $terms) {
+			if ($terms !== []) {
+				$shapeMask |= 1 << $bit;
+			}
+		}
+		return [$shapeMask, $this->shapeName($shapeMask), array_sum(array_map('count', $predicates))];
+	}
+
+	private function shapeName(int $shapeMask): string {
+		$names = [];
+		foreach (self::PREDICATES as $bit => $name) {
+			if (($shapeMask & (1 << $bit)) !== 0) {
+				$names[] = $name;
+			}
+		}
+		return implode('+', $names);
+	}
+
+	private function histogramBucket(int $durationMs): int {
+		foreach (self::HISTOGRAM_UPPER_BOUNDS_MS as $bucket => $upperBound) {
+			if ($durationMs <= $upperBound) {
+				return $bucket;
+			}
+		}
+		return count(self::HISTOGRAM_UPPER_BOUNDS_MS) - 1;
+	}
+
+	/** @param int[] $histogram */
+	private function percentileUpperBound(array $histogram, int $count, float $percentile): int {
+		$target = (int)ceil($count * $percentile);
+		$seen = 0;
+		foreach (self::HISTOGRAM_UPPER_BOUNDS_MS as $bucket => $upperBound) {
+			$seen += $histogram[$bucket];
+			if ($seen >= $target) {
+				return $upperBound;
+			}
+		}
+		return self::HISTOGRAM_UPPER_BOUNDS_MS[count(self::HISTOGRAM_UPPER_BOUNDS_MS) - 1];
 	}
 
 	private function windowClass(SearchQuery $query): string {
