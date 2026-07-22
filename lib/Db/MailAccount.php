@@ -195,6 +195,19 @@ class MailAccount extends Entity {
 	protected bool $imipCreate = false;
 
 	/**
+	 * Accept calendar invitations even when none of the event's attendees
+	 * matches a configured address of this account (forwards, mailing lists).
+	 */
+	protected bool $imipAllowUnmatched = false;
+
+	/**
+	 * CalDAV URL of the calendar that events created from emails and accepted
+	 * invitations on this account default to. Null = fall back to the app/
+	 * principal default.
+	 */
+	protected ?string $defaultCalendarUrl = null;
+
+	/**
 	 * @param array $params
 	 */
 	public function __construct(array $params = []) {
@@ -260,6 +273,12 @@ class MailAccount extends Entity {
 		if (isset($params['imipCreate'])) {
 			$this->setImipCreate($params['imipCreate']);
 		}
+		if (isset($params['imipAllowUnmatched'])) {
+			$this->setImipAllowUnmatched($params['imipAllowUnmatched']);
+		}
+		if (isset($params['defaultCalendarUrl'])) {
+			$this->setDefaultCalendarUrl($params['defaultCalendarUrl']);
+		}
 
 		$this->addType('inboundPort', 'integer');
 		$this->addType('outboundPort', 'integer');
@@ -286,6 +305,8 @@ class MailAccount extends Entity {
 		$this->addType('debug', 'boolean');
 		$this->addType('classificationEnabled', 'boolean');
 		$this->addType('imipCreate', 'boolean');
+		$this->addType('imipAllowUnmatched', 'boolean');
+		$this->addType('defaultCalendarUrl', 'string');
 	}
 
 	public function getOutOfOfficeFollowsSystem(): bool {
@@ -337,6 +358,8 @@ class MailAccount extends Entity {
 			'debug' => $this->getDebug(),
 			'classificationEnabled' => $this->getClassificationEnabled(),
 			'imipCreate' => $this->getImipCreate(),
+			'imipAllowUnmatched' => $this->getImipAllowUnmatched(),
+			'defaultCalendarUrl' => $this->getDefaultCalendarUrl(),
 		];
 
 		if (!is_null($this->getOutboundHost())) {

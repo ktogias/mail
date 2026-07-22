@@ -440,6 +440,51 @@ class AccountsControllerTest extends TestCase {
 		self::assertEquals(new JSONResponse(new Account($mailAccount)), $response);
 	}
 
+	public function testPatchAccountSetsCalendarSettings(): void {
+		$mailAccount = new MailAccount();
+		$mailAccount->setId($this->accountId);
+		$mailAccount->setUserId($this->userId);
+		$account = new Account($mailAccount);
+		$this->accountService->expects(self::once())
+			->method('find')
+			->with($this->userId, $this->accountId)
+			->willReturn($account);
+		$this->accountService->expects(self::once())
+			->method('save')
+			->willReturn($mailAccount);
+
+		$this->controller->patchAccount(
+			$this->accountId,
+			imipAllowUnmatched: true,
+			defaultCalendarUrl: 'https://cloud.example/remote.php/dav/calendars/user/personal/',
+		);
+
+		self::assertTrue($mailAccount->getImipAllowUnmatched());
+		self::assertSame(
+			'https://cloud.example/remote.php/dav/calendars/user/personal/',
+			$mailAccount->getDefaultCalendarUrl(),
+		);
+	}
+
+	public function testPatchAccountClearsDefaultCalendarOnEmptyString(): void {
+		$mailAccount = new MailAccount();
+		$mailAccount->setId($this->accountId);
+		$mailAccount->setUserId($this->userId);
+		$mailAccount->setDefaultCalendarUrl('https://cloud.example/remote.php/dav/calendars/user/old/');
+		$account = new Account($mailAccount);
+		$this->accountService->expects(self::once())
+			->method('find')
+			->with($this->userId, $this->accountId)
+			->willReturn($account);
+		$this->accountService->expects(self::once())
+			->method('save')
+			->willReturn($mailAccount);
+
+		$this->controller->patchAccount($this->accountId, defaultCalendarUrl: '');
+
+		self::assertNull($mailAccount->getDefaultCalendarUrl());
+	}
+
 	public function testUpdateSmimeCertificateLogsDelegatedAction(): void {
 		$mailAccount = new MailAccount();
 		$mailAccount->setId($this->accountId);

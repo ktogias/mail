@@ -220,7 +220,11 @@ export default {
 		this.calendars = (await getUserCalendars()).filter((c) => c.writable)
 
 		if (this.calendars.length) {
-			this.selectedCalendar = this.calendars[0]
+			// Prefer the receiving account's configured default calendar.
+			const account = this.mainStore.getAccount(this.envelope.accountId)
+			const defaultUrl = account?.defaultCalendarUrl
+			this.selectedCalendar = (defaultUrl && this.calendars.find((c) => c.url === defaultUrl))
+				|| this.calendars[0]
 		}
 	},
 

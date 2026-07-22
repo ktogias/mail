@@ -71,7 +71,7 @@
 			</div>
 		</div>
 
-		<template v-if="isRequest && userIsAttendee">
+		<template v-if="canReact">
 			<div
 				v-if="!wasProcessed && eventIsInFuture && existingEventFetched"
 				class="imip__actions imip__actions--buttons">
@@ -83,6 +83,7 @@
 					{{ t('mail', 'Accept') }}
 				</NcButton>
 				<NcButton
+					v-if="userIsAttendee"
 					variant="tertiary"
 					:disabled="loading"
 					:aria-label="t('mail', 'Decline')"
@@ -109,8 +110,11 @@
 			<p v-else-if="!eventIsInFuture" class="imip__actions imip__actions--hint">
 				{{ t('mail', 'This message has an attached invitation but the invitation dates are in the past') }}
 			</p>
+			<p v-if="!userIsAttendee && eventIsInFuture" class="imip__actions imip__actions--hint">
+				{{ t('mail', 'None of this account\'s addresses is a participant. Accepting adds you and notifies the organizer.') }}
+			</p>
 		</template>
-		<div v-if="!userIsAttendee" class="imip__actions imip__actions--hint">
+		<div v-if="!userIsAttendee && !allowUnmatchedAccept" class="imip__actions imip__actions--hint">
 			{{ t('mail', 'This message has an attached invitation but the invitation does not contain a participant that matches any configured mail account address') }}
 		</div>
 	</div>
@@ -186,6 +190,15 @@ export default {
 		scheduling: {
 			type: Object,
 			required: true,
+		},
+
+		// The account that received the message. Optional so the widget still
+		// renders where an account isn't handy; its per-account calendar
+		// settings (default calendar, accept-unmatched) then simply don't apply.
+		account: {
+			type: Object,
+			required: false,
+			default: undefined,
 		},
 	},
 
@@ -316,15 +329,67 @@ export default {
 		},
 
 		/**
+		 * The current user's own calendar-user-addresses (the CalDAV principal's
+		 * set, or the bare principal email as a fallback).
+		 *
+		 * @return {Array<string>}
+		 */
+		ownCalendarUserAddresses() {
+			return this.currentUserPrincipal.calendarUserAddressSet?.length
+				? this.currentUserPrincipal.calendarUserAddressSet
+				: [this.currentUserPrincipalEmail]
+		},
+
+		/**
 		 * Check if the user is an attendee of the attached event.
 		 *
 		 * @return {boolean}
 		 */
 		userIsAttendee() {
-			return !!findAttendee(
-				this.attachedVEvent,
-				this.currentUserPrincipal.calendarUserAddressSet?.length ? this.currentUserPrincipal.calendarUserAddressSet : [this.currentUserPrincipalEmail],
-			)
+			return !!findAttendee(this.attachedVEvent, this.ownCalendarUserAddresses)
+		},
+
+		/**
+		 * Per-account setting: accept invitations even when no attendee matches
+		 * a configured address of the receiving account (forwards, lists). When
+		 * on, the user is added as a "party crasher" attendee on accept so the
+		 * server still sends a REPLY to the organizer.
+		 *
+		 * @return {boolean}
+		 */
+		allowUnmatchedAccept() {
+			return !!this.account?.imipAllowUnmatched
+		},
+
+		/**
+		 * Whether accept/tentative actions should be offered: either the user is
+		 * a real attendee, or the account opted into accepting unmatched invites.
+		 *
+		 * @return {boolean}
+		 */
+		canReact() {
+			return this.isRequest && (this.userIsAttendee || this.allowUnmatchedAccept)
+		},
+
+		/**
+		 * The own address to add as a party-crasher attendee. Must be one the
+		 * CalDAV principal recognises or the server won't send the REPLY; prefer
+		 * the receiving account's own address when the principal knows it.
+		 *
+		 * @return {string|undefined}
+		 */
+		partyCrasherAddress() {
+			const addresses = this.ownCalendarUserAddresses
+				.map((addr) => removeMailtoPrefix(addr.toLowerCase()))
+				.filter((addr) => addr.includes('@'))
+			if (addresses.length === 0) {
+				return undefined
+			}
+			const accountEmail = this.account?.emailAddress?.toLowerCase()
+			if (accountEmail && addresses.includes(accountEmail)) {
+				return accountEmail
+			}
+			return addresses[0]
 		},
 
 		/**
@@ -333,10 +398,7 @@ export default {
 		 * @return {string|undefined}
 		 */
 		existingParticipationStatus() {
-			const attendee = findAttendee(
-				this.existingVEvent,
-				this.currentUserPrincipal.calendarUserAddressSet?.length ? this.currentUserPrincipal.calendarUserAddressSet : [this.currentUserPrincipalEmail],
-			)
+			const attendee = findAttendee(this.existingVEvent, this.ownCalendarUserAddresses)
 			return attendee?.participationStatus ?? undefined
 		},
 
@@ -425,10 +487,18 @@ export default {
 					return
 				}
 
-				const defaultCalendar = calendarsForPicker.find((cal) => cal.url === this.currentUserPrincipal.scheduleDefaultCalendarUrl)
+				// Prefer the receiving account's configured default calendar,
+				// then the CalDAV principal's schedule-default, then the first.
+				const accountDefaultUrl = this.account?.defaultCalendarUrl
+				const accountDefault = accountDefaultUrl
+					? calendarsForPicker.find((cal) => cal.url === accountDefaultUrl)
+					: undefined
+				const scheduleDefault = calendarsForPicker.find((cal) => cal.url === this.currentUserPrincipal.scheduleDefaultCalendarUrl)
 
-				if (defaultCalendar) {
-					this.targetCalendar = defaultCalendar
+				if (accountDefault) {
+					this.targetCalendar = accountDefault
+				} else if (scheduleDefault) {
+					this.targetCalendar = scheduleDefault
 				} else if (calendarsForPicker.length > 0) {
 					this.targetCalendar = calendarsForPicker[0]
 				}
@@ -449,6 +519,33 @@ export default {
 			await this.saveEventWithParticipationStatus(DECLINED)
 		},
 
+		/**
+		 * Add the current user as a new ("party crasher") attendee to the event,
+		 * for invitations where none of the attendees matches this account. The
+		 * added address must be one the CalDAV principal owns so the server
+		 * emits the REPLY to the organizer.
+		 *
+		 * @param {EventComponent} vEvent The event to add the attendee to.
+		 * @return {AttendeeProperty|undefined} The added attendee, or undefined
+		 *   if no usable own address exists.
+		 */
+		addSelfAsAttendee(vEvent) {
+			const address = this.partyCrasherAddress
+			if (!address) {
+				return undefined
+			}
+
+			const attendee = new AttendeeProperty('ATTENDEE', `mailto:${address}`)
+			attendee.setParameter(new Parameter('ROLE', 'REQ-PARTICIPANT'))
+			attendee.setParameter(new Parameter('RSVP', 'TRUE'))
+			const commonName = this.currentUserPrincipal.displayname
+			if (commonName) {
+				attendee.setParameter(new Parameter('CN', commonName))
+			}
+			vEvent.addProperty(attendee)
+			return attendee
+		},
+
 		async saveEventWithParticipationStatus(status) {
 			let vCalendar
 			if (this.isExistingEvent) {
@@ -457,12 +554,19 @@ export default {
 				vCalendar = this.attachedVCalendar
 			}
 			const vEvent = vCalendar.getFirstComponent('VEVENT')
-			const attendee = findAttendee(
-				vEvent,
-				this.currentUserPrincipal.calendarUserAddressSet?.length ? this.currentUserPrincipal.calendarUserAddressSet : [this.currentUserPrincipalEmail],
-			)
+			let attendee = findAttendee(vEvent, this.ownCalendarUserAddresses)
 			if (!attendee) {
-				return
+				// No attendee matches this account. Only proceed if the account
+				// opted in, and then as a "party crasher": add ourselves as a
+				// new attendee so the server's CalDAV scheduling still sends a
+				// REPLY to the organizer (matches Outlook/Google behaviour).
+				if (!this.allowUnmatchedAccept) {
+					return
+				}
+				attendee = this.addSelfAsAttendee(vEvent)
+				if (!attendee) {
+					return
+				}
 			}
 
 			const calendar = this.targetCalendarDavObject
