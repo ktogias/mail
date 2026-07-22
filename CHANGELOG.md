@@ -1,3 +1,17 @@
+## 5.10.10 (2026-07-22, resource-constrained deployment fork)
+
+### Performance Improvements
+
+* return bounded recent free-text search results before scanning older history
+* add durable, cancellable one-page deep-search jobs with progress metadata
+* serialize deep-search chunks behind an instance-wide background bulkhead
+
+### Database
+
+* add the `mail_search_jobs` table through Nextcloud upgrade migration `Version5010Date20260722120000`
+* register hourly TTL cleanup through the same migration; no production-only DDL is required
+
+
 ## [5.10.9](https://github.com/nextcloud/mail/compare/v5.10.8...v5.10.9) (2026-07-21)
 
 
@@ -2410,6 +2424,5 @@
 
 * Revert "getStatus()->utf8/utf7imap does not always return with INBOX prefix, let's clean it up for good" ([203ddf5](https://github.com/nextcloud/mail/commit/203ddf5e8da689a2bfdffa8700c13bf444998d14))
 * Revert "Remove wrapping div from backbone view for folders list" ([3098050](https://github.com/nextcloud/mail/commit/3098050b22d5ae619cf27772981fcc2a5e7960d0))
-
 
 
