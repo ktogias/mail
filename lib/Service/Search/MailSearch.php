@@ -22,6 +22,9 @@ use OCA\Mail\IMAP\Search\Provider as ImapSearchProvider;
 use OCP\AppFramework\Db\DoesNotExistException;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\IUser;
+use Throwable;
+use function count;
+use function hrtime;
 
 class MailSearch implements IMailSearch {
 	/** @var ITimeFactory */
@@ -32,6 +35,7 @@ class MailSearch implements IMailSearch {
 		private ImapSearchProvider $imapSearchProvider,
 		private MessageMapper $messageMapper,
 		private PreviewEnhancer $previewEnhancer,
+		private SearchTelemetry $searchTelemetry,
 		ITimeFactory $timeFactory,
 	) {
 		$this->timeFactory = $timeFactory;
@@ -121,20 +125,41 @@ class MailSearch implements IMailSearch {
 			$query->addFlag(Flag::not(Flag::DELETED));
 		}
 
-		// liveEnhance=false: a folder listing must not block on live IMAP
-		// work (structure analysis, attachment lookups) the way opening one
-		// specific message (findMessage(), above) reasonably still does.
-		return $this->previewEnhancer->process(
-			$account,
-			$mailbox,
-			$this->messageMapper->findByIds($account->getUserId(),
-				$this->getIdsLocally($account, $mailbox, $query, $sortOrder, $limit, $prioritySplit),
+		$started = hrtime(true);
+		$resultCount = null;
+		$status = 'ok';
+		try {
+			// liveEnhance=false: a folder listing must not block on live IMAP
+			// work (structure analysis, attachment lookups) the way opening one
+			// specific message (findMessage(), above) reasonably still does.
+			$messages = $this->previewEnhancer->process(
+				$account,
+				$mailbox,
+				$this->messageMapper->findByIds($account->getUserId(),
+					$this->getIdsLocally($account, $mailbox, $query, $sortOrder, $limit, $prioritySplit),
+					$sortOrder,
+				),
+				true,
+				$userId,
+				false
+			);
+			$resultCount = count($messages);
+			return $messages;
+		} catch (Throwable $e) {
+			$status = 'error';
+			throw $e;
+		} finally {
+			$this->searchTelemetry->record(
+				$query,
+				$mailbox,
 				$sortOrder,
-			),
-			true,
-			$userId,
-			false
-		);
+				$prioritySplit,
+				$limit,
+				hrtime(true) - $started,
+				$resultCount,
+				$status,
+			);
+		}
 	}
 
 	/**

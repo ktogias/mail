@@ -20,6 +20,7 @@ use OCA\Mail\Service\Search\FilterStringParser;
 use OCA\Mail\Service\Search\Flag;
 use OCA\Mail\Service\Search\MailSearch;
 use OCA\Mail\Service\Search\SearchQuery;
+use OCA\Mail\Service\Search\SearchTelemetry;
 use OCP\AppFramework\Utility\ITimeFactory;
 use PHPUnit\Framework\MockObject\MockObject;
 
@@ -42,6 +43,8 @@ class MailSearchTest extends TestCase {
 	/** @var ITimeFactory|MockObject */
 	private $timeFactory;
 
+	private SearchTelemetry&MockObject $searchTelemetry;
+
 	protected function setUp(): void {
 		parent::setUp();
 
@@ -50,12 +53,14 @@ class MailSearchTest extends TestCase {
 		$this->messageMapper = $this->createMock(MessageMapper::class);
 		$this->previewEnhancer = $this->createMock(PreviewEnhancer::class);
 		$this->timeFactory = $this->createMock(ITimeFactory::class);
+		$this->searchTelemetry = $this->createMock(SearchTelemetry::class);
 
 		$this->search = new MailSearch(
 			$this->filterStringParser,
 			$this->imapSearchProvider,
 			$this->messageMapper,
 			$this->previewEnhancer,
+			$this->searchTelemetry,
 			$this->timeFactory
 		);
 	}
@@ -174,6 +179,9 @@ class MailSearchTest extends TestCase {
 		$this->previewEnhancer->expects($this->once())
 			->method('process')
 			->willReturnArgument(2);
+		$this->searchTelemetry->expects($this->once())
+			->method('record')
+			->with($query, $mailbox, 'DESC', false, null, $this->isType('int'), 2, 'ok');
 
 		$messages = $this->search->findMessages(
 			$account,

@@ -1,3 +1,12 @@
+## 5.10.11 (2026-07-22, resource-constrained deployment fork)
+
+### Observability
+
+* emit one PII-safe structured metric for every physical free-text search
+* classify recent, medium and deep windows without logging query terms or user ids
+* promote failed and five-second searches to warnings for low-volume alerting
+
+
 ## 5.10.10 (2026-07-22, resource-constrained deployment fork)
 
 ### Performance Improvements
@@ -2424,5 +2433,4 @@
 
 * Revert "getStatus()->utf8/utf7imap does not always return with INBOX prefix, let's clean it up for good" ([203ddf5](https://github.com/nextcloud/mail/commit/203ddf5e8da689a2bfdffa8700c13bf444998d14))
 * Revert "Remove wrapping div from backbone view for folders list" ([3098050](https://github.com/nextcloud/mail/commit/3098050b22d5ae619cf27772981fcc2a5e7960d0))
-
 
