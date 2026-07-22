@@ -92,6 +92,54 @@ describe('Mailbox', () => {
 		})
 	})
 
+	describe('durable deep-search status', () => {
+		it('keeps the fast empty result responsive while showing background progress', () => {
+			store.setDeepSearchJobMutation({
+				mailboxId: 38,
+				query: 'subject:archive',
+				job: {
+					id: 7,
+					status: 'running',
+					resultCount: 0,
+					chunksCompleted: 2,
+					searchedThrough: 1_600_000_000,
+					exhausted: false,
+				},
+			})
+
+			const wrapper = mountMailbox({ searchQuery: 'subject:archive' })
+
+			expect(wrapper.find('.deep-search-banner').exists()).toBe(true)
+			expect(wrapper.vm.deepSearchState).toEqual(expect.objectContaining({
+				status: 'running',
+				chunksCompleted: 2,
+			}))
+		})
+
+		it('reports completion without blocking the result list', () => {
+			store.setDeepSearchJobMutation({
+				mailboxId: 38,
+				query: 'subject:archive',
+				job: {
+					id: 7,
+					status: 'complete',
+					resultCount: 3,
+					chunksCompleted: 4,
+					searchedThrough: 1_000_000_000,
+					exhausted: false,
+				},
+			})
+
+			const wrapper = mountMailbox({ searchQuery: 'subject:archive' })
+
+			expect(wrapper.find('.deep-search-banner').exists()).toBe(true)
+			expect(wrapper.vm.deepSearchState).toEqual(expect.objectContaining({
+				status: 'complete',
+				resultCount: 3,
+			}))
+		})
+	})
+
 	describe('backfill-progress banner ("still importing older messages")', () => {
 		// Shown only for a real, non-priority mailbox that's genuinely still
 		// backfilling (backfillComplete === false) and has a list to sit

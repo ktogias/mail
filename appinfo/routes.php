@@ -511,6 +511,21 @@ return [
 			'verb' => 'POST',
 		],
 		[
+			'name' => 'deepSearch#create',
+			'url' => '/api/search-jobs',
+			'verb' => 'POST',
+		],
+		[
+			'name' => 'deepSearch#show',
+			'url' => '/api/search-jobs/{id}',
+			'verb' => 'GET',
+		],
+		[
+			'name' => 'deepSearch#destroy',
+			'url' => '/api/search-jobs/{id}',
+			'verb' => 'DELETE',
+		],
+		[
 			'name' => 'delegation#getDelegatedUsers',
 			'url' => '/api/delegations/{accountId}',
 			'verb' => 'GET',

@@ -25,6 +25,17 @@
 				</template>
 			</NcButton>
 		</div>
+		<div
+			v-if="deepSearchState"
+			class="backfill-banner deep-search-banner"
+			:class="{ 'deep-search-banner--failed': deepSearchState.status === 'failed' }"
+			role="status">
+			<IconLoading
+				v-if="deepSearchState.status === 'running'"
+				:size="18"
+				class="backfill-banner__spinner" />
+			<span class="backfill-banner__text">{{ deepSearchStatusText }}</span>
+		</div>
 		<Error
 			v-if="error"
 			:error="errorTitle"
@@ -240,6 +251,31 @@ export default {
 				cached: cached.toLocaleString(),
 				total: (this.mailbox?.total ?? 0).toLocaleString(),
 			})
+		},
+
+		deepSearchState() {
+			if (!this.searchQuery) {
+				return undefined
+			}
+			return this.mainStore.getDeepSearchState(this.mailbox.databaseId, this.searchQuery)
+		},
+
+		deepSearchStatusText() {
+			if (this.deepSearchState?.status === 'running') {
+				if (this.deepSearchState.chunksCompleted > 0) {
+					return t('mail', 'Searching older messages in the background ({count} archive ranges checked) …', {
+						count: this.deepSearchState.chunksCompleted,
+					})
+				}
+				return t('mail', 'Searching older messages in the background …')
+			}
+			if (this.deepSearchState?.status === 'failed') {
+				return t('mail', 'The search through older messages could not be completed.')
+			}
+			if (this.deepSearchState?.resultCount > 0) {
+				return t('mail', 'Search through older messages complete. Older results were added.')
+			}
+			return t('mail', 'Search through older messages complete. No older matches were found.')
 		},
 
 		envelopes() {

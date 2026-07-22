@@ -59,6 +59,11 @@ import {
 	getCurrentUserPrincipal,
 	initializeClientForUserView,
 } from '../../service/caldavService.js'
+import {
+	cancelDeepSearch,
+	getDeepSearch,
+	startDeepSearch,
+} from '../../service/DeepSearchService.js'
 import { moveDraft, updateDraft } from '../../service/DraftService.js'
 import * as FollowUpService from '../../service/FollowUpService.js'
 import {
@@ -227,7 +232,7 @@ function progressivePageIsComplete(envelopes, view, prioritySplit) {
 	return Object.values(counts).every((count) => count >= PAGE_SIZE)
 }
 
-async function fetchProgressiveSearchPage({ query, sortOrder, view, upperBound, prioritySplit = false, fetchPage }) {
+async function fetchProgressiveSearchPage({ query, sortOrder, view, upperBound, prioritySplit = false, fetchPage, onNeedsDeep }) {
 	const windows = progressiveSearchWindows(query, sortOrder, upperBound)
 	if (windows === null) {
 		return fetchPage(query)
@@ -238,7 +243,11 @@ async function fetchProgressiveSearchPage({ query, sortOrder, view, upperBound, 
 		return capProgressiveResults(recent, sortOrder, view, prioritySplit)
 	}
 	const extended = await fetchPage(windows[1])
-	return capProgressiveResults([recent, extended], sortOrder, view, prioritySplit)
+	const combined = capProgressiveResults([recent, extended], sortOrder, view, prioritySplit)
+	if (!progressivePageIsComplete(combined, view, prioritySplit)) {
+		onNeedsDeep?.()
+	}
+	return combined
 }
 
 const addMailboxToState = curry((mailboxes, account, mailbox) => {
@@ -372,6 +381,13 @@ const pendingUnifiedSyncs = new Map()
 // process-wide Map) so test stores and independently-mounted app instances
 // cannot reuse each other's results.
 let pendingUnifiedContentSearches = new WeakMap()
+
+// Browser-local coalescing mirrors the API's durable job_key coalescing: one
+// poll loop per physical mailbox/query/cursor even when several Priority or
+// Unified Inbox sections request the same deep page simultaneously.
+let pendingDeepSearches = new WeakMap()
+const DEEP_SEARCH_POLL_INTERVAL_MS = 1500
+const DEEP_SEARCH_MAX_POLLS = 600
 
 // Upper bound for a single message/thread fetch -- see fetchMessage()
 // for the reasoning. Well above the slowest legitimate fetch observed
@@ -1077,6 +1093,7 @@ let sharedNetworkLimiter = new ConcurrencyLimiter(SHARED_NETWORK_CONCURRENCY)
 export function resetSharedNetworkLimiterForTests() {
 	sharedNetworkLimiter = new ConcurrencyLimiter(SHARED_NETWORK_CONCURRENCY)
 	pendingUnifiedContentSearches = new WeakMap()
+	pendingDeepSearches = new WeakMap()
 }
 
 /**
@@ -1770,6 +1787,128 @@ export default function mainStoreActions() {
 				Vue.set(this.envelopeFetchCounts, key, count)
 			}
 		},
+		setDeepSearchJobMutation({ mailboxId, query, job }) {
+			const key = mailboxId + '::' + normalizedEnvelopeListId(query)
+			if (!this.deepSearchJobs[key]) {
+				Vue.set(this.deepSearchJobs, key, {})
+			}
+			Vue.set(this.deepSearchJobs[key], job.id, job)
+		},
+		getDeepSearchState(mailboxId, query) {
+			const jobs = Object.values(this.deepSearchJobs[mailboxId + '::' + normalizedEnvelopeListId(query)] ?? {})
+			if (jobs.length === 0) {
+				return undefined
+			}
+			const active = jobs.filter((job) => job.status === 'queued' || job.status === 'running')
+			const failed = jobs.filter((job) => job.status === 'failed')
+			return {
+				status: active.length > 0 ? 'running' : (failed.length === jobs.length ? 'failed' : 'complete'),
+				activeJobs: active.length,
+				resultCount: jobs.reduce((sum, job) => sum + (job.resultCount ?? 0), 0),
+				chunksCompleted: jobs.reduce((sum, job) => sum + (job.chunksCompleted ?? 0), 0),
+				searchedThrough: (() => {
+					const positions = jobs.map((job) => job.searchedThrough).filter(Number.isFinite)
+					return positions.length > 0 ? Math.min(...positions) : undefined
+				})(),
+				exhausted: jobs.every((job) => job.exhausted === true),
+			}
+		},
+		async fetchDeepSearchPage({
+			mailboxId,
+			query,
+			cursor,
+			cursorId,
+			prioritySplit = false,
+			addToUnifiedMailboxes = true,
+			statusMailboxId = mailboxId,
+			statusQuery = query,
+			signal,
+		}) {
+			const sort = this.getPreference('sort-order', 'newest')
+			const view = this.getPreference('layout-message-view', 'threaded')
+			if (!usesProgressiveSearch(query, sort)) {
+				return []
+			}
+
+			let pendingForStore = pendingDeepSearches.get(this)
+			if (!pendingForStore) {
+				pendingForStore = new Map()
+				pendingDeepSearches.set(this, pendingForStore)
+			}
+			const key = [mailboxId, query, cursor, cursorId ?? '', sort, view, prioritySplit].join('::')
+			let pending = pendingForStore.get(key)
+			const targetKey = statusMailboxId + '::' + normalizedEnvelopeListId(statusQuery)
+			if (!pending) {
+				// Pages for one physical search are strictly sequential. If its
+				// automatic post-foreground continuation is still running when
+				// infinite scroll asks for more, join that page first instead of
+				// launching an overlapping cursor range.
+				const prefix = [mailboxId, query].join('::') + '::'
+				pending = [...pendingForStore.entries()]
+					.find(([pendingKey]) => pendingKey.startsWith(prefix))?.[1]
+			}
+			if (pending) {
+				pending.targets.set(targetKey, { mailboxId: statusMailboxId, query: statusQuery })
+				return pending.promise
+			}
+
+			pending = {
+				jobId: undefined,
+				targets: new Map([[targetKey, { mailboxId: statusMailboxId, query: statusQuery }]]),
+			}
+			const publish = (job) => {
+				pending.targets.forEach((target) => this.setDeepSearchJobMutation({ ...target, job }))
+			}
+			pending.promise = (async () => {
+				let job
+				try {
+					job = await startDeepSearch({
+						mailboxId,
+						filter: query,
+						cursor,
+						cursorId,
+						sort: sort === 'oldest' ? 'ASC' : 'DESC',
+						view,
+						limit: PAGE_SIZE,
+						prioritySplit,
+						signal,
+					})
+					pending.jobId = job.id
+					publish(job)
+					for (let poll = 0; poll < DEEP_SEARCH_MAX_POLLS; poll++) {
+						if (job.status === 'complete') {
+							this.addEnvelopesMutation({
+								query,
+								envelopes: job.results,
+								addToUnifiedMailboxes,
+							})
+							return job.results
+						}
+						if (job.status === 'failed') {
+							throw new Error(`Deep search failed: ${job.errorCode ?? 'search_failed'}`)
+						}
+						if (job.status === 'cancelled' || signal?.aborted) {
+							const error = new Error('Deep search was superseded')
+							error.name = 'AbortError'
+							throw error
+						}
+						await wait(DEEP_SEARCH_POLL_INTERVAL_MS)
+						job = await getDeepSearch(job.id, { signal })
+						publish(job)
+					}
+					throw new Error('Deep search polling timed out')
+				} catch (error) {
+					if (pending.jobId !== undefined && (signal?.aborted || error.name === 'AbortError' || axios.isCancel(error))) {
+						cancelDeepSearch(pending.jobId).catch(() => {})
+					}
+					throw error
+				} finally {
+					pendingForStore.delete(key)
+				}
+			})()
+			pendingForStore.set(key, pending)
+			return pending.promise
+		},
 		isFetchingEnvelopes(mailboxId, query) {
 			return (this.envelopeFetchCounts[mailboxId + '::' + normalizedEnvelopeListId(query)] ?? 0) > 0
 		},
@@ -1903,6 +2042,30 @@ export default function mainStoreActions() {
 					})
 					return envelopes
 				})
+				// The foreground 0-30/30-180 day slices are already visible.
+				// Continue incomplete physical mailboxes through the durable
+				// single-worker path without holding this response open. Calls
+				// from the sibling Priority/Unified sections coalesce locally
+				// and server-side; registering each section as a status target
+				// lets every visible section show the same shared progress.
+				successfulResults
+					.filter((result) => !progressivePageIsComplete(result.envelopes, view, true))
+					.forEach((result) => {
+						this.fetchDeepSearchPage({
+							mailboxId: result.mailbox.databaseId,
+							query: descriptor.baseQuery,
+							cursor: searchUpperBound - SEARCH_EXTENDED_WINDOW_SECONDS,
+							prioritySplit: true,
+							addToUnifiedMailboxes: true,
+							statusMailboxId: mailbox.databaseId,
+							statusQuery: query,
+							signal,
+						}).catch((error) => {
+							if (!signal?.aborted && !axios.isCancel(error) && error.name !== 'AbortError') {
+								logger.error(`Background deep search failed for mailbox ${result.mailbox.databaseId}: ${error}`, { error })
+							}
+						})
+					})
 				const envelopes = sliceToPage(combineEnvelopeLists(sortOrder)(matchingByMailbox))
 				this.replaceKnownEnvelopeListMutation({
 					mailboxId: mailbox.databaseId,
@@ -1919,6 +2082,9 @@ export default function mainStoreActions() {
 			mailboxId,
 			query,
 			addToUnifiedMailboxes = true,
+			deepAddToUnifiedMailboxes = addToUnifiedMailboxes,
+			deepStatusMailboxId = mailboxId,
+			deepStatusQuery = query,
 			includeCacheBuster = false,
 			signal,
 			searchUpperBound,
@@ -1963,6 +2129,9 @@ export default function mainStoreActions() {
 							mailboxId: mb.databaseId,
 							query,
 							addToUnifiedMailboxes: false,
+							deepAddToUnifiedMailboxes: true,
+							deepStatusMailboxId: mailbox.databaseId,
+							deepStatusQuery: query,
 							sort: this.getPreference('sort-order'),
 							view: this.getPreference('layout-message-view'),
 							signal,
@@ -2019,6 +2188,9 @@ export default function mainStoreActions() {
 								mailboxId: mb.databaseId,
 								query,
 								addToUnifiedMailboxes: false,
+								deepAddToUnifiedMailboxes: true,
+								deepStatusMailboxId: mailbox.databaseId,
+								deepStatusQuery: query,
 								signal,
 								searchUpperBound,
 							}).catch((error) => {
@@ -2047,11 +2219,13 @@ export default function mainStoreActions() {
 
 				const sortOrder = this.getPreference('sort-order')
 				const view = this.getPreference('layout-message-view')
+				let needsDeep = false
 				return fetchProgressiveSearchPage({
 					query,
 					sortOrder,
 					view,
 					upperBound: searchUpperBound,
+					onNeedsDeep: () => { needsDeep = true },
 					fetchPage: (networkQuery) => fetchEnvelopes(
 						mailbox.accountId,
 						mailboxId,
@@ -2063,7 +2237,7 @@ export default function mainStoreActions() {
 						includeCacheBuster ? mailbox.cacheBuster : undefined,
 						signal,
 					),
-				}).then(tap((envelopes) => {
+				}).then((envelopes) => {
 					this.addEnvelopesMutation({
 						query,
 						envelopes,
@@ -2074,7 +2248,23 @@ export default function mainStoreActions() {
 					// Same tick as the list write above -- see the note
 					// on the outer .finally() below for why.
 					this.envelopeFetchFinishedMutation({ mailboxId, query })
-				}))
+					if (needsDeep) {
+						this.fetchDeepSearchPage({
+							mailboxId,
+							query,
+							cursor: searchUpperBound - SEARCH_EXTENDED_WINDOW_SECONDS,
+							addToUnifiedMailboxes: deepAddToUnifiedMailboxes,
+							statusMailboxId: deepStatusMailboxId,
+							statusQuery: deepStatusQuery,
+							signal,
+						}).catch((error) => {
+							if (!signal?.aborted && !axios.isCancel(error) && error.name !== 'AbortError') {
+								logger.error(`Background deep search failed for mailbox ${mailboxId}: ${error}`, { error })
+							}
+						})
+					}
+					return envelopes
+				})
 			}).finally(() => {
 				// Safety net for paths that reject before reaching their
 				// own tap() above (including the isUnified/isPriorityInbox
@@ -2120,6 +2310,39 @@ export default function mainStoreActions() {
 				const mailbox = this.getMailbox(mailboxId)
 
 				if (mailbox.isUnified || mailbox.isPriorityInbox) {
+					const sharedSearch = sharedContentSearchDescriptor(query)
+					if (sharedSearch) {
+						const knownIds = new Set(this.getEnvelopes(mailbox.databaseId, query).map((envelope) => envelope.databaseId))
+						const individualMailboxes = findIndividualMailboxes(this.getMailboxes, mailbox.specialRole)(this.getAccounts)
+						const pages = await mapWithConcurrencyLimit(
+							individualMailboxes,
+							TEXT_SEARCH_ENVELOPE_FETCH_CONCURRENCY,
+							async (individualMailbox) => {
+								const baseTail = last(this.getEnvelopes(individualMailbox.databaseId, sharedSearch.baseQuery))
+								const cursor = baseTail?.dateInt
+									?? (Math.floor(Date.now() / 1000) - SEARCH_EXTENDED_WINDOW_SECONDS)
+								try {
+									return await this.fetchDeepSearchPage({
+										mailboxId: individualMailbox.databaseId,
+										query: sharedSearch.baseQuery,
+										cursor,
+										cursorId: baseTail?.databaseId,
+										prioritySplit: true,
+										addToUnifiedMailboxes: true,
+										statusMailboxId: mailbox.databaseId,
+										statusQuery: query,
+									})
+								} catch (error) {
+									logger.error(`Failed durable deep-search page for constituent mailbox ${individualMailbox.databaseId}: ${error}`, { error })
+									return []
+								}
+							},
+						)
+						const threaded = this.getPreference('layout-message-view', 'threaded') === 'threaded'
+						return slice(0, quantity, combineEnvelopeLists(this.getPreference('sort-order'))(pages)
+							.filter((envelope) => !knownIds.has(envelope.databaseId))
+							.filter((envelope) => envelopeMatchesSharedSearchSection(envelope, sharedSearch.flagTokens, threaded)))
+					}
 					// "priority" and "unified" are virtual ids with no real
 					// mailbox behind them and must never reach the actual
 					// fetch endpoint -- same reasoning as fetchEnvelopes()/
@@ -2243,17 +2466,11 @@ export default function mainStoreActions() {
 				const lastEnvelopeId = last(list)
 				if (typeof lastEnvelopeId === 'undefined') {
 					if (rec && usesProgressiveSearch(query, this.getPreference('sort-order'))) {
-						return fetchEnvelopes(
-							mailbox.accountId,
+						return this.fetchDeepSearchPage({
 							mailboxId,
 							query,
-							undefined,
-							quantity,
-							this.getPreference('sort-order'),
-							this.getPreference('layout-message-view'),
-						).then((envelopes) => {
-							this.addEnvelopesMutation({ query, envelopes, addToUnifiedMailboxes })
-							return envelopes
+							cursor: Math.floor(Date.now() / 1000) - SEARCH_EXTENDED_WINDOW_SECONDS,
+							addToUnifiedMailboxes,
 						})
 					}
 					logger.debug('mailbox has no envelopes for this query, nothing more to page past', { mailboxId, query })
@@ -2262,6 +2479,16 @@ export default function mainStoreActions() {
 				const lastEnvelope = this.getEnvelope(lastEnvelopeId)
 				if (typeof lastEnvelope === 'undefined') {
 					return Promise.reject(new Error('Cannot find last envelope. Required for the mailbox cursor'))
+				}
+
+				if (usesProgressiveSearch(query, this.getPreference('sort-order'))) {
+					return this.fetchDeepSearchPage({
+						mailboxId,
+						query,
+						cursor: lastEnvelope.dateInt,
+						cursorId: lastEnvelope.databaseId,
+						addToUnifiedMailboxes,
+					})
 				}
 
 				return fetchEnvelopes(

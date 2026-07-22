@@ -29,6 +29,11 @@ export default defineStore('main', {
 			// returned yet (e.g. the priority-inbox sections during a
 			// search, which are otherwise hidden entirely).
 			envelopeFetchCounts: {},
+			// Durable server-side deep-search jobs, grouped by the list that
+			// initiated them. Each value is itself keyed by job id because a
+			// unified inbox can fan out one coalesced job per physical mailbox.
+			// Entries are session-only, scoped by query, and reclaimed on reload.
+			deepSearchJobs: {},
 			// Ids currently hidden behind an undo toast (delete/
 			// archive/junk/move/snooze), shared across every
 			// simultaneously-rendered list/pane -- not per-component

@@ -9,6 +9,7 @@ import Vue from 'vue'
 import MailboxLockedError from '../../../errors/MailboxLockedError.js'
 import MalformedSyncResponseError from '../../../errors/MalformedSyncResponseError.js'
 import * as AccountService from '../../../service/AccountService.js'
+import * as DeepSearchService from '../../../service/DeepSearchService.js'
 import * as MailboxService from '../../../service/MailboxService.js'
 import * as MessageService from '../../../service/MessageService.js'
 import * as NotificationService from '../../../service/NotificationService.js'
@@ -20,6 +21,7 @@ import { normalizedEnvelopeListId } from '../../../util/normalization.js'
 import { wait } from '../../../util/wait.js'
 
 vi.mock('../../../service/AccountService.js')
+vi.mock('../../../service/DeepSearchService.js')
 vi.mock('../../../service/MailboxService.js')
 vi.mock('../../../service/MessageService.js')
 vi.mock('../../../service/NotificationService.js')
@@ -53,6 +55,17 @@ describe('Vuex store actions', () => {
 		store = useMainStore()
 		resetSharedNetworkLimiterForTests()
 		resetRecentLocalChangesForTests()
+		DeepSearchService.startDeepSearch.mockResolvedValue({
+			id: 1,
+			accountId: 13,
+			mailboxId: 21,
+			status: 'complete',
+			results: [],
+			resultCount: 0,
+			chunksCompleted: 1,
+			searchedThrough: 1,
+			exhausted: true,
+		})
 	})
 
 	afterEach(() => {
@@ -641,15 +654,55 @@ describe('Vuex store actions', () => {
 			expect(MessageService.fetchEnvelopes.mock.calls[0][2]).toBe('subject:needle start:1700000000')
 		})
 
-		it('continues into full history asynchronously when both foreground windows are empty', async () => {
+		it('continues into full history through a durable background page when both foreground windows are empty', async () => {
 			const deepMatch = mockEnvelope(21, 1)
-			MessageService.fetchEnvelopes.mockImplementation(async (accountId, mailboxId, query) => query === 'body:needle' ? [deepMatch] : [])
+			MessageService.fetchEnvelopes.mockResolvedValue([])
+			DeepSearchService.startDeepSearch.mockResolvedValueOnce({
+				id: 91,
+				accountId: 13,
+				mailboxId: 21,
+				status: 'complete',
+				results: [deepMatch],
+				resultCount: 1,
+				chunksCompleted: 2,
+				searchedThrough: 1_800_000_000,
+				exhausted: false,
+			})
 
 			await expect(store.fetchEnvelopes({ mailboxId: 21, query: 'body:needle' })).resolves.toEqual([])
-			await expect(store.fetchNextEnvelopes({ mailboxId: 21, query: 'body:needle', quantity: PAGE_SIZE })).resolves.toEqual([deepMatch])
+			await vi.waitFor(() => expect(store.mailboxes[21].envelopeLists['body:needle']).toEqual([deepMatch.databaseId]))
 
-			expect(MessageService.fetchEnvelopes).toHaveBeenCalledTimes(3)
-			expect(MessageService.fetchEnvelopes.mock.calls[2][2]).toBe('body:needle')
+			expect(MessageService.fetchEnvelopes).toHaveBeenCalledTimes(2)
+			expect(DeepSearchService.startDeepSearch).toHaveBeenCalledWith(expect.objectContaining({
+				mailboxId: 21,
+				filter: 'body:needle',
+				cursor: 1_984_448_000,
+			}))
+		})
+
+		it('uses the composite list tail for every later deep page', async () => {
+			const tail = { ...mockEnvelope(21, 9), dateInt: 1_800_000_000 }
+			const older = { ...mockEnvelope(21, 8), dateInt: 1_700_000_000 }
+			store.addEnvelopesMutation({ query: 'subject:needle', envelopes: [tail] })
+			DeepSearchService.startDeepSearch.mockResolvedValueOnce({
+				id: 92,
+				accountId: 13,
+				mailboxId: 21,
+				status: 'complete',
+				results: [older],
+				resultCount: 1,
+				chunksCompleted: 1,
+				searchedThrough: 1_700_000_000,
+				exhausted: false,
+			})
+
+			await expect(store.fetchNextEnvelopes({ mailboxId: 21, query: 'subject:needle', quantity: PAGE_SIZE })).resolves.toEqual([older])
+
+			expect(MessageService.fetchEnvelopes).not.toHaveBeenCalled()
+			expect(DeepSearchService.startDeepSearch).toHaveBeenCalledWith(expect.objectContaining({
+				cursor: tail.dateInt,
+				cursorId: tail.databaseId,
+			}))
 		})
 	})
 
