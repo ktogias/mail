@@ -1,3 +1,28 @@
+## 5.11.0-dev.0.ktogias.2 (2026-07-23, resource-constrained deployment fork)
+
+### Integration Recovery
+
+* restore the five local `merge/all-today-fixes` commits that were omitted when `.ktogias.1` branched from its stale remote tip
+* preserve the `.ktogias.1` bounded recent search, durable deep-search jobs, IMAP auth recovery and backend bulkheads while integrating the recovered changes
+
+### Performance Improvements
+
+* cap all foreground free-text search fan-out at two requests without throttling structural mailbox filters or background deep-search jobs
+* replace the per-envelope full-store thread scan with one lazy batch-scoped thread index, removing the observed O(batch × store) UI freeze
+
+### Mailbox And Calendar UX
+
+* deliver incomplete-backfill progress through mailbox metadata and render its banner above every normal mailbox section
+* add per-account default calendars and opt-in handling for forwarded or mailing-list invitations whose attendee list does not match the receiving account
+
+### Database
+
+* keep the published `Version5010Date20260722000000` index migration immutable
+* add `Version5011Date20260723000000` to idempotently reconcile the two per-account calendar columns
+* add `Version5011Date20260723000100` to idempotently reconcile the mailbox keyset index, including PostgreSQL concurrent creation
+* cover fresh, partial, calendar-first, index-first and already-reconciled schemas through the normal Nextcloud upgrade path
+
+
 ## 5.11.0-dev.0.ktogias.1 (2026-07-22, resource-constrained deployment fork)
 
 ### Fork Release
