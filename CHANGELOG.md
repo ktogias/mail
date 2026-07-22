@@ -1,3 +1,13 @@
+## 5.11.0-dev.0.ktogias.1 (2026-07-22, resource-constrained deployment fork)
+
+### Fork Release
+
+* move the fork out of the upstream `5.10.x` patch namespace with an explicit prerelease identity
+* establish `v5.11.0-dev.0.ktogias.1` as the immutable source/deployment tag
+* record the release boundary against upstream `v5.10.9` and `main` `5.11.0-dev.1`
+* retain the existing migration set unchanged; this release adds no schema or runtime behavior
+
+
 ## 5.10.12 (2026-07-22, resource-constrained deployment fork)
 
 ### Observability
