@@ -524,7 +524,9 @@ describe('Thread', () => {
 		// reproducible on desktop (hover exists there, not on mobile touch).
 		it('ignores a rejection once the thread is already loaded (a concurrent call must have succeeded)', async () => {
 			let reject
-			store.fetchThread = vi.fn().mockReturnValue(new Promise((_resolve, r) => { reject = r }))
+			store.fetchThread = vi.fn().mockReturnValue(new Promise((_resolve, r) => {
+				reject = r
+			}))
 
 			const view = shallowMount(Thread, {
 				mocks: {
@@ -548,7 +550,9 @@ describe('Thread', () => {
 
 		it('ignores a rejection for a thread the user already navigated away from', async () => {
 			let reject
-			store.fetchThread = vi.fn().mockReturnValue(new Promise((_resolve, r) => { reject = r }))
+			store.fetchThread = vi.fn().mockReturnValue(new Promise((_resolve, r) => {
+				reject = r
+			}))
 
 			const view = shallowMount(Thread, {
 				mocks: {
@@ -571,7 +575,9 @@ describe('Thread', () => {
 
 		it('still shows the error when the thread genuinely failed to load and nothing superseded it', async () => {
 			let reject
-			store.fetchThread = vi.fn().mockReturnValue(new Promise((_resolve, r) => { reject = r }))
+			store.fetchThread = vi.fn().mockReturnValue(new Promise((_resolve, r) => {
+				reject = r
+			}))
 
 			const view = shallowMount(Thread, {
 				mocks: {

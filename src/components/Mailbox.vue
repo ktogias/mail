@@ -229,6 +229,7 @@ export default {
 			}
 			return t('mail', 'Search through older messages complete. No older matches were found.')
 		},
+
 		envelopes() {
 			return this.mainStore.getEnvelopes(this.mailbox.databaseId, this.searchQuery)
 		},

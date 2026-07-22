@@ -40,7 +40,7 @@ class ImapMessageFetcherTest extends TestCase {
 			],
 			'adjacent encoded-words: separating whitespace is dropped' => [
 				'αβ',
-				"=?utf-8?B?zrE=?= =?utf-8?B?zrI=?=",
+				'=?utf-8?B?zrE=?= =?utf-8?B?zrI=?=',
 			],
 			'encoded word mixed with plain text keeps the plain text' => [
 				'Re: Ενημέρωση (final)',

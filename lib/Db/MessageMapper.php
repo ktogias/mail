@@ -1103,20 +1103,20 @@ class MessageMapper extends QBMapper {
 	/**
 	 * @param int[]|null $uids Two distinct meanings, selected by
 	 *                         $uidsRestrict:
-	 *                          - false (default, the search path): UIDs
-	 *                            that matched an IMAP body search; they
-	 *                            are OR-ed with the subject condition so
-	 *                            body hits and subject hits combine.
-	 *                          - true (the sync-diff path): candidate
-	 *                            UIDs the result must be RESTRICTED to,
-	 *                            always AND-ed. Without this flag a sync
-	 *                            of a search bucket whose query had a
-	 *                            subject term put its candidate UIDs
-	 *                            into the OR -- every new message
-	 *                            "matched" the filter, and ordinary mail
-	 *                            flooded the active search's results on
-	 *                            the next background tick (confirmed
-	 *                            live).
+	 *                         - false (default, the search path): UIDs
+	 *                         that matched an IMAP body search; they
+	 *                         are OR-ed with the subject condition so
+	 *                         body hits and subject hits combine.
+	 *                         - true (the sync-diff path): candidate
+	 *                         UIDs the result must be RESTRICTED to,
+	 *                         always AND-ed. Without this flag a sync
+	 *                         of a search bucket whose query had a
+	 *                         subject term put its candidate UIDs
+	 *                         into the OR -- every new message
+	 *                         "matched" the filter, and ordinary mail
+	 *                         flooded the active search's results on
+	 *                         the next background tick (confirmed
+	 *                         live).
 	 */
 	public function findIdsByQuery(Mailbox $mailbox, SearchQuery $query, string $sortOrder, ?int $limit, ?array $uids = null, bool $uidsRestrict = false, bool $prioritySplit = false): array {
 		$qb = $this->db->getQueryBuilder();
