@@ -19,7 +19,6 @@ use OCA\Mail\Exception\MailboxLockedException;
 use OCA\Mail\Exception\MailboxNotCachedException;
 use OCA\Mail\Exception\ServiceException;
 use OCA\Mail\IMAP\IMAPClientFactory;
-use OCA\Mail\IMAP\MailboxStats;
 use OCA\Mail\IMAP\MailboxSync;
 use OCA\Mail\IMAP\PreviewEnhancer;
 use OCA\Mail\IMAP\Sync\Response;
@@ -488,24 +487,6 @@ class SyncService {
 			);
 		}
 
-		// Surface backfill progress for a mailbox still finishing its initial
-		// import (BackfillJob is trickling older messages in, potentially for
-		// weeks on this install's huge folders) so the client can show a
-		// "still importing older messages ($cached of $total)" indicator. The
-		// local COUNT runs only while incomplete -- a cheap indexed
-		// COUNT(*) WHERE mailbox_id = ?, on this mailbox only, that stops
-		// happening entirely once the folder finishes. A cached mailbox sends
-		// the plain (2-arg) stats, unchanged.
-		$complete = $mailbox->isCached();
-		$stats = $complete
-			? $mailbox->getStats()
-			: new MailboxStats(
-				$mailbox->getMessages(),
-				$mailbox->getUnseen(),
-				$this->messageMapper->countByMailbox($mailbox),
-				false,
-			);
-
 		return new Response(
 			// liveEnhance=false: a sync response must not block on live IMAP
 			// preview/structure enhancement. A caller with a stale bucket can
@@ -518,7 +499,7 @@ class SyncService {
 			$this->previewEnhancer->process($account, $mailbox, $new, false, null, false),
 			$changed,
 			$vanished,
-			$stats
+			$mailbox->getStats()
 		);
 	}
 }

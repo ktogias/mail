@@ -2682,12 +2682,6 @@ export default function mainStoreActions() {
 							id: mailboxId,
 							unread: syncData.stats.unread,
 						})
-						this.setMailboxBackfillProgressMutation({
-							id: mailboxId,
-							total: syncData.stats.total,
-							cached: syncData.stats.cached,
-							complete: syncData.stats.complete,
-						})
 
 						return syncData.newMessages
 					})
@@ -5844,21 +5838,6 @@ export default function mainStoreActions() {
 			}
 			const corrected = Math.max(unread + pendingUnreadCorrectionForMailbox(id, this.envelopes), 0)
 			Vue.set(this.mailboxes[id], 'unread', corrected)
-		},
-		// Backfill progress from the sync response's stats (see
-		// MailboxStats/SyncService server-side): `total` is the server's
-		// message count, `cached` is how many are imported locally so far
-		// (only sent while incomplete), `complete` is whether the initial
-		// sync has finished. Drives the "still importing older messages
-		// (X of Y)" banner in Mailbox.vue.
-		setMailboxBackfillProgressMutation({ id, total, cached, complete }) {
-			const mailbox = this.mailboxes[id]
-			if (!mailbox) {
-				return
-			}
-			Vue.set(mailbox, 'total', total)
-			Vue.set(mailbox, 'backfillComplete', complete !== false)
-			Vue.set(mailbox, 'cached', cached ?? null)
 		},
 		// Session-only (not persisted): once the user dismisses the backfill
 		// banner for a mailbox, keep it hidden for the rest of the session so

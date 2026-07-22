@@ -167,6 +167,15 @@ class Mailbox extends Entity implements JsonSerializable {
 			'mailboxes' => [],
 			'syncInBackground' => ($this->getSyncInBackground() === true),
 			'unread' => $this->unseen,
+			// Total messages on the server (IMAP STATUS count) and whether the
+			// initial import has finished -- together they let the client show
+			// a "still importing older messages" banner while a large folder is
+			// mid-backfill (see Mailbox.vue). The locally-cached count (the "X"
+			// of "X of Y") is added by MailboxesController::index for incomplete
+			// mailboxes -- it needs a DB query, which this pure entity method
+			// must not do.
+			'total' => $this->messages,
+			'isCached' => $this->isCached(),
 			'myAcls' => $this->myAcls,
 			'shared' => $this->shared === true,
 			'cacheBuster' => $this->getCacheBuster(),

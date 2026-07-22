@@ -4109,37 +4109,8 @@ describe('Vuex store actions', () => {
 		})
 	})
 
-	describe('backfill progress (setMailboxBackfillProgressMutation / dismissBackfillBannerMutation)', () => {
-		beforeEach(() => {
-			store.mailboxes[38] = { databaseId: 38, envelopeLists: {} }
-		})
-
-		it('stores total/cached and backfillComplete=false for an incomplete mailbox', () => {
-			store.setMailboxBackfillProgressMutation({ id: 38, total: 98000, cached: 5000, complete: false })
-
-			expect(store.mailboxes[38].total).toBe(98000)
-			expect(store.mailboxes[38].cached).toBe(5000)
-			expect(store.mailboxes[38].backfillComplete).toBe(false)
-		})
-
-		it('marks backfillComplete=true (and cached null) when the sync reports complete', () => {
-			store.setMailboxBackfillProgressMutation({ id: 38, total: 98000, cached: undefined, complete: true })
-
-			expect(store.mailboxes[38].backfillComplete).toBe(true)
-			expect(store.mailboxes[38].cached).toBeNull()
-		})
-
-		it('treats a missing complete flag as complete (backfillComplete !== false)', () => {
-			store.setMailboxBackfillProgressMutation({ id: 38, total: 5, cached: undefined, complete: undefined })
-
-			expect(store.mailboxes[38].backfillComplete).toBe(true)
-		})
-
-		it('no-ops for an unknown mailbox', () => {
-			expect(() => store.setMailboxBackfillProgressMutation({ id: 999, total: 1, cached: 1, complete: false })).not.toThrow()
-		})
-
-		it('records a session dismissal', () => {
+	describe('backfill banner dismissal (dismissBackfillBannerMutation)', () => {
+		it('records a session dismissal for a mailbox', () => {
 			store.dismissBackfillBannerMutation(38)
 
 			expect(store.backfillBannerDismissed[38]).toBe(true)

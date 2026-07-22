@@ -94,25 +94,16 @@ final class SyncServiceTest extends TestCase {
 		$mailbox = new Mailbox();
 		$mailbox->setMessages(42);
 		$mailbox->setUnseen(10);
-		// This mailbox has no sync tokens set, so isCached() is false -- it's
-		// mid-backfill, so the response carries backfill progress: the locally
-		// cached count and complete:false. (A fully-synced mailbox would send
-		// the plain 2-arg getStats() instead; see testFreshnessGate... below,
-		// whose mailbox is explicitly token-marked cached.)
 		$expectedResponse = new Response(
 			[],
 			[],
 			[],
-			new MailboxStats(42, 10, 30, false)
+			new MailboxStats(42, 10)
 		);
 		$this->clientFactory
 			->method('getClient')
 			->with($account)
 			->willReturn($this->createStub(\Horde_Imap_Client_Socket::class));
-		$this->messageMapper
-			->method('countByMailbox')
-			->with($mailbox)
-			->willReturn(30);
 		$this->messageMapper
 			->method('findUidsForIds')
 			->with($mailbox, [])
@@ -175,7 +166,7 @@ final class SyncServiceTest extends TestCase {
 			[]
 		);
 
-		$this->assertEquals(new Response([], [], [], new MailboxStats(42, 10, null)), $response);
+		$this->assertEquals(new Response([], [], [], new MailboxStats(42, 10)), $response);
 	}
 
 	public function testEmptyKnownIdsBoundsTheColdStartDumpInsteadOfReturningTheWholeMailbox(): void {
@@ -306,7 +297,7 @@ final class SyncServiceTest extends TestCase {
 
 		$this->assertNotContains('149', $setCalls);
 
-		$this->assertEquals(new Response([], [], [], new MailboxStats(42, 10, null)), $response);
+		$this->assertEquals(new Response([], [], [], new MailboxStats(42, 10)), $response);
 	}
 
 	public function testLockedMailboxStillPropagatesForInitialSync(): void {
@@ -371,7 +362,7 @@ final class SyncServiceTest extends TestCase {
 			[]
 		);
 
-		$this->assertEquals(new Response([], [], [], new MailboxStats(42, 10, null)), $response);
+		$this->assertEquals(new Response([], [], [], new MailboxStats(42, 10)), $response);
 	}
 
 	public function testTheRealSyncWinnerReleasesTheMutex(): void {

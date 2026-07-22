@@ -555,6 +555,20 @@ class MailManagerTest extends TestCase {
 		$this->manager->getThread($account, $threadRootId);
 	}
 
+	public function testGetMailboxLocalMessageCount(): void {
+		$mailbox = new Mailbox();
+		$mailbox->setId(42);
+
+		$this->dbMessageMapper->expects($this->once())
+			->method('countByMailbox')
+			->with($mailbox)
+			->willReturn(1234);
+
+		$count = $this->manager->getMailboxLocalMessageCount($mailbox);
+
+		$this->assertSame(1234, $count);
+	}
+
 	public function testGetMailAttachments(): void {
 		$account = $this->createMock(Account::class);
 		$account->expects($this->once())

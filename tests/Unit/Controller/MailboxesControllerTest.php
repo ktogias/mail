@@ -15,7 +15,6 @@ use OCA\Mail\Contracts\IMailManager;
 use OCA\Mail\Controller\MailboxesController;
 use OCA\Mail\Db\Mailbox;
 use OCA\Mail\Exception\NotImplemented;
-use OCA\Mail\Folder;
 use OCA\Mail\IMAP\MailboxStats;
 use OCA\Mail\Service\AccountService;
 use OCA\Mail\Service\DelegationService;
@@ -91,7 +90,15 @@ class MailboxesControllerTest extends TestCase {
 
 	public function testIndex() {
 		$account = $this->createMock(Account::class);
-		$folder = $this->createMock(Folder::class);
+		// Fully-cached mailbox: all three sync tokens set -> isCached() true.
+		$mailbox = new Mailbox();
+		$mailbox->setId(1);
+		$mailbox->setName('INBOX');
+		$mailbox->setDelimiter('.');
+		$mailbox->setMessages(5);
+		$mailbox->setSyncNewToken('a');
+		$mailbox->setSyncChangedToken('b');
+		$mailbox->setSyncVanishedToken('c');
 		$accountId = 28;
 		$this->accountService->expects($this->once())
 			->method('find')
@@ -101,14 +108,14 @@ class MailboxesControllerTest extends TestCase {
 			->method('getMailboxes')
 			->with($this->equalTo($account))
 			->willReturn([
-				$folder
+				$mailbox
 			]);
 		$account->expects($this->once())
 			->method('getEmail')
 			->willReturn('user@example.com');
-		$folder->expects($this->once())
-			->method('getDelimiter')
-			->willReturn('.');
+		// Fully-cached mailbox: no backfill count query.
+		$this->mailManager->expects($this->never())
+			->method('getMailboxLocalMessageCount');
 
 		$result = $this->controller->index($accountId);
 
@@ -116,7 +123,49 @@ class MailboxesControllerTest extends TestCase {
 			'id' => 28,
 			'email' => 'user@example.com',
 			'mailboxes' => [
-				$folder,
+				$mailbox->jsonSerialize(),
+			],
+			'delimiter' => '.',
+		]);
+		$this->assertEquals($expected, $result);
+	}
+
+	public function testIndexAddsBackfillCountForIncompleteMailbox() {
+		$account = $this->createMock(Account::class);
+		// Incomplete mailbox: a sync token still missing -> isCached() false.
+		$mailbox = new Mailbox();
+		$mailbox->setId(1);
+		$mailbox->setName('INBOX');
+		$mailbox->setDelimiter('.');
+		$mailbox->setMessages(98000);
+		$mailbox->setSyncNewToken('a');
+		$mailbox->setSyncChangedToken('b');
+		$accountId = 28;
+		$this->accountService->expects($this->once())
+			->method('find')
+			->with($this->equalTo($this->userId), $this->equalTo($accountId))
+			->willReturn($account);
+		$this->mailManager->expects($this->once())
+			->method('getMailboxes')
+			->with($this->equalTo($account))
+			->willReturn([
+				$mailbox
+			]);
+		$account->expects($this->once())
+			->method('getEmail')
+			->willReturn('user@example.com');
+		$this->mailManager->expects($this->once())
+			->method('getMailboxLocalMessageCount')
+			->with($this->equalTo($mailbox))
+			->willReturn(5000);
+
+		$result = $this->controller->index($accountId);
+
+		$expected = new JSONResponse([
+			'id' => 28,
+			'email' => 'user@example.com',
+			'mailboxes' => [
+				array_merge($mailbox->jsonSerialize(), ['cached' => 5000]),
 			],
 			'delimiter' => '.',
 		]);
@@ -348,7 +397,7 @@ class MailboxesControllerTest extends TestCase {
 
 		$response = $this->controller->stats(13);
 
-		$stats = new MailboxStats(42, 10, null);
+		$stats = new MailboxStats(42, 10);
 		$expected = new JSONResponse($stats);
 		$this->assertEquals($expected, $response);
 	}
@@ -466,7 +515,7 @@ class MailboxesControllerTest extends TestCase {
 		$this->accountService->method('find')->willReturn($account);
 		$this->syncService->method('isMailboxFresh')->willReturn(true);
 		$this->syncService->method('syncMailbox')->willReturn(
-			new \OCA\Mail\IMAP\Sync\Response([], [], [], new MailboxStats(1, 0, null))
+			new \OCA\Mail\IMAP\Sync\Response([], [], [], new MailboxStats(1, 0))
 		);
 		$this->syncService->method('isServerBusy')->willReturn(true);
 
@@ -492,7 +541,7 @@ class MailboxesControllerTest extends TestCase {
 		$this->accountService->method('find')->willReturn($account);
 		$this->syncService->method('isMailboxFresh')->willReturn(true);
 		$this->syncService->method('syncMailbox')->willReturn(
-			new \OCA\Mail\IMAP\Sync\Response([], [], [], new MailboxStats(1, 0, null))
+			new \OCA\Mail\IMAP\Sync\Response([], [], [], new MailboxStats(1, 0))
 		);
 		$this->syncService->method('isServerBusy')->willReturn(false);
 

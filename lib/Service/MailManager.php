@@ -101,6 +101,10 @@ class MailManager implements IMailManager {
 		return $this->mailboxMapper->findAll($account);
 	}
 
+	public function getMailboxLocalMessageCount(Mailbox $mailbox): int {
+		return $this->dbMessageMapper->countByMailbox($mailbox);
+	}
+
 	#[\Override]
 	public function createMailbox(Account $account, string $name, array $specialUse = []): Mailbox {
 		$client = $this->imapClientFactory->getClient($account);
