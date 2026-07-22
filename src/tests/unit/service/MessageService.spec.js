@@ -141,7 +141,7 @@ describe('service/MessageService test suite', () => {
 		})
 	})
 
-	describe('live body-search concurrency cap', () => {
+	describe('free-text search concurrency cap', () => {
 		const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
 		const deferred = () => {
 			let resolve
@@ -151,17 +151,20 @@ describe('service/MessageService test suite', () => {
 			return { promise, resolve: (v) => resolve(v) }
 		}
 
-		it('caps concurrent live body searches at 2 and queues the rest', async () => {
+		it('caps concurrent free-text searches at 2 and queues the rest', async () => {
 			generateUrl.mockReturnValue('/url')
 			const d = [deferred(), deferred(), deferred(), deferred()]
 			let i = 0
 			axios.get.mockImplementation(() => d[i++].promise)
 
-			const running = [0, 1, 2, 3].map(() => MessageService.fetchEnvelopes(13, 21, 'body:etsi'))
+			// A mix of the free-text predicates (body:, to:, subject:, from:) --
+			// all share the one limiter.
+			const queries = ['body:etsi', 'to:etsi', 'subject:etsi', 'from:etsi']
+			const running = queries.map((q) => MessageService.fetchEnvelopes(13, 21, q))
 			await flush()
 
-			// Only two of the four live searches are in flight; the pool keeps
-			// its remaining workers free.
+			// Only two of the four searches are in flight; the pool keeps its
+			// remaining workers free.
 			expect(axios.get).toHaveBeenCalledTimes(2)
 
 			// One finishes -> the next queued search starts.
@@ -175,21 +178,25 @@ describe('service/MessageService test suite', () => {
 			await Promise.allSettled(running)
 		})
 
-		it('never throttles ordinary (local-DB) envelope fetches', async () => {
+		it('never throttles structural bucket filters or unfiltered fetches', async () => {
 			generateUrl.mockReturnValue('/url')
 			const busy = [deferred(), deferred()]
 			let c = 0
 			axios.get.mockImplementation(() => (c < 2 ? busy[c++].promise : Promise.resolve({ data: [] })))
 
-			// Occupy both body-search slots.
-			const s1 = MessageService.fetchEnvelopes(13, 21, 'body:etsi')
+			// Occupy both free-text search slots.
+			const s1 = MessageService.fetchEnvelopes(13, 21, 'subject:etsi')
 			const s2 = MessageService.fetchEnvelopes(13, 21, 'body:etsi')
 			await flush()
 			expect(axios.get).toHaveBeenCalledTimes(2)
 
-			// A plain (non-body) query must fire immediately, not queue behind them.
-			await MessageService.fetchEnvelopes(13, 21, 'subject:hello')
+			// A structural bucket filter (priority-inbox section) must fire
+			// immediately, not queue behind the searches.
+			await MessageService.fetchEnvelopes(13, 21, 'not:starred is:pi-other')
 			expect(axios.get).toHaveBeenCalledTimes(3)
+			// An unfiltered fetch too.
+			await MessageService.fetchEnvelopes(13, 21, undefined)
+			expect(axios.get).toHaveBeenCalledTimes(4)
 
 			busy[0].resolve({ data: [] })
 			busy[1].resolve({ data: [] })
