@@ -1,3 +1,12 @@
+## 5.11.0-dev.0.ktogias.4 (2026-07-23, resource-constrained deployment fork)
+
+### Bulk Read-State Feedback
+
+* update every selected row's thread-level unread state in one optimistic render while retaining serialized IMAP writes
+* correct the optimistic aggregate from each authoritative response and restore both message and thread state when reconciliation confirms a failed write
+* report bulk read/unread failures without allowing one failed mutation to suppress the remaining per-message reconciliation
+
+
 ## 5.11.0-dev.0.ktogias.3 (2026-07-23, resource-constrained deployment fork)
 
 ### Read-State Consistency
