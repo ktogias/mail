@@ -858,6 +858,9 @@ function isRecentlyRemovedFromMailbox(envelopeId, mailboxId) {
  * given the authoritative fetch result (undefined if the message is
  * genuinely gone), decide whether the change this action wanted is
  * already true server-side.
+ * @param {(authoritative: object) => void} [options.onLanded] called with
+ * the authoritative envelope if reconciliation confirms the change landed
+ * despite the original request error
  * @param {() => void} options.revert called only once reconciliation
  * confirms the change genuinely did not land.
  * @return {Promise<boolean>} true if confirmed landed (revert was NOT
@@ -865,7 +868,7 @@ function isRecentlyRemovedFromMailbox(envelopeId, mailboxId) {
  * open -- safer to trust the optimistic UI than compound an already-
  * uncertain situation with a possibly-wrong revert); false if reverted.
  */
-async function reconcileOrRevert({ envelope, hasLanded, revert }) {
+async function reconcileOrRevert({ envelope, hasLanded, onLanded = () => {}, revert }) {
 	let authoritative
 	try {
 		authoritative = await fetchEnvelope(envelope.accountId, envelope.databaseId)
@@ -874,6 +877,7 @@ async function reconcileOrRevert({ envelope, hasLanded, revert }) {
 		return true
 	}
 	if (hasLanded(authoritative)) {
+		onLanded(authoritative)
 		return true
 	}
 	revert()
@@ -3384,12 +3388,14 @@ export default function mainStoreActions() {
 		async toggleEnvelopeSeen({
 			envelope,
 			seen,
+			optimisticHasUnseenInThread,
 		}) {
 			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
 				// Change immediately and switch back on error
 				const oldState = envelope.flags.seen
 				const newState = seen === undefined ? !oldState : seen
+				const oldHasUnseenInThread = envelope.flags.hasUnseenInThread
 				// Explicit callers (notably ThreadEnvelope's automatic
 				// mark-as-read timer) express a target state, not a request to
 				// invert whatever a racing sync/timer happens to have written by
@@ -3410,6 +3416,20 @@ export default function mainStoreActions() {
 					// unseen message now (this one) -- no need to wait for
 					// the server to know that much.
 					this.setHasUnseenInThreadForThreadMutation(envelope, true)
+				} else if (
+					optimisticHasUnseenInThread !== undefined
+					&& oldHasUnseenInThread !== undefined
+				) {
+					// Bulk list actions target every selected row at once.
+					// The row's bold/read styling is driven by this thread
+					// aggregate, not its own `seen` flag, so leaving the
+					// aggregate untouched made the otherwise-optimistic
+					// changes appear one by one only as the deliberately
+					// serialized IMAP writes returned. Let that explicit
+					// caller supply its optimistic aggregate too; the
+					// response below remains authoritative and can correct
+					// it when another message in the thread is still unread.
+					this.setHasUnseenInThreadForThreadMutation(envelope, optimisticHasUnseenInThread)
 				}
 
 				try {
@@ -3430,7 +3450,23 @@ export default function mainStoreActions() {
 					const landed = await reconcileOrRevert({
 						envelope,
 						hasLanded: (authoritative) => authoritative?.flags?.seen === newState,
-						revert: () => this.flagEnvelopeMutation({ envelope, flag: 'seen', value: oldState }),
+						onLanded: (authoritative) => {
+							if (authoritative?.flags?.hasUnseenInThread !== undefined) {
+								this.setHasUnseenInThreadForThreadMutation(
+									envelope,
+									authoritative.flags.hasUnseenInThread,
+								)
+							}
+						},
+						revert: () => {
+							this.flagEnvelopeMutation({ envelope, flag: 'seen', value: oldState })
+							if (
+								optimisticHasUnseenInThread !== undefined
+								&& oldHasUnseenInThread !== undefined
+							) {
+								this.setHasUnseenInThreadForThreadMutation(envelope, oldHasUnseenInThread)
+							}
+						},
 					})
 					if (landed) {
 						return

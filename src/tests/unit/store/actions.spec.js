@@ -5973,6 +5973,40 @@ describe('Vuex store actions', () => {
 	})
 
 	describe('toggleEnvelopeSeen thread-wide unread correction', () => {
+		it('clears every selected row thread aggregate immediately, before any request resolves', () => {
+			const first = {
+				databaseId: 40,
+				accountId: 13,
+				mailboxId: 11,
+				threadRootId: 'thread-first',
+				flags: { seen: false, hasUnseenInThread: true },
+			}
+			const second = {
+				databaseId: 41,
+				accountId: 13,
+				mailboxId: 11,
+				threadRootId: 'thread-second',
+				flags: { seen: false, hasUnseenInThread: true },
+			}
+			store.envelopes[first.databaseId] = first
+			store.envelopes[second.databaseId] = second
+			MessageService.setEnvelopeFlags.mockReturnValue(new Promise(() => {}))
+
+			store.toggleEnvelopeSeen({
+				envelope: first,
+				seen: true,
+				optimisticHasUnseenInThread: false,
+			})
+			store.toggleEnvelopeSeen({
+				envelope: second,
+				seen: true,
+				optimisticHasUnseenInThread: false,
+			})
+
+			expect(first.flags).toMatchObject({ seen: true, hasUnseenInThread: false })
+			expect(second.flags).toMatchObject({ seen: true, hasUnseenInThread: false })
+		})
+
 		it('does not write again when an explicit target state is already present', async () => {
 			const envelope = {
 				databaseId: 42,
@@ -6017,9 +6051,55 @@ describe('Vuex store actions', () => {
 			// is still unseen even though this one was just marked read.
 			MessageService.setEnvelopeFlags.mockResolvedValue({ hasUnseenInThread: true })
 
-			await store.toggleEnvelopeSeen({ envelope, seen: true })
+			await store.toggleEnvelopeSeen({
+				envelope,
+				seen: true,
+				optimisticHasUnseenInThread: false,
+			})
 
 			expect(envelope.flags.hasUnseenInThread).toBe(true)
+		})
+
+		it('rolls back the optimistic thread aggregate when reconciliation confirms the write failed', async () => {
+			const envelope = {
+				databaseId: 43,
+				accountId: 13,
+				mailboxId: 11,
+				flags: { seen: false, hasUnseenInThread: true },
+			}
+			MessageService.setEnvelopeFlags.mockRejectedValue(new Error('network error'))
+			MessageService.fetchEnvelope.mockResolvedValue({
+				flags: { seen: false, hasUnseenInThread: true },
+			})
+
+			await expect(store.toggleEnvelopeSeen({
+				envelope,
+				seen: true,
+				optimisticHasUnseenInThread: false,
+			})).rejects.toThrow('network error')
+
+			expect(envelope.flags).toMatchObject({ seen: false, hasUnseenInThread: true })
+		})
+
+		it('uses the reconciled thread aggregate when the write landed despite its request error', async () => {
+			const envelope = {
+				databaseId: 44,
+				accountId: 13,
+				mailboxId: 11,
+				flags: { seen: false, hasUnseenInThread: true },
+			}
+			MessageService.setEnvelopeFlags.mockRejectedValue(new Error('timed out'))
+			MessageService.fetchEnvelope.mockResolvedValue({
+				flags: { seen: true, hasUnseenInThread: true },
+			})
+
+			await store.toggleEnvelopeSeen({
+				envelope,
+				seen: true,
+				optimisticHasUnseenInThread: false,
+			})
+
+			expect(envelope.flags).toMatchObject({ seen: true, hasUnseenInThread: true })
 		})
 
 		it('clears hasUnseenInThread once the server confirms no other message in the thread is unseen', async () => {

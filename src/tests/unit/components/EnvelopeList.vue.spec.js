@@ -56,6 +56,31 @@ describe('EnvelopeList', () => {
 		})
 	}
 
+	describe('optimistic bulk read state', () => {
+		it('requests the thread aggregate flip for every selected row before clearing the selection', async () => {
+			envelopes[0].flags = { seen: false, hasUnseenInThread: true }
+			envelopes[1].flags = { seen: false, hasUnseenInThread: true }
+			store.toggleEnvelopeSeen = vi.fn().mockReturnValue(new Promise(() => {}))
+			const view = mountEnvelopeList()
+			await view.setData({ selection: [1, 2] })
+
+			view.vm.markSelectedRead()
+
+			expect(store.toggleEnvelopeSeen).toHaveBeenCalledTimes(2)
+			expect(store.toggleEnvelopeSeen).toHaveBeenNthCalledWith(1, {
+				envelope: envelopes[0],
+				seen: true,
+				optimisticHasUnseenInThread: false,
+			})
+			expect(store.toggleEnvelopeSeen).toHaveBeenNthCalledWith(2, {
+				envelope: envelopes[1],
+				seen: true,
+				optimisticHasUnseenInThread: false,
+			})
+			expect(view.vm.selection).toEqual([])
+		})
+	})
+
 	describe('records list context when auto-navigating after a bulk delete', () => {
 		// Thread.vue::prefetchListNeighborhood() reads
 		// mainStore.lastOpenedFromList to prefetch this list's neighbors.
