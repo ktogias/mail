@@ -1,3 +1,18 @@
+## 5.11.0-dev.0.ktogias.3 (2026-07-23, resource-constrained deployment fork)
+
+### Read-State Consistency
+
+* make delayed automatic mark-as-read idempotently target `seen=true` instead of toggling potentially newer shared state
+* serialize browser flag writes so thread-wide and duplicate operations cannot stampede the interactive IMAP mutation lane
+* skip redundant explicit seen-state writes and surface failed automatic read updates to the user
+
+### IMAP Resource Isolation
+
+* keep the hard per-account connection total at three while reserving one slot for explicitly classified interactive mutations
+* make interactive clients prefer the reserved slot so ordinary fetch, sync and search retain their two shared slots
+* route immediate flag, move, delete, mailbox, subscription and tag mutations through the interactive path without changing schema or configuration
+
+
 ## 5.11.0-dev.0.ktogias.2 (2026-07-23, resource-constrained deployment fork)
 
 ### Integration Recovery
