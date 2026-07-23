@@ -107,7 +107,7 @@ class MailManager implements IMailManager {
 
 	#[\Override]
 	public function createMailbox(Account $account, string $name, array $specialUse = []): Mailbox {
-		$client = $this->imapClientFactory->getClient($account);
+		$client = $this->imapClientFactory->getClient($account, allowReservedSlot: true);
 		try {
 			$folder = $this->folderMapper->createFolder($client, $name, $specialUse);
 			$this->folderMapper->fetchFolderAcls([$folder], $client);
@@ -279,7 +279,7 @@ class MailManager implements IMailManager {
 			throw new ServiceException("Source mailbox $mailboxId does not exist", 0, $e);
 		}
 
-		$client = $this->imapClientFactory->getClient($account);
+		$client = $this->imapClientFactory->getClient($account, allowReservedSlot: true);
 		try {
 			$this->deleteMessageWithClient($account, $sourceMailbox, $messageUid, $client);
 		} finally {
@@ -350,7 +350,7 @@ class MailManager implements IMailManager {
 		string $sourceFolderId,
 		string $destFolderId,
 		int $messageId): ?int {
-		$client = $this->imapClientFactory->getClient($account);
+		$client = $this->imapClientFactory->getClient($account, allowReservedSlot: true);
 		try {
 			return $this->imapMessageMapper->move($client, $sourceFolderId, $messageId, $destFolderId);
 		} finally {
@@ -360,7 +360,7 @@ class MailManager implements IMailManager {
 
 	#[\Override]
 	public function markFolderAsRead(Account $account, Mailbox $mailbox): void {
-		$client = $this->imapClientFactory->getClient($account);
+		$client = $this->imapClientFactory->getClient($account, allowReservedSlot: true);
 		try {
 			$this->imapMessageMapper->markAllRead($client, $mailbox->getName());
 		} finally {
@@ -373,7 +373,7 @@ class MailManager implements IMailManager {
 		/**
 		 * 1. Change subscription on IMAP
 		 */
-		$client = $this->imapClientFactory->getClient($account);
+		$client = $this->imapClientFactory->getClient($account, allowReservedSlot: true);
 		try {
 			$client->subscribeMailbox($mailbox->getName(), $subscribed);
 
@@ -413,7 +413,7 @@ class MailManager implements IMailManager {
 			throw new ClientException("Mailbox $mailbox does not exist", 0, $e);
 		}
 
-		$client = $this->imapClientFactory->getClient($account);
+		$client = $this->imapClientFactory->getClient($account, allowReservedSlot: true);
 		try {
 			// RFC 8457 interop: the importance keyword this app has always
 			// written ($label1 -- Thunderbird's legacy "Important" label)
@@ -521,7 +521,7 @@ class MailManager implements IMailManager {
 		} catch (DoesNotExistException $e) {
 			throw new ClientException("Mailbox $mailbox does not exist", 0, $e);
 		}
-		$client = $this->imapClientFactory->getClient($account);
+		$client = $this->imapClientFactory->getClient($account, allowReservedSlot: true);
 		try {
 			$this->tagMessagesWithClient($client, $account, $mb, [$message], $tag, $value);
 		} finally {
@@ -582,7 +582,7 @@ class MailManager implements IMailManager {
 		/*
 		 * 1. Rename on IMAP
 		 */
-		$client = $this->imapClientFactory->getClient($account);
+		$client = $this->imapClientFactory->getClient($account, allowReservedSlot: true);
 		try {
 			$this->folderMapper->renameFolder(
 				$client,
@@ -617,7 +617,7 @@ class MailManager implements IMailManager {
 	#[\Override]
 	public function deleteMailbox(Account $account,
 		Mailbox $mailbox): void {
-		$client = $this->imapClientFactory->getClient($account);
+		$client = $this->imapClientFactory->getClient($account, allowReservedSlot: true);
 		try {
 			$this->folderMapper->delete($client, $mailbox->getName());
 		} finally {
@@ -640,7 +640,7 @@ class MailManager implements IMailManager {
 	#[\Override]
 	public function clearMailbox(Account $account,
 		Mailbox $mailbox): void {
-		$client = $this->imapClientFactory->getClient($account);
+		$client = $this->imapClientFactory->getClient($account, allowReservedSlot: true);
 		$trashMailboxId = $account->getMailAccount()->getTrashMailboxId();
 		$currentMailboxId = $mailbox->getId();
 		try {
@@ -844,7 +844,7 @@ class MailManager implements IMailManager {
 			throw new ClientException('Messages not found', 0, $e);
 		}
 
-		$client = $this->imapClientFactory->getClient($account);
+		$client = $this->imapClientFactory->getClient($account, allowReservedSlot: true);
 
 		foreach ($messageTags as $messageTag) {
 			$this->messageTagsMapper->delete($messageTag);

@@ -515,6 +515,7 @@ describe('ThreadEnvelope', () => {
 			await vi.advanceTimersByTimeAsync(1)
 			expect(store.toggleEnvelopeSeen).toHaveBeenCalledWith({
 				envelope: expect.objectContaining({ databaseId: 999 }),
+				seen: true,
 			})
 		})
 

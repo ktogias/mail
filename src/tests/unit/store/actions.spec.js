@@ -5973,6 +5973,19 @@ describe('Vuex store actions', () => {
 	})
 
 	describe('toggleEnvelopeSeen thread-wide unread correction', () => {
+		it('does not write again when an explicit target state is already present', async () => {
+			const envelope = {
+				databaseId: 42,
+				mailboxId: 11,
+				flags: { seen: true, hasUnseenInThread: false },
+			}
+
+			await store.toggleEnvelopeSeen({ envelope, seen: true })
+
+			expect(MessageService.setEnvelopeFlags).not.toHaveBeenCalled()
+			expect(envelope.flags.seen).toBe(true)
+		})
+
 		it('marks the thread unread immediately when marking a message unread, without waiting for the server', async () => {
 			const envelope = {
 				databaseId: 42,

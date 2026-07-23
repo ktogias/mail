@@ -129,6 +129,46 @@ class ImapConnectionSemaphoreTest extends TestCase {
 		self::assertSame(300, $cache->ttlFor('account_slot_1'));
 	}
 
+	public function testOrdinaryConnectionsCannotConsumeReservedInteractiveSlot(): void {
+		$cache = new SemaphoreCache();
+		$firstOrdinary = new ImapConnectionSemaphore($cache, 'account', 3, 1);
+		$secondOrdinary = new ImapConnectionSemaphore($cache, 'account', 3, 1);
+		$thirdOrdinary = new ImapConnectionSemaphore($cache, 'account', 3, 1);
+		$interactive = new ImapConnectionSemaphore($cache, 'account', 3, 1);
+		$overflow = new ImapConnectionSemaphore($cache, 'account', 3, 1);
+
+		self::assertSame(2, $firstOrdinary->getAvailableLimit(false));
+		self::assertSame(3, $firstOrdinary->getAvailableLimit(true));
+		self::assertTrue($firstOrdinary->acquire());
+		self::assertTrue($secondOrdinary->acquire());
+		self::assertFalse($thirdOrdinary->acquire());
+
+		// Same identity and hard limit: the interactive caller gets only the
+		// deliberately reserved third slot, never a fourth connection.
+		self::assertTrue($interactive->acquire(true));
+		self::assertFalse($overflow->acquire(true));
+	}
+
+	public function testSingleSlotConfigurationDoesNotReserveAwayAllCapacity(): void {
+		$cache = new SemaphoreCache();
+		$semaphore = new ImapConnectionSemaphore($cache, 'account', 1, 1);
+
+		self::assertSame(1, $semaphore->getAvailableLimit(false));
+		self::assertTrue($semaphore->acquire());
+	}
+
+	public function testInteractiveConnectionPrefersTheReservedSlot(): void {
+		$cache = new SemaphoreCache();
+		$interactive = new ImapConnectionSemaphore($cache, 'account', 3, 1);
+		$firstOrdinary = new ImapConnectionSemaphore($cache, 'account', 3, 1);
+		$secondOrdinary = new ImapConnectionSemaphore($cache, 'account', 3, 1);
+
+		self::assertTrue($interactive->acquire(true));
+		self::assertTrue($cache->hasKey('account_slot_2'));
+		self::assertTrue($firstOrdinary->acquire());
+		self::assertTrue($secondOrdinary->acquire());
+	}
+
 	public function testReleasedSlotCanBeAcquiredByAnotherConnection(): void {
 		$cache = new SemaphoreCache();
 		$first = new ImapConnectionSemaphore($cache, 'account', 1);

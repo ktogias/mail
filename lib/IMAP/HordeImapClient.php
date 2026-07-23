@@ -43,6 +43,7 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 	private ?ICrypto $crypto = null;
 	private ?LoggerInterface $logger = null;
 	private ?ImapConnectionSemaphore $connectionSemaphore = null;
+	private bool $allowReservedConnectionSlot = false;
 
 	public function __construct(
 		array $params,
@@ -88,8 +89,9 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 		$this->logger = $logger;
 	}
 
-	public function enableConnectionSemaphore(ImapConnectionSemaphore $semaphore): void {
+	public function enableConnectionSemaphore(ImapConnectionSemaphore $semaphore, bool $allowReservedSlot = false): void {
 		$this->connectionSemaphore = $semaphore;
+		$this->allowReservedConnectionSlot = $allowReservedSlot;
 	}
 
 	#[\Override]
@@ -329,11 +331,13 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 	}
 
 	private function acquireConnectionSlot(): void {
-		if ($this->connectionSemaphore !== null && !$this->connectionSemaphore->acquire()) {
+		if ($this->connectionSemaphore !== null && !$this->connectionSemaphore->acquire($this->allowReservedConnectionSlot)) {
 			$this->logger?->notice('IMAP account concurrency limit reached for account {accountId}', [
 				'accountId' => $this->account?->getId(),
 				'host' => $this->account?->getMailAccount()->getInboundHost(),
 				'limit' => $this->connectionSemaphore->getLimit(),
+				'availableLimit' => $this->connectionSemaphore->getAvailableLimit($this->allowReservedConnectionSlot),
+				'interactive' => $this->allowReservedConnectionSlot,
 			]);
 			throw new Horde_Imap_Client_Exception(
 				'IMAP account concurrency limit reached',

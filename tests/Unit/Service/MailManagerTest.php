@@ -129,6 +129,7 @@ class MailManagerTest extends TestCase {
 		$account = $this->createStub(Account::class);
 		$this->imapClientFactory->expects($this->once())
 			->method('getClient')
+			->with($account, true, true)
 			->willReturn($client);
 		$folder = $this->createStub(Folder::class);
 		$this->folderMapper->expects($this->once())
@@ -438,6 +439,7 @@ class MailManagerTest extends TestCase {
 		$account = $this->createStub(Account::class);
 		$this->imapClientFactory->expects($this->once())
 			->method('getClient')
+			->with($account, true, true)
 			->willReturn($client);
 		$mb = $this->createStub(Mailbox::class);
 		$this->mailboxMapper->expects($this->once())

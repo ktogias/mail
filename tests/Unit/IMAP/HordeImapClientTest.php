@@ -346,6 +346,25 @@ class HordeImapClientTest extends TestCase {
 		self::assertNull($this->cache->get('testhash_failures'));
 	}
 
+	public function testInteractiveClientCanUseTheReservedSlotWithoutExceedingTheHardLimit(): void {
+		$firstOrdinary = new ImapConnectionSemaphore($this->cache, 'account-concurrency', 3, 1);
+		$secondOrdinary = new ImapConnectionSemaphore($this->cache, 'account-concurrency', 3, 1);
+		self::assertTrue($firstOrdinary->acquire());
+		self::assertTrue($secondOrdinary->acquire());
+
+		$this->client->enableConnectionSemaphore(
+			new ImapConnectionSemaphore($this->cache, 'account-concurrency', 3, 1),
+			true,
+		);
+		$this->client->succeeds = true;
+
+		$this->client->attemptLogin();
+
+		self::assertSame(1, $this->client->imapLoginCalls);
+		$overflow = new ImapConnectionSemaphore($this->cache, 'account-concurrency', 3, 1);
+		self::assertFalse($overflow->acquire(true));
+	}
+
 	public function testFailedLoginReleasesItsConcurrencySlot(): void {
 		$this->client->enableConnectionSemaphore(new ImapConnectionSemaphore($this->cache, 'account-concurrency', 1));
 		$this->client->succeeds = false;

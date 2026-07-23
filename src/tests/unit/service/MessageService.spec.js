@@ -251,4 +251,40 @@ describe('service/MessageService test suite', () => {
 			await Promise.allSettled([s1, s2])
 		})
 	})
+
+	describe('flag mutation concurrency cap', () => {
+		const flush = () => new Promise((resolve) => setTimeout(resolve, 0))
+		const deferred = () => {
+			let resolve
+			const promise = new Promise((r) => {
+				resolve = r
+			})
+			return { promise, resolve }
+		}
+
+		it('serializes flag writes so thread-wide updates cannot exhaust the reserved IMAP slot', async () => {
+			generateUrl.mockReturnValue('/flags')
+			const first = deferred()
+			const second = deferred()
+			axios.put
+				.mockImplementationOnce(() => first.promise)
+				.mockImplementationOnce(() => second.promise)
+
+			const firstWrite = MessageService.setEnvelopeFlags(1, { seen: true })
+			const secondWrite = MessageService.setEnvelopeFlags(2, { seen: true })
+			await flush()
+
+			expect(axios.put).toHaveBeenCalledTimes(1)
+
+			first.resolve({ data: { hasUnseenInThread: true } })
+			await flush()
+			expect(axios.put).toHaveBeenCalledTimes(2)
+
+			second.resolve({ data: { hasUnseenInThread: false } })
+			await expect(Promise.all([firstWrite, secondWrite])).resolves.toEqual([
+				{ hasUnseenInThread: true },
+				{ hasUnseenInThread: false },
+			])
+		})
+	})
 })

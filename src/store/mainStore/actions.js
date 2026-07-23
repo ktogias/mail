@@ -3390,6 +3390,16 @@ export default function mainStoreActions() {
 				// Change immediately and switch back on error
 				const oldState = envelope.flags.seen
 				const newState = seen === undefined ? !oldState : seen
+				// Explicit callers (notably ThreadEnvelope's automatic
+				// mark-as-read timer) express a target state, not a request to
+				// invert whatever a racing sync/timer happens to have written by
+				// the time this action runs. Once the target is already present,
+				// a second network mutation is both redundant and dangerous: the
+				// live regression that motivated this guard produced a later
+				// seen=false write from an automatic read path under load.
+				if (oldState === newState) {
+					return
+				}
 				this.flagEnvelopeMutation({
 					envelope,
 					flag: 'seen',

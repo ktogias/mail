@@ -33,6 +33,7 @@ use function min;
 class IMAPClientFactory {
 	private const DEFAULT_ACCOUNT_CONCURRENCY = 3;
 	private const MAX_ACCOUNT_CONCURRENCY = 10;
+	private const RESERVED_INTERACTIVE_CONNECTIONS = 1;
 
 	/** @var array<string, int> */
 	private array $loginCounts = [];
@@ -79,11 +80,14 @@ class IMAPClientFactory {
 	 *
 	 * @param Account $account
 	 * @param bool $useCache
+	 * @param bool $allowReservedSlot interactive mutations may use the one
+	 *                                per-account slot ordinary fetch/sync
+	 *                                work cannot consume
 	 *
 	 * @return Horde_Imap_Client_Socket
 	 * @throws ServiceException
 	 */
-	public function getClient(Account $account, bool $useCache = true): Horde_Imap_Client_Socket {
+	public function getClient(Account $account, bool $useCache = true, bool $allowReservedSlot = false): Horde_Imap_Client_Socket {
 		$this->eventDispatcher->dispatchTyped(
 			new BeforeImapClientCreated($account)
 		);
@@ -158,7 +162,8 @@ class IMAPClientFactory {
 				$concurrencyCache,
 				$rateLimiterHash,
 				min($accountConcurrency, self::MAX_ACCOUNT_CONCURRENCY),
-			));
+				self::RESERVED_INTERACTIVE_CONNECTIONS,
+			), $allowReservedSlot);
 		}
 
 		// Lets _login() force a real token refresh and retry once, itself,

@@ -32,11 +32,20 @@ final class ImapConnectionSemaphore {
 		private IMemcache $cache,
 		private string $identity,
 		private int $limit,
+		private int $reservedSlots = 0,
 	) {
 		$this->owner = bin2hex(random_bytes(16));
+		$this->reservedSlots = max(0, min($this->reservedSlots, max($this->limit - 1, 0)));
 	}
 
-	public function acquire(): bool {
+	/**
+	 * Acquire one connection slot.
+	 *
+	 * Ordinary/background callers cannot consume the highest-numbered
+	 * reserved slots. Interactive mutations may opt into them, while still
+	 * sharing the same key-space and therefore the same hard total limit.
+	 */
+	public function acquire(bool $allowReservedSlots = false): bool {
 		if ($this->slotKey !== null) {
 			if (!($this->cache instanceof IMemcacheTTL)
 				|| $this->cache->compareSetTTL($this->slotKey, $this->owner, self::SLOT_TTL_SECONDS)) {
@@ -47,7 +56,12 @@ final class ImapConnectionSemaphore {
 			$this->slotKey = null;
 		}
 
-		for ($slot = 0; $slot < $this->limit; $slot++) {
+		$availableLimit = $this->getAvailableLimit($allowReservedSlots);
+		for ($offset = 0; $offset < $availableLimit; $offset++) {
+			// Interactive callers consume the reserved, highest-numbered slots
+			// first. This leaves ordinary capacity available when the interactive
+			// request arrives before the background work.
+			$slot = $allowReservedSlots ? $availableLimit - $offset - 1 : $offset;
 			$key = $this->identity . '_slot_' . $slot;
 			if ($this->cache->add($key, $this->owner, self::SLOT_TTL_SECONDS)) {
 				$this->slotKey = $key;
@@ -69,6 +83,12 @@ final class ImapConnectionSemaphore {
 
 	public function getLimit(): int {
 		return $this->limit;
+	}
+
+	public function getAvailableLimit(bool $allowReservedSlots): int {
+		return $allowReservedSlots
+			? $this->limit
+			: max($this->limit - $this->reservedSlots, 1);
 	}
 
 	public function __destruct() {

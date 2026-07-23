@@ -34,6 +34,13 @@ const TEXT_SEARCH_MAX_CONCURRENCY = 2
 const textSearchLimit = pLimit(TEXT_SEARCH_MAX_CONCURRENCY)
 const isFreeTextSearch = (query) => typeof query === 'string' && /(?:^|\s)(?:to|from|cc|bcc|subject|body):/.test(query)
 
+// Flag writes are user mutations, not speculative reads. Keep one in flight
+// per app instance so "mark whole thread read" and duplicate component timers
+// cannot stampede the single IMAP connection slot reserved server-side for
+// interactive mutations. Different browser tabs remain protected by the
+// distributed server-side semaphore and its shared hard total limit.
+const envelopeFlagMutationLimit = pLimit(1)
+
 export function fetchEnvelope(accountId, id) {
 	const url = generateUrl('/apps/mail/api/messages/{id}', {
 		id,
@@ -200,10 +207,12 @@ export async function setEnvelopeFlags(id, flags) {
 		id,
 	})
 
-	const { data } = await axios.put(url, {
-		flags,
+	return envelopeFlagMutationLimit(async () => {
+		const { data } = await axios.put(url, {
+			flags,
+		})
+		return data
 	})
-	return data
 }
 
 export async function createEnvelopeTag(displayName, color) {

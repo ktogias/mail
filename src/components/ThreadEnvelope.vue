@@ -818,8 +818,20 @@ export default {
 			if (this.expanded && !this.envelope.flags.seen && this.hasSeenAcl && this.seenTimer === undefined) {
 				logger.info('Starting timer to mark message as seen/read')
 				this.seenTimer = setTimeout(() => {
-					this.mainStore.toggleEnvelopeSeen({ envelope: this.envelope })
-					this.seenTimer = undefined
+					// This is an idempotent target, never a toggle. The envelope can
+					// change while the two-second timer is pending (sync, another
+					// component instance, or an earlier request settling); blindly
+					// inverting that newer value produced a live seen=false request
+					// from this automatic mark-as-read path.
+					Promise.resolve(this.mainStore.toggleEnvelopeSeen({
+						envelope: this.envelope,
+						seen: true,
+					})).catch((error) => {
+						logger.error('Could not automatically mark message as read', { error })
+						showError(t('mail', 'Could not update read status'))
+					}).finally(() => {
+						this.seenTimer = undefined
+					})
 				}, 2000)
 			}
 		},
