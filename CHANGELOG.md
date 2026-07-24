@@ -1,3 +1,13 @@
+## 5.11.0-dev.0.ktogias.5 (2026-07-24, resource-constrained deployment fork)
+
+### Attachment Download Reliability
+
+* apply one MIME classification policy to message rendering, list metadata, individual downloads, and bulk ZIP downloads so named inline files in plain-text messages remain downloadable
+* fetch only the selected attachment MIME parts instead of unconditionally loading the full raw message
+* let user-facing attachment reads wait for bounded ordinary IMAP capacity without consuming the reserved mutation slot, and retry failed image previews with bounded staggered requests
+* reject empty attachment ZIPs instead of returning corrupt-looking archives, and write ZIP entries using the actual decoded content size
+
+
 ## 5.11.0-dev.0.ktogias.4 (2026-07-23, resource-constrained deployment fork)
 
 ### Bulk Read-State Feedback
