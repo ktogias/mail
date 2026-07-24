@@ -28,12 +28,15 @@ use OCP\Security\ICrypto;
 use Psr\Log\LoggerInterface;
 use function hash;
 use function implode;
+use function max;
 use function min;
 
 class IMAPClientFactory {
 	private const DEFAULT_ACCOUNT_CONCURRENCY = 3;
 	private const MAX_ACCOUNT_CONCURRENCY = 10;
 	private const RESERVED_INTERACTIVE_CONNECTIONS = 1;
+	private const DEFAULT_USER_FETCH_WAIT_MILLISECONDS = 8_000;
+	private const MAX_USER_FETCH_WAIT_MILLISECONDS = 15_000;
 
 	/** @var array<string, int> */
 	private array $loginCounts = [];
@@ -83,11 +86,14 @@ class IMAPClientFactory {
 	 * @param bool $allowReservedSlot interactive mutations may use the one
 	 *                                per-account slot ordinary fetch/sync
 	 *                                work cannot consume
+	 * @param bool $waitForSlot user-facing reads may wait briefly for ordinary
+	 *                          capacity instead of failing immediately; this
+	 *                          never grants access to a reserved mutation slot
 	 *
 	 * @return Horde_Imap_Client_Socket
 	 * @throws ServiceException
 	 */
-	public function getClient(Account $account, bool $useCache = true, bool $allowReservedSlot = false): Horde_Imap_Client_Socket {
+	public function getClient(Account $account, bool $useCache = true, bool $allowReservedSlot = false, bool $waitForSlot = false): Horde_Imap_Client_Socket {
 		$this->eventDispatcher->dispatchTyped(
 			new BeforeImapClientCreated($account)
 		);
@@ -158,12 +164,24 @@ class IMAPClientFactory {
 		);
 		$concurrencyCache = $this->cacheFactory->createDistributed('mail_imap_concurrency');
 		if ($accountConcurrency > 0 && $concurrencyCache instanceof IMemcache) {
+			$waitMilliseconds = $waitForSlot
+				? min(
+					max(
+						$this->config->getSystemValueInt(
+							'app.mail.imap.user-fetch-wait-ms',
+							self::DEFAULT_USER_FETCH_WAIT_MILLISECONDS,
+						),
+						0,
+					),
+					self::MAX_USER_FETCH_WAIT_MILLISECONDS,
+				)
+				: 0;
 			$client->enableConnectionSemaphore(new ImapConnectionSemaphore(
 				$concurrencyCache,
 				$rateLimiterHash,
 				min($accountConcurrency, self::MAX_ACCOUNT_CONCURRENCY),
 				self::RESERVED_INTERACTIVE_CONNECTIONS,
-			), $allowReservedSlot);
+			), $allowReservedSlot, $waitMilliseconds);
 		}
 
 		// Lets _login() force a real token refresh and retry once, itself,

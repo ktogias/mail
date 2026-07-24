@@ -9,7 +9,8 @@
 			<img
 				v-if="isImage"
 				class="mail-attached-image"
-				:src="url">
+				:src="previewUrl"
+				@error="retryPreview">
 			<img v-else class="attachment-icon" :src="mimeUrl">
 		</div>
 		<div class="mail-attached--content" @click="$emit('open', $event)">
@@ -94,6 +95,8 @@ import Logger from '../logger.js'
 import { downloadAttachment, saveAttachmentToFiles } from '../service/AttachmentService.js'
 import { getUserCalendars, importCalendarEvent } from '../service/DAVService.js'
 
+const PREVIEW_RETRY_DELAYS_MS = [750, 1500, 3000]
+
 export default {
 	name: 'MessageAttachment',
 	components: {
@@ -170,6 +173,9 @@ export default {
 			],
 
 			isFilePickerOpen: false,
+			previewUrl: this.url,
+			previewRetryAttempt: 0,
+			previewRetryTimer: undefined,
 		}
 	},
 
@@ -208,6 +214,9 @@ export default {
 
 	beforeDestroy() {
 		document.removeEventListener('click', this.handleClickOutside)
+		if (this.previewRetryTimer !== undefined) {
+			clearTimeout(this.previewRetryTimer)
+		}
 	},
 
 	methods: {
@@ -244,6 +253,24 @@ export default {
 
 		download() {
 			window.location = this.url
+		},
+
+		retryPreview() {
+			if (this.previewRetryAttempt >= PREVIEW_RETRY_DELAYS_MS.length
+				|| this.previewRetryTimer !== undefined) {
+				return
+			}
+
+			const attempt = this.previewRetryAttempt + 1
+			const numericId = Number.parseInt(this.id, 10)
+			const stagger = Number.isNaN(numericId) ? 0 : (numericId * 137) % 500
+			const delay = PREVIEW_RETRY_DELAYS_MS[this.previewRetryAttempt] + stagger
+			this.previewRetryAttempt = attempt
+			this.previewRetryTimer = setTimeout(() => {
+				const separator = this.url.includes('?') ? '&' : '?'
+				this.previewUrl = `${this.url}${separator}mailPreviewRetry=${attempt}`
+				this.previewRetryTimer = undefined
+			}, delay)
 		},
 
 		loadCalendars() {

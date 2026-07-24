@@ -799,16 +799,27 @@ class MessagesController extends Controller {
 		}
 
 		$attachments = $this->mailManager->getMailAttachments($account, $mailbox, $message);
+		if ($attachments === []) {
+			return new JSONResponse([
+				'message' => $this->l10n->t('This message has no downloadable attachments'),
+			], Http::STATUS_NOT_FOUND);
+		}
 		$zip = new ZipResponse($this->request, 'attachments');
 
 		foreach ($attachments as $attachment) {
-			$fileName = $attachment->getName() ?? '';
+			$fileName = $attachment->getName();
+			if ($fileName === null || $fileName === '') {
+				$fileName = $this->l10n->t('Embedded message %s', [
+					$attachment->getId(),
+				]) . '.eml';
+			}
 			$fh = fopen('php://temp', 'r+');
 			if ($fh === false) {
 				continue;
 			}
-			fputs($fh, $attachment->getContent());
-			$size = $attachment->getSize();
+			$content = $attachment->getContent();
+			fputs($fh, $content);
+			$size = strlen($content);
 			rewind($fh);
 			$zip->addResource($fh, $fileName, $size);
 		}

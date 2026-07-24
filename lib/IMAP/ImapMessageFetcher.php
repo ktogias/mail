@@ -38,7 +38,7 @@ use function strtolower;
  */
 class ImapMessageFetcher {
 	/** @var string[] */
-	private array $attachmentsToIgnore = ['signature.asc', 'smime.p7s'];
+	private array $attachmentsToIgnore = AttachmentClassifier::DEFAULT_IGNORED_FILENAMES;
 
 	private bool $runPhishingCheck = false;
 	// Conditional fetching/parsing
@@ -150,7 +150,7 @@ class ImapMessageFetcher {
 				}
 			}
 
-			$this->hasAnyAttachment = $this->hasAttachments($structure);
+			$this->hasAnyAttachment = AttachmentClassifier::hasVisibleAttachments($structure, $this->attachmentsToIgnore);
 
 			$isEncrypted = $this->smimeService->isEncrypted($fetch);
 			$isOpaqueSigned = $structure->getContentTypeParameter('smime-type') === 'signed-data'
@@ -325,11 +325,8 @@ class ImapMessageFetcher {
 			}
 		}
 
-		$isAttachment = ($p->isAttachment() || $p->getType() === 'message/rfc822')
-			&& !in_array($p->getType(), ['application/pgp-signature', 'application/pkcs7-signature', 'application/x-pkcs7-signature']);
-
 		// Regular attachments
-		if ($isAttachment) {
+		if (AttachmentClassifier::isRegularAttachment($p)) {
 			$this->attachments[] = [
 				'id' => $p->getMimeId(),
 				'messageId' => $this->uid,
@@ -352,14 +349,7 @@ class ImapMessageFetcher {
 		$filename = $p->getName();
 		$primaryType = $p->getPrimaryType();
 
-		$hasContentId = $p->getContentId() !== null && !in_array($primaryType, ['text', 'multipart'], true);
-		$hasFilename = isset($filename);
-		$isEmbeddedMessage = $p->getType() === 'message/rfc822';
-
-		if ($hasContentId || $hasFilename || $isEmbeddedMessage) {
-			if (in_array($filename, $this->attachmentsToIgnore)) {
-				return;
-			}
+		if (AttachmentClassifier::isInlineAttachment($p, $this->attachmentsToIgnore)) {
 			$this->inlineAttachments[] = [
 				'id' => $p->getMimeId(),
 				'messageId' => $this->uid,
@@ -496,19 +486,6 @@ class ImapMessageFetcher {
 		}
 
 		return $this->converter->convert($p);
-	}
-
-	private function hasAttachments(Horde_Mime_Part $part): bool {
-		foreach ($part->getParts() as $p) {
-			if ($p->isAttachment() || $p->getType() === 'message/rfc822') {
-				return true;
-			}
-			if ($this->hasAttachments($p)) {
-				return true;
-			}
-		}
-
-		return false;
 	}
 
 	private function decodeSubject(Horde_Imap_Client_Data_Envelope $envelope): string {

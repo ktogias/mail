@@ -594,7 +594,7 @@ class MailManagerTest extends TestCase {
 		$message->setUid(123);
 		$this->imapClientFactory->expects($this->once())
 			->method('getClient')
-			->with($account)
+			->with($account, true, false, true)
 			->willReturn($client);
 		$this->imapMessageMapper->expects($this->once())
 			->method('getAttachments')
@@ -605,6 +605,41 @@ class MailManagerTest extends TestCase {
 			)->willReturn($attachments);
 		$result = $this->manager->getMailAttachments($account, $mailbox, $message);
 		$this->assertEquals($attachments, $result);
+	}
+
+	public function testGetMailAttachmentWaitsForOrdinaryCapacity(): void {
+		$account = $this->createMock(Account::class);
+		$account->expects(self::once())
+			->method('getUserId')
+			->willReturn('user');
+		$attachment = new Attachment(
+			'2',
+			'cat.png',
+			'image/png',
+			'abcdefg',
+			7,
+			null,
+			'inline',
+		);
+		$client = $this->createStub(Horde_Imap_Client_Socket::class);
+		$mailbox = new Mailbox();
+		$mailbox->setName('Inbox');
+		$message = new Message();
+		$message->setUid(123);
+
+		$this->imapClientFactory->expects(self::once())
+			->method('getClient')
+			->with($account, true, false, true)
+			->willReturn($client);
+		$this->imapMessageMapper->expects(self::once())
+			->method('getAttachment')
+			->with($client, 'Inbox', 123, '2', 'user')
+			->willReturn($attachment);
+
+		self::assertSame(
+			$attachment,
+			$this->manager->getMailAttachment($account, $mailbox, $message, '2'),
+		);
 	}
 
 	public function testCreateTag(): void {

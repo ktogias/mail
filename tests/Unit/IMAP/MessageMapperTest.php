@@ -1101,6 +1101,42 @@ class MessageMapperTest extends TestCase {
 		$this->assertEquals($bodyText, $data[$messageId]->getPreviewText());
 	}
 
+	public function testGetBodyStructureCountsPlainNamedInlineImagesAsAttachments(): void {
+		$messageUid = 6696;
+		$structure = Horde_Mime_Part::parseMessage(
+			file_get_contents(__DIR__ . '/../../data/plain-message-with-inline-file-images.txt'),
+		);
+
+		$structureData = new Horde_Imap_Client_Data_Fetch();
+		$structureData->setStructure($structure);
+		$structureData->setHeaderText('0', "Content-Type: multipart/mixed\r\n");
+		$structureData->setUid($messageUid);
+		$structureResult = new Horde_Imap_Client_Fetch_Results();
+		$structureResult[$messageUid] = $structureData;
+
+		$bodyData = new Horde_Imap_Client_Data_Fetch();
+		$bodyData->setUid($messageUid);
+		$bodyData->setMimeHeader('1', "Content-Type: text/plain; charset=UTF-8\r\n");
+		$bodyData->setBodyPart('1', 'One');
+		$bodyResult = new Horde_Imap_Client_Fetch_Results();
+		$bodyResult[$messageUid] = $bodyData;
+
+		$imapClient = $this->createMock(Horde_Imap_Client_Socket::class);
+		$imapClient->expects(self::exactly(2))
+			->method('fetch')
+			->willReturnOnConsecutiveCalls($structureResult, $bodyResult);
+		$this->converter->method('convert')->willReturn('One');
+
+		$data = $this->mapper->getBodyStructureData(
+			$imapClient,
+			'INBOX',
+			[$messageUid],
+			'alice@example.test',
+		);
+
+		self::assertTrue($data[$messageUid]->hasAttachments());
+	}
+
 	public function isImipMessageProvider(): array {
 		return [
 			'google request' => ['request_google', true],
@@ -1220,6 +1256,55 @@ class MessageMapperTest extends TestCase {
 		);
 
 		$this->assertEquals($originalContent, $attachment->getContent());
+	}
+
+	public function testGetAttachmentsIncludesNamedInlineImagesFromPlainMessage(): void {
+		$messageUid = 6696;
+		$structure = Horde_Mime_Part::parseMessage(
+			file_get_contents(__DIR__ . '/../../data/plain-message-with-inline-file-images.txt'),
+		);
+
+		$structureData = new Horde_Imap_Client_Data_Fetch();
+		$structureData->setUid($messageUid);
+		$structureData->setStructure($structure);
+		$structureResult = new Horde_Imap_Client_Fetch_Results();
+		$structureResult[$messageUid] = $structureData;
+
+		$partsData = new Horde_Imap_Client_Data_Fetch();
+		$partsData->setUid($messageUid);
+		$partsData->setMimeHeader('2', "Content-Type: image/jpeg; name=\"first.jpg\"\r\n"
+			. "Content-Disposition: inline; filename=\"first.jpg\"\r\n"
+			. "Content-Transfer-Encoding: base64\r\n");
+		$partsData->setBodyPart('2', base64_encode('first'));
+		$partsData->setMimeHeader('4', "Content-Type: image/jpeg; name=\"second.jpg\"\r\n"
+			. "Content-Disposition: inline; filename=\"second.jpg\"\r\n"
+			. "Content-Transfer-Encoding: base64\r\n");
+		$partsData->setBodyPart('4', base64_encode('second'));
+		$partsResult = new Horde_Imap_Client_Fetch_Results();
+		$partsResult[$messageUid] = $partsData;
+
+		$imapClient = $this->createMock(Horde_Imap_Client_Socket::class);
+		$imapClient->expects(self::exactly(2))
+			->method('fetch')
+			->willReturnOnConsecutiveCalls($structureResult, $partsResult);
+		$this->sMimeService->method('isEncrypted')->willReturn(false);
+
+		$attachments = $this->mapper->getAttachments(
+			$imapClient,
+			'INBOX',
+			$messageUid,
+			'alice',
+		);
+
+		self::assertCount(2, $attachments);
+		self::assertSame(['2', '4'], array_map(
+			static fn ($attachment): ?string => $attachment->getId(),
+			$attachments,
+		));
+		self::assertSame(['first', 'second'], array_map(
+			static fn ($attachment): string => $attachment->getContent(),
+			$attachments,
+		));
 	}
 
 	private function mockEncryptedFetch(int $messageUid, string $decryptedMime): Horde_Imap_Client_Base {

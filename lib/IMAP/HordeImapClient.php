@@ -22,6 +22,7 @@ use OCP\IMemcache;
 use OCP\Security\ICrypto;
 use Psr\Log\LoggerInterface;
 use Throwable;
+use function max;
 use function min;
 use function random_int;
 
@@ -44,6 +45,7 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 	private ?LoggerInterface $logger = null;
 	private ?ImapConnectionSemaphore $connectionSemaphore = null;
 	private bool $allowReservedConnectionSlot = false;
+	private int $connectionSlotWaitMilliseconds = 0;
 
 	public function __construct(
 		array $params,
@@ -89,9 +91,10 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 		$this->logger = $logger;
 	}
 
-	public function enableConnectionSemaphore(ImapConnectionSemaphore $semaphore, bool $allowReservedSlot = false): void {
+	public function enableConnectionSemaphore(ImapConnectionSemaphore $semaphore, bool $allowReservedSlot = false, int $waitMilliseconds = 0): void {
 		$this->connectionSemaphore = $semaphore;
 		$this->allowReservedConnectionSlot = $allowReservedSlot;
+		$this->connectionSlotWaitMilliseconds = max(0, $waitMilliseconds);
 	}
 
 	#[\Override]
@@ -331,7 +334,10 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 	}
 
 	private function acquireConnectionSlot(): void {
-		if ($this->connectionSemaphore !== null && !$this->connectionSemaphore->acquire($this->allowReservedConnectionSlot)) {
+		if ($this->connectionSemaphore !== null && !$this->connectionSemaphore->acquire(
+			$this->allowReservedConnectionSlot,
+			$this->connectionSlotWaitMilliseconds,
+		)) {
 			$this->logger?->notice('IMAP account concurrency limit reached for account {accountId}', [
 				'accountId' => $this->account?->getId(),
 				'host' => $this->account?->getMailAccount()->getInboundHost(),

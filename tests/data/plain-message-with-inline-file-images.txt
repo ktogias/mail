@@ -1,0 +1,31 @@
+From: sender@example.test
+To: recipient@example.test
+Subject: Plain message with inline file images
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="mail-test-boundary"
+
+--mail-test-boundary
+Content-Type: text/plain; charset=UTF-8
+
+One
+--mail-test-boundary
+Content-Type: image/jpeg; name="first.jpg"
+Content-Disposition: inline; filename="first.jpg"
+Content-Transfer-Encoding: base64
+
+Zmlyc3Q=
+--mail-test-boundary
+Content-Type: text/plain; charset=UTF-8
+
+Two
+--mail-test-boundary
+Content-Type: image/jpeg; name="second.jpg"
+Content-Disposition: inline; filename="second.jpg"
+Content-Transfer-Encoding: base64
+
+c2Vjb25k
+--mail-test-boundary
+Content-Type: text/plain; charset=UTF-8
+
+Done
+--mail-test-boundary--

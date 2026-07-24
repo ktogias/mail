@@ -9,10 +9,14 @@ declare(strict_types=1);
 
 namespace OCA\Mail\IMAP;
 
+use Closure;
 use OCP\IMemcache;
 use OCP\IMemcacheTTL;
 use function bin2hex;
+use function max;
+use function min;
 use function random_bytes;
+use function usleep;
 
 /**
  * A distributed, per-account IMAP connection semaphore.
@@ -27,15 +31,21 @@ final class ImapConnectionSemaphore {
 
 	private string $owner;
 	private ?string $slotKey = null;
+	/** @var Closure(int): void */
+	private Closure $sleep;
 
 	public function __construct(
 		private IMemcache $cache,
 		private string $identity,
 		private int $limit,
 		private int $reservedSlots = 0,
+		?Closure $sleep = null,
 	) {
 		$this->owner = bin2hex(random_bytes(16));
 		$this->reservedSlots = max(0, min($this->reservedSlots, max($this->limit - 1, 0)));
+		$this->sleep = $sleep ?? static function (int $microseconds): void {
+			usleep($microseconds);
+		};
 	}
 
 	/**
@@ -45,7 +55,7 @@ final class ImapConnectionSemaphore {
 	 * reserved slots. Interactive mutations may opt into them, while still
 	 * sharing the same key-space and therefore the same hard total limit.
 	 */
-	public function acquire(bool $allowReservedSlots = false): bool {
+	public function acquire(bool $allowReservedSlots = false, int $waitMilliseconds = 0): bool {
 		if ($this->slotKey !== null) {
 			if (!($this->cache instanceof IMemcacheTTL)
 				|| $this->cache->compareSetTTL($this->slotKey, $this->owner, self::SLOT_TTL_SECONDS)) {
@@ -56,20 +66,29 @@ final class ImapConnectionSemaphore {
 			$this->slotKey = null;
 		}
 
-		$availableLimit = $this->getAvailableLimit($allowReservedSlots);
-		for ($offset = 0; $offset < $availableLimit; $offset++) {
-			// Interactive callers consume the reserved, highest-numbered slots
-			// first. This leaves ordinary capacity available when the interactive
-			// request arrives before the background work.
-			$slot = $allowReservedSlots ? $availableLimit - $offset - 1 : $offset;
-			$key = $this->identity . '_slot_' . $slot;
-			if ($this->cache->add($key, $this->owner, self::SLOT_TTL_SECONDS)) {
-				$this->slotKey = $key;
-				return true;
+		$remainingWaitMilliseconds = max(0, $waitMilliseconds);
+		do {
+			$availableLimit = $this->getAvailableLimit($allowReservedSlots);
+			for ($offset = 0; $offset < $availableLimit; $offset++) {
+				// Interactive callers consume the reserved, highest-numbered slots
+				// first. This leaves ordinary capacity available when the interactive
+				// request arrives before the background work.
+				$slot = $allowReservedSlots ? $availableLimit - $offset - 1 : $offset;
+				$key = $this->identity . '_slot_' . $slot;
+				if ($this->cache->add($key, $this->owner, self::SLOT_TTL_SECONDS)) {
+					$this->slotKey = $key;
+					return true;
+				}
 			}
-		}
 
-		return false;
+			if ($remainingWaitMilliseconds === 0) {
+				return false;
+			}
+
+			$sleepMilliseconds = min(50, $remainingWaitMilliseconds);
+			($this->sleep)($sleepMilliseconds * 1_000);
+			$remainingWaitMilliseconds -= $sleepMilliseconds;
+		} while (true);
 	}
 
 	public function release(): void {

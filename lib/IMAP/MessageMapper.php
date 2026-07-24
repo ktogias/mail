@@ -698,6 +698,7 @@ class MessageMapper {
 		int $uid,
 		string $userId,
 		?array $attachmentIds = []): array {
+		$attachmentIds ??= [];
 		$uids = new Horde_Imap_Client_Ids([$uid]);
 
 		$messageQuery = new Horde_Imap_Client_Fetch_Query();
@@ -711,7 +712,6 @@ class MessageMapper {
 		}
 
 		$structure = $structureResult->getStructure();
-		$messageData = null;
 
 		$isEncrypted = $this->smimeService->isEncrypted($structureResult);
 		if ($isEncrypted) {
@@ -728,8 +728,19 @@ class MessageMapper {
 
 			// Replace opaque structure with decrypted structure
 			$structure = Horde_Mime_Part::parseMessage($decryptedText, [ 'forcemime' => true ]);
-		} else {
-			$partsQuery = $this->buildAttachmentsPartsQuery($structure, $attachmentIds);
+		}
+
+		$visibleAttachmentIds = AttachmentClassifier::getVisibleAttachmentIds($structure);
+		if ($attachmentIds !== []) {
+			$visibleAttachmentIds = array_values(array_intersect($visibleAttachmentIds, $attachmentIds));
+		}
+		if ($visibleAttachmentIds === []) {
+			return [];
+		}
+
+		$messageData = null;
+		if (!$isEncrypted) {
+			$partsQuery = $this->buildAttachmentsPartsQuery($structure, $visibleAttachmentIds);
 			$parts = $client->fetch($mailbox, $partsQuery, ['ids' => $uids ]);
 			if (($messageData = $parts->first()) === null) {
 				throw new DoesNotExistException('Message does not exist');
@@ -741,12 +752,7 @@ class MessageMapper {
 		foreach ($structure->partIterator() as $key => $part) {
 			/** @var Horde_Mime_Part $part */
 
-			if (!$part->isAttachment()) {
-				continue;
-			}
-
-			if (!empty($attachmentIds) && !in_array($part->getMimeId(), $attachmentIds, true)) {
-				// We are looking for specific parts only and this is not one of them
+			if (!in_array($part->getMimeId(), $visibleAttachmentIds, true)) {
 				continue;
 			}
 
@@ -898,7 +904,6 @@ class MessageMapper {
 	 */
 	private function buildAttachmentsPartsQuery(Horde_Mime_Part $structure, array $attachmentIds) : Horde_Imap_Client_Fetch_Query {
 		$partsQuery = new Horde_Imap_Client_Fetch_Query();
-		$partsQuery->fullText();
 		foreach ($structure->partIterator() as $part) {
 			/** @var Horde_Mime_Part $part */
 			if ($part->getMimeId() === '0') {
@@ -944,7 +949,6 @@ class MessageMapper {
 			'ids' => new Horde_Imap_Client_Ids($uids),
 		]);
 		return array_map(function (Horde_Imap_Client_Data_Fetch $fetchData) use ($mailbox, $client, $emailAddress) {
-			$hasAttachments = false;
 			$text = '';
 			$isImipMessage = false;
 			$isEncrypted = false;
@@ -954,13 +958,10 @@ class MessageMapper {
 			}
 
 			$structure = $fetchData->getStructure();
+			$hasAttachments = AttachmentClassifier::hasVisibleAttachments($structure);
 
 			/** @var Horde_Mime_Part $part */
 			foreach ($structure->partIterator() as $part) {
-				if ($part->isAttachment()) {
-					$hasAttachments = true;
-				}
-
 				if ($part->getType() === 'text/calendar') {
 					if ($part->getContentTypeParameter('method') !== null) {
 						$isImipMessage = true;

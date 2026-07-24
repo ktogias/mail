@@ -787,6 +787,47 @@ class MessagesControllerTest extends TestCase {
 		$this->assertEquals($zipValues, $responseValues);
 	}
 
+	public function testDownloadAttachmentsDoesNotReturnAnEmptyZip(): void {
+		$accountId = 17;
+		$mailboxId = 987;
+		$id = 123;
+		$message = new DbMessage();
+		$message->setMailboxId($mailboxId);
+		$message->setUid(321);
+		$mailbox = new Mailbox();
+		$mailbox->setName('INBOX');
+		$mailbox->setAccountId($accountId);
+
+		$this->mailManager->expects(self::once())
+			->method('getMessage')
+			->with($this->userId, $id)
+			->willReturn($message);
+		$this->mailManager->expects(self::once())
+			->method('getMailbox')
+			->with($this->userId, $mailboxId)
+			->willReturn($mailbox);
+		$this->accountService->expects(self::once())
+			->method('find')
+			->with($this->userId, $accountId)
+			->willReturn($this->account);
+		$this->mailManager->expects(self::once())
+			->method('getMailAttachments')
+			->with($this->account, $mailbox, $message)
+			->willReturn([]);
+		$this->l10n->expects(self::once())
+			->method('t')
+			->with('This message has no downloadable attachments')
+			->willReturn('This message has no downloadable attachments');
+
+		$response = $this->controller->downloadAttachments($id);
+
+		self::assertInstanceOf(JSONResponse::class, $response);
+		self::assertSame(Http::STATUS_NOT_FOUND, $response->getStatus());
+		self::assertSame([
+			'message' => 'This message has no downloadable attachments',
+		], $response->getData());
+	}
+
 	public function testDownloadAttachmentsNoAccountError() {
 		$accountId = 17;
 		$mailboxId = 987;

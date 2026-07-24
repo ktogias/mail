@@ -668,7 +668,7 @@ class MailManager implements IMailManager {
 	 */
 	#[\Override]
 	public function getMailAttachments(Account $account, Mailbox $mailbox, Message $message): array {
-		$client = $this->imapClientFactory->getClient($account);
+		$client = $this->imapClientFactory->getClient($account, waitForSlot: true);
 		try {
 			return $this->imapMessageMapper->getAttachments(
 				$client,
@@ -699,7 +699,7 @@ class MailManager implements IMailManager {
 		Mailbox $mailbox,
 		Message $message,
 		string $attachmentId): Attachment {
-		$client = $this->imapClientFactory->getClient($account);
+		$client = $this->imapClientFactory->getClient($account, waitForSlot: true);
 		try {
 			return $this->imapMessageMapper->getAttachment(
 				$client,

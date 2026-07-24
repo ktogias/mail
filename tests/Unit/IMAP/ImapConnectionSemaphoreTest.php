@@ -212,4 +212,49 @@ class ImapConnectionSemaphoreTest extends TestCase {
 
 		self::assertSame(300, $cache->getTTL('account_slot_0'));
 	}
+
+	public function testBoundedWaitAcquiresAnOrdinarySlotAfterRelease(): void {
+		$cache = new SemaphoreCache();
+		$firstOrdinary = new ImapConnectionSemaphore($cache, 'account', 3, 1);
+		$secondOrdinary = new ImapConnectionSemaphore($cache, 'account', 3, 1);
+		self::assertTrue($firstOrdinary->acquire());
+		self::assertTrue($secondOrdinary->acquire());
+
+		$sleeps = [];
+		$waiting = new ImapConnectionSemaphore(
+			$cache,
+			'account',
+			3,
+			1,
+			sleep: static function (int $microseconds) use (&$sleeps, $firstOrdinary): void {
+				$sleeps[] = $microseconds;
+				$firstOrdinary->release();
+			},
+		);
+
+		self::assertTrue($waiting->acquire(false, 100));
+		self::assertSame([50_000], $sleeps);
+		// The wait mode is still ordinary: the mutation-only slot stays free.
+		self::assertFalse($cache->hasKey('account_slot_2'));
+	}
+
+	public function testBoundedWaitStopsAtItsDeadline(): void {
+		$cache = new SemaphoreCache();
+		$occupier = new ImapConnectionSemaphore($cache, 'account', 1);
+		self::assertTrue($occupier->acquire());
+
+		$sleeps = [];
+		$waiting = new ImapConnectionSemaphore(
+			$cache,
+			'account',
+			1,
+			sleep: static function (int $microseconds) use (&$sleeps): void {
+				$sleeps[] = $microseconds;
+			},
+		);
+
+		self::assertFalse($waiting->acquire(false, 120));
+		self::assertSame([50_000, 50_000, 20_000], $sleeps);
+		self::assertTrue($cache->hasKey('account_slot_0'));
+	}
 }
