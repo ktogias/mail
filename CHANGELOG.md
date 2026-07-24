@@ -1,3 +1,29 @@
+## 5.11.0-dev.0.ktogias.6 (2026-07-24, resource-constrained deployment fork)
+
+### Interactive Request Priority
+
+* classify Mail requests from quick mutations through active content, explicit refresh, visible revalidation, speculative prefetch, and maintenance work
+* reserve browser and per-account IMAP capacity for current user actions while bounding concurrency, aging queued work fairly, and dropping speculative work under foreground pressure
+* attach RFC 9218 urgency hints without trusting client headers to allocate reserved server capacity
+
+### Network And Multi-Tab Resilience
+
+* coordinate watched sync and mutation replay across tabs with Web Locks and broadcast active-view revalidation
+* treat browser online state only as a hint, then recover through an authenticated health probe, per-user IndexedDB mutation replay, and active-view reconciliation
+* pause background work during degraded connectivity and retry transient failures with Retry-After-aware exponential backoff and jitter
+
+### Batched And Idempotent Flag Mutations
+
+* update all selected read/unread rows optimistically in one render and send one batch request with one IMAP STORE per physical mailbox group
+* persist ambiguous target-state flag writes without message content and replay the same operation id after reload or network return
+* return explicit 409/429 Retry-After overload signals and reclaim stale two-minute operation leases safely
+
+### Database
+
+* add `Version5011Date20260724120000` for the bounded per-user client-operation idempotency journal and its unique/expiry indexes
+* keep every schema change inside the normal versioned Nextcloud upgrade path
+
+
 ## 5.11.0-dev.0.ktogias.5 (2026-07-24, resource-constrained deployment fork)
 
 ### Attachment Download Reliability
