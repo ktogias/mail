@@ -23,7 +23,11 @@
 			:error="errorTitle"
 			:message="errorMessage"
 			role="alert" />
-		<LoadingSkeleton v-else-if="loadingEnvelopes" :number-of-lines="20" />
+		<!-- A unified/Priority list is published progressively as each
+		     constituent inbox answers. Keep the full skeleton only until
+		     the first useful rows arrive; once they do, render them at once
+		     while the slower accounts continue filling the list. -->
+		<LoadingSkeleton v-else-if="loadingEnvelopes && !hasMessages" :number-of-lines="20" />
 		<Loading
 			v-else-if="loadingCacheInitialization"
 			:hint="t('mail', 'Loading messages …')"
@@ -51,7 +55,7 @@
 			:mailbox="mailbox"
 			:search-query="searchQuery"
 			:envelopes="visibleEnvelopesToShow"
-			:loading-more="loadingMore"
+			:loading-more="loadingMore || loadingEnvelopes"
 			:load-more-button="showLoadMore"
 			:collapse-button="showCollapse"
 			:skip-transition="skipListTransition"
@@ -249,6 +253,15 @@ export default {
 		// happened yet.
 		visibleEnvelopesToShow() {
 			return this.envelopesToShow.filter((envelope) => !this.isPendingUndo(envelope.databaseId))
+		},
+
+		// The same visibility rule must govern keyboard/header previous-next
+		// navigation, not only row rendering. During the undo window the raw
+		// store list intentionally still contains a deleted thread; allowing
+		// navigation to use that raw list opened its stale route again and
+		// produced a header with an empty message body.
+		navigationEnvelopes() {
+			return this.envelopes.filter((envelope) => !this.isPendingUndo(envelope.databaseId))
 		},
 
 		visibleGroupEnvelopes() {
@@ -633,7 +646,7 @@ export default {
 		},
 
 		async handleShortcut(e) {
-			const envelopes = this.envelopes
+			const envelopes = this.navigationEnvelopes
 			const currentId = parseInt(this.$route.params.threadId, 10)
 
 			const env = envelopes.find((e) => e.databaseId === currentId)
@@ -855,6 +868,9 @@ export default {
 			}).catch((error) => {
 				logger.debug('deferred envelope-list refill failed', { error })
 			})
+			// Locate the removed row in the raw list: it has already entered
+			// the shared pending-removal set synchronously, so it is correctly
+			// absent from navigationEnvelopes by the time this event arrives.
 			const idx = findIndex(propEq(id, 'databaseId'), this.envelopes)
 			if (idx === -1) {
 				logger.debug('envelope to delete does not exist in envelope list')
@@ -870,11 +886,20 @@ export default {
 			// the list as currently sorted, each falling back to the other end
 			// when there's no neighbour that way; "list" returns to the mailbox.
 			const autoAdvance = this.mainStore.getPreference('auto-advance', 'next')
+			const navigableBefore = this.envelopes
+				.slice(0, idx)
+				.filter((envelope) => !this.isPendingUndo(envelope.databaseId))
+			const navigableAfter = this.envelopes
+				.slice(idx + 1)
+				.filter((envelope) => !this.isPendingUndo(envelope.databaseId))
 			const next = autoAdvance === 'previous'
-				? (this.envelopes[idx - 1] ?? this.envelopes[idx + 1])
-				: (this.envelopes[idx + 1] ?? this.envelopes[idx - 1])
+				? (navigableBefore[navigableBefore.length - 1] ?? navigableAfter[0])
+				: (navigableAfter[0] ?? navigableBefore[navigableBefore.length - 1])
 			if (autoAdvance === 'list' || !next) {
-				this.$router.push({
+				// Replace the deleted thread's history entry. Browser Back
+				// must not resurrect a route whose content is intentionally
+				// gone (or merely hidden during the undo window).
+				this.$router.replace({
 					name: 'mailbox',
 					params: {
 						mailboxId: this.$route.params.mailboxId,
@@ -891,7 +916,7 @@ export default {
 				query: this.searchQuery,
 				databaseId: next.databaseId,
 			})
-			this.$router.push({
+			this.$router.replace({
 				name: 'message',
 				params: {
 					mailboxId: this.$route.params.mailboxId,

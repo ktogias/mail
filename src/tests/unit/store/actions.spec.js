@@ -453,6 +453,57 @@ describe('Vuex store actions', () => {
 		])
 	})
 
+	it('publishes a partial unified page before the slowest constituent inbox finishes', async () => {
+		normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+		const account13 = { id: 13, personalNamespace: '', mailboxes: [] }
+		const account14 = { id: 14, personalNamespace: '', mailboxes: [] }
+		store.addAccountMutation(account13)
+		store.addAccountMutation(account14)
+		store.addMailboxMutation({
+			account: account13,
+			mailbox: { id: 'INBOX', name: 'INBOX', databaseId: 21, accountId: 13, specialRole: 'inbox' },
+		})
+		store.addMailboxMutation({
+			account: account14,
+			mailbox: { id: 'INBOX', name: 'INBOX', databaseId: 31, accountId: 14, specialRole: 'inbox' },
+		})
+
+		const fastEnvelope = {
+			databaseId: 123,
+			mailboxId: 21,
+			uid: 321,
+			dateInt: 300,
+			threadRootId: 'fast',
+			flags: {},
+			tags: {},
+		}
+		let resolveSlow
+		MessageService.fetchEnvelopes.mockImplementation((accountId) => {
+			if (accountId === 14) {
+				return new Promise((resolve) => {
+					resolveSlow = resolve
+				})
+			}
+			return Promise.resolve([fastEnvelope])
+		})
+
+		const fetchPromise = store.fetchEnvelopes({
+			mailboxId: UNIFIED_INBOX_ID,
+			query: 'is:starred',
+		})
+
+		await vi.waitFor(() => {
+			expect(resolveSlow).toBeTypeOf('function')
+			expect(store.getEnvelopes(UNIFIED_INBOX_ID, 'is:starred').map((envelope) => envelope.databaseId))
+				.toEqual([123])
+		})
+
+		// The overall fetch is deliberately still waiting for account 14;
+		// its eventual completion extends/finalizes the same visible page.
+		resolveSlow([])
+		await fetchPromise
+	})
+
 	it('caps the unified fan-out so constituent fetches never all run at once', async () => {
 		// A slow search across many accounts used to fire every
 		// constituent request simultaneously (worst live case: a
@@ -5839,6 +5890,41 @@ describe('Vuex store actions', () => {
 			await call
 
 			expect(track.maxConcurrent).toBe(2)
+		})
+
+		it('round-robins waiting groups so the last Priority section starts before an earlier section drains', async () => {
+			const started = []
+			const resolvers = new Map()
+			const fn = (item) => new Promise((resolve) => {
+				started.push(item)
+				resolvers.set(item, resolve)
+			})
+
+			const favorites = mapWithConcurrencyLimit(['f1', 'f2', 'f3'], 3, fn)
+			const important = mapWithConcurrencyLimit(['i1', 'i2', 'i3'], 3, fn)
+			const other = mapWithConcurrencyLimit(['o1', 'o2', 'o3'], 3, fn)
+
+			await vi.waitFor(() => expect(started).toHaveLength(4))
+			expect(started).toEqual(['f1', 'f2', 'f3', 'i1'])
+
+			resolvers.get('f1')()
+			await vi.waitFor(() => expect(started).toContain('i2'))
+			resolvers.get('f2')()
+			await vi.waitFor(() => expect(started).toContain('o1'))
+
+			// Under the old flat FIFO queue i3 started here and every Other
+			// worker remained blocked. Group round-robin gives Other its
+			// first response opportunity without raising concurrency.
+			expect(started.indexOf('o1')).toBeLessThan(started.indexOf('i3') === -1 ? Infinity : started.indexOf('i3'))
+
+			while (resolvers.size > 0) {
+				for (const [item, resolve] of [...resolvers]) {
+					resolvers.delete(item)
+					resolve()
+				}
+				await new Promise((resolve) => setTimeout(resolve, 0))
+			}
+			await Promise.all([favorites, important, other])
 		})
 	})
 

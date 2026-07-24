@@ -1095,21 +1095,46 @@ class ConcurrencyLimiter {
 	constructor(limit) {
 		this.limit = limit
 		this.active = 0
-		this.queue = []
+		// Waiting work is grouped by the mapWithConcurrencyLimit() call
+		// that submitted it. A single FIFO queue let the first Priority
+		// Inbox section enqueue all of its local workers ahead of every
+		// worker from the sections mounted just after it: Favorites
+		// consumed the first wave, Important the next, and Other only
+		// started much later. Keep the same hard global ceiling, but hand
+		// released permits to one waiting group at a time in round-robin
+		// order so simultaneous independent lists make visible progress
+		// together.
+		this.queuesByGroup = new Map()
+		this.groupOrder = []
 	}
 
-	acquire() {
+	acquire(group) {
 		if (this.active < this.limit) {
 			this.active++
 			return Promise.resolve()
 		}
-		return new Promise((resolve) => this.queue.push(resolve))
+		return new Promise((resolve) => {
+			let queue = this.queuesByGroup.get(group)
+			if (queue === undefined) {
+				queue = []
+				this.queuesByGroup.set(group, queue)
+				this.groupOrder.push(group)
+			}
+			queue.push(resolve)
+		})
 	}
 
 	release() {
 		this.active--
-		const next = this.queue.shift()
-		if (next) {
+		const group = this.groupOrder.shift()
+		if (group !== undefined) {
+			const queue = this.queuesByGroup.get(group)
+			const next = queue.shift()
+			if (queue.length > 0) {
+				this.groupOrder.push(group)
+			} else {
+				this.queuesByGroup.delete(group)
+			}
 			this.active++
 			next()
 		}
@@ -1149,10 +1174,14 @@ export function resetSharedNetworkLimiterForTests() {
 export async function mapWithConcurrencyLimit(items, limit, fn) {
 	const results = new Array(items.length)
 	let nextIndex = 0
+	// One opaque identity per independent caller. The shared limiter uses
+	// it only for fair round-robin scheduling; it never changes either
+	// this call's own limit or the global concurrency ceiling.
+	const group = Symbol('concurrency-group')
 	async function worker() {
 		while (nextIndex < items.length) {
 			const currentIndex = nextIndex++
-			await sharedNetworkLimiter.acquire()
+			await sharedNetworkLimiter.acquire(group)
 			try {
 				results[currentIndex] = await fn(items[currentIndex], currentIndex)
 			} finally {
@@ -2154,6 +2183,55 @@ export default function mainStoreActions() {
 			this.envelopeFetchStartedMutation({ mailboxId, query })
 			return handleHttpAuthErrors(async () => {
 				const mailbox = this.getMailbox(mailboxId)
+				const fetchVirtualConstituentLists = (mbs, virtualQuery, failureContext) => {
+					const partialLists = new Array(mbs.length)
+					return mapWithConcurrencyLimit(
+						mbs,
+						envelopeFetchConcurrencyFor(virtualQuery),
+						async (mb, index) => {
+							const envelopes = await this.fetchEnvelopes({
+								mailboxId: mb.databaseId,
+								query: virtualQuery,
+								addToUnifiedMailboxes: false,
+								deepAddToUnifiedMailboxes: true,
+								deepStatusMailboxId: mailbox.databaseId,
+								deepStatusQuery: virtualQuery,
+								signal,
+								searchUpperBound,
+								workClass,
+							}).catch((error) => {
+								if (axios.isCancel(error)) {
+									// The whole virtual fetch was superseded;
+									// never degrade cancellation into an
+									// "empty account" result.
+									throw error
+								}
+								logger.error(`Failed to fetch envelopes for ${failureContext} constituent mailbox ${mb.databaseId}: ${error}`, { error })
+								return []
+							})
+							const page = sliceToPage(envelopes)
+							partialLists[index] = page
+
+							// Publish a correctly merged partial page as soon
+							// as any physical inbox answers. The old
+							// Promise.all-shaped barrier kept the whole section
+							// behind its skeleton until the slowest account
+							// completed (19.9s measured live for Other), even
+							// while other inboxes had useful rows ready in
+							// under a second. The final combine in each caller
+							// remains the authoritative return value.
+							const completedLists = partialLists.filter((list) => list !== undefined)
+							const partial = sliceToPage(combineEnvelopeLists(this.getPreference('sort-order'))(completedLists))
+							if (partial.length > 0) {
+								this.addEnvelopesMutation({
+									envelopes: partial,
+									query: virtualQuery,
+								})
+							}
+							return page
+						},
+					)
+				}
 
 				if (mailbox.isUnified) {
 					const sharedSearch = sharedContentSearchDescriptor(query)
@@ -2183,35 +2261,9 @@ export default function mainStoreActions() {
 					// once. Worst measured case was a priority-inbox search
 					// (5 mailboxes x 3 sections, twice while typing = 30
 					// concurrent slow queries) where every request 504ed.
-					const fetchIndividualLists = (mbs) => mapWithConcurrencyLimit(
-						mbs,
-						envelopeFetchConcurrencyFor(query),
-						(mb) => this.fetchEnvelopes({
-							mailboxId: mb.databaseId,
-							query,
-							addToUnifiedMailboxes: false,
-							deepAddToUnifiedMailboxes: true,
-							deepStatusMailboxId: mailbox.databaseId,
-							deepStatusQuery: query,
-							sort: this.getPreference('sort-order'),
-							view: this.getPreference('layout-message-view'),
-							signal,
-							searchUpperBound,
-							workClass,
-						}).catch((error) => {
-							if (axios.isCancel(error)) {
-								// The whole unified fetch was superseded --
-								// don't degrade the abort into an "empty
-								// account" result.
-								throw error
-							}
-							logger.error(`Failed to fetch envelopes for unified constituent mailbox ${mb.databaseId}: ${error}`, { error })
-							return []
-						}),
-					).then(map(sliceToPage))
 					const fetchUnifiedEnvelopes = pipe(
 						findIndividualMailboxes(this.getMailboxes, mailbox.specialRole),
-						fetchIndividualLists,
+						(mbs) => fetchVirtualConstituentLists(mbs, query, 'unified'),
 						andThen(combineEnvelopeLists(this.getPreference('sort-order'))),
 						andThen(sliceToPage),
 						andThen(tap((envelopes) => {
@@ -2243,32 +2295,9 @@ export default function mainStoreActions() {
 						// concurrent sections multiply the per-section limit,
 						// so this is what keeps a priority search's total
 						// in-flight requests below the FPM pool size.
-						const fetchIndividualLists = (mbs) => mapWithConcurrencyLimit(
-							mbs,
-							envelopeFetchConcurrencyFor(query),
-							(mb) => this.fetchEnvelopes({
-								mailboxId: mb.databaseId,
-								query,
-								addToUnifiedMailboxes: false,
-								deepAddToUnifiedMailboxes: true,
-								deepStatusMailboxId: mailbox.databaseId,
-								deepStatusQuery: query,
-								signal,
-								searchUpperBound,
-								workClass,
-							}).catch((error) => {
-								if (axios.isCancel(error)) {
-									// Superseded search -- propagate, see
-									// the isUnified branch above.
-									throw error
-								}
-								logger.error(`Failed to fetch envelopes for priority-inbox constituent mailbox ${mb.databaseId}: ${error}`, { error })
-								return []
-							}),
-						).then(map(sliceToPage))
 						const fetchPriorityEnvelopes = pipe(
 							findIndividualMailboxes(this.getMailboxes, mailbox.specialRole),
-							fetchIndividualLists,
+							(mbs) => fetchVirtualConstituentLists(mbs, query, 'priority-inbox'),
 							andThen(combineEnvelopeLists(this.getPreference('sort-order'))),
 							andThen(sliceToPage),
 							andThen(tap((envelopes) => this.addEnvelopesMutation({

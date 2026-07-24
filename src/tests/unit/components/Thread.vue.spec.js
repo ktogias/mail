@@ -1063,6 +1063,33 @@ describe('Thread', () => {
 			expect(view.emitted('navigate-list')).toBeUndefined()
 		})
 
+		it('does not expose a deleted undo-pending thread as a previous destination', () => {
+			store.beginPendingRemoval([8001])
+			const view = mountAt(8002)
+
+			expect(view.vm.listNavigation).toEqual({ hasPrevious: false, hasNext: true })
+
+			view.vm.navigateList('prev')
+
+			expect(view.emitted('navigate-list')).toBeUndefined()
+		})
+
+		it('keeps the subject, metadata and body on the same pending-removal view', () => {
+			store.getEnvelope = vi.fn().mockReturnValue({
+				databaseId: 8002,
+				subject: 'Deleted subject',
+				from: [{ email: 'from@example.com' }],
+				to: [{ email: 'to@example.com' }],
+				flags: {},
+			})
+			store.beginPendingRemoval([8002])
+			const view = mountAt(8002)
+
+			expect(view.vm.visibleThread).toEqual([])
+			expect(view.vm.threadSubject).toBe('')
+			expect(view.vm.threadMetaText).toContain('0')
+		})
+
 		it('hides controls when the thread was not opened from a loaded list', () => {
 			store.lastOpenedFromList = null
 			const view = mountAt(8002)

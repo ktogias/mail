@@ -61,7 +61,7 @@ describe('Mailbox', () => {
 			},
 			mocks: {
 				$route: { params: {} },
-				$router: { push: vi.fn() },
+				$router: { push: vi.fn(), replace: vi.fn() },
 				...mocksOverride,
 			},
 			store,
@@ -89,6 +89,17 @@ describe('Mailbox', () => {
 
 			expect(view.findComponent({ name: 'EmptyMailbox' }).exists()).toBe(true)
 			expect(view.findComponent({ name: 'EmptyMailboxSection' }).exists()).toBe(false)
+		})
+
+		it('renders a progressively-arrived row instead of keeping the full skeleton until every account finishes', async () => {
+			store.getEnvelopes = vi.fn().mockReturnValue([{ databaseId: 1 }])
+			const view = mountMailbox()
+
+			await view.setData({ loadingEnvelopes: true })
+
+			expect(view.findComponent({ name: 'LoadingSkeleton' }).exists()).toBe(false)
+			expect(view.findComponent({ name: 'EnvelopeList' }).exists()).toBe(true)
+			expect(view.findComponent({ name: 'EnvelopeList' }).props('loadingMore')).toBe(true)
 		})
 	})
 
@@ -499,7 +510,7 @@ describe('Mailbox', () => {
 			view.vm.onDelete(1)
 
 			expect(store.lastOpenedFromList).toEqual({ mailboxId: mailbox.databaseId, query: 'is:starred', databaseId: 2 })
-			expect(view.vm.$router.push).toHaveBeenCalledWith(expect.objectContaining({
+			expect(view.vm.$router.replace).toHaveBeenCalledWith(expect.objectContaining({
 				params: expect.objectContaining({ threadId: 2 }),
 			}))
 		})
@@ -510,6 +521,26 @@ describe('Mailbox', () => {
 
 			expect(store.lastOpenedFromList).toBeNull()
 			expect(view.vm.$router.push).not.toHaveBeenCalled()
+			expect(view.vm.$router.replace).not.toHaveBeenCalled()
+		})
+
+		it('skips an undo-pending deleted thread when navigating back from the auto-opened neighbor', () => {
+			store.getEnvelopes = vi.fn().mockReturnValue([
+				{ databaseId: 1 },
+				{ databaseId: 2 },
+				{ databaseId: 3 },
+			])
+			store.beginPendingRemoval([2])
+			const view = mountMailbox({ searchQuery: 'is:starred' }, { $route: { params: { threadId: 3 } } })
+
+			view.vm.handleShortcut({ srcKey: 'prev' })
+
+			expect(view.vm.$router.push).toHaveBeenCalledWith(expect.objectContaining({
+				params: expect.objectContaining({ threadId: 1 }),
+			}))
+			expect(view.vm.$router.push).not.toHaveBeenCalledWith(expect.objectContaining({
+				params: expect.objectContaining({ threadId: 2 }),
+			}))
 		})
 	})
 
@@ -604,7 +635,7 @@ describe('Mailbox', () => {
 			view.vm.onDelete(2)
 
 			expect(store.getPreference).toHaveBeenCalledWith('auto-advance', 'next')
-			expect(view.vm.$router.push).toHaveBeenCalledWith(expect.objectContaining({
+			expect(view.vm.$router.replace).toHaveBeenCalledWith(expect.objectContaining({
 				name: 'message',
 				params: expect.objectContaining({ threadId: 1 }),
 			}))
@@ -618,7 +649,7 @@ describe('Mailbox', () => {
 
 			view.vm.onDelete(1)
 
-			expect(view.vm.$router.push).toHaveBeenCalledWith(expect.objectContaining({
+			expect(view.vm.$router.replace).toHaveBeenCalledWith(expect.objectContaining({
 				name: 'message',
 				params: expect.objectContaining({ threadId: 2 }),
 			}))
@@ -630,8 +661,8 @@ describe('Mailbox', () => {
 
 			view.vm.onDelete(2)
 
-			expect(view.vm.$router.push).toHaveBeenCalledWith(expect.objectContaining({ name: 'mailbox' }))
-			expect(view.vm.$router.push).not.toHaveBeenCalledWith(expect.objectContaining({ name: 'message' }))
+			expect(view.vm.$router.replace).toHaveBeenCalledWith(expect.objectContaining({ name: 'mailbox' }))
+			expect(view.vm.$router.replace).not.toHaveBeenCalledWith(expect.objectContaining({ name: 'message' }))
 			// "list" is an explicit navigate-away, not a neighbour open, so it
 			// must not record list context for neighbour prefetching.
 			expect(store.lastOpenedFromList).toBeNull()
@@ -644,7 +675,19 @@ describe('Mailbox', () => {
 
 			view.vm.onDelete(2)
 
-			expect(view.vm.$router.push).toHaveBeenCalledWith(expect.objectContaining({ name: 'mailbox' }))
+			expect(view.vm.$router.replace).toHaveBeenCalledWith(expect.objectContaining({ name: 'mailbox' }))
+		})
+
+		it('finds the next visible neighbor after the deleted row is already pending undo', () => {
+			store.beginPendingRemoval([2])
+			const view = mountMailbox({ searchQuery: 'is:starred' }, { $route: { params: { threadId: 2 } } })
+
+			view.vm.onDelete(2)
+
+			expect(view.vm.$router.replace).toHaveBeenCalledWith(expect.objectContaining({
+				name: 'message',
+				params: expect.objectContaining({ threadId: 3 }),
+			}))
 		})
 	})
 

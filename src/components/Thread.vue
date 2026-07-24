@@ -322,7 +322,11 @@ export default {
 				return undefined
 			}
 
+			// The raw list retains undoable removals until the toast expires.
+			// They are not visible rows and therefore cannot be valid
+			// previous/next destinations either.
 			const list = this.mainStore.getEnvelopes(openedFrom.mailboxId, openedFrom.query)
+				.filter((envelope) => !this.isPendingUndo(envelope.databaseId))
 			const openIndex = list.findIndex((envelope) => envelope?.databaseId === this.threadId)
 			if (openIndex === -1) {
 				return undefined
@@ -388,7 +392,11 @@ export default {
 		},
 
 		threadSubject() {
-			const thread = this.thread
+			// Keep header and body on the same visibility source. Previously
+			// the body used visibleThread while the subject used raw thread,
+			// producing exactly the stale-title/empty-body split during an
+			// undoable removal.
+			const thread = this.visibleThread
 			if (thread.length === 0) {
 				logger.warn('thread is empty')
 				return ''
@@ -399,13 +407,13 @@ export default {
 		// The account the open thread belongs to -- used for thread-level
 		// actions (archive target, Move modal).
 		threadAccount() {
-			return this.thread.length > 0
-				? this.mainStore.getAccount(this.thread[0].accountId)
+			return this.visibleThread.length > 0
+				? this.mainStore.getAccount(this.visibleThread[0].accountId)
 				: undefined
 		},
 
 		threadHasUnread() {
-			return this.thread.some((envelope) => !envelope.flags?.seen)
+			return this.visibleThread.some((envelope) => !envelope.flags?.seen)
 		},
 
 		// How many of the thread ⋮ menu's leading actions to promote onto the
@@ -484,14 +492,14 @@ export default {
 		// Compact context line under the subject: "N messages · X people".
 		// Reuses threadParticipants (distinct from+to addresses).
 		threadMetaText() {
-			const messages = this.n('mail', '%n message', '%n messages', this.thread.length)
+			const messages = this.n('mail', '%n message', '%n messages', this.visibleThread.length)
 			const people = this.n('mail', '%n participant', '%n participants', this.threadParticipants.length || 1)
 			return `${messages} · ${people}`
 		},
 
 		threadParticipants() {
 			const seen = new Set()
-			return this.thread.flatMap((envelope) => [
+			return this.visibleThread.flatMap((envelope) => [
 				...(envelope.from ?? []),
 				...(envelope.to ?? []),
 			]).filter(({ email }) => {
