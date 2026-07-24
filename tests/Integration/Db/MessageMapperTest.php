@@ -223,6 +223,10 @@ class MessageMapperTest extends TestCase {
 			[5, 1, 'thread-deleted', 500, false, true, true, true],
 			// A different mailbox proves the mailbox-id restriction.
 			[6, 2, 'thread-other-mailbox', 600, false, true, true, false],
+			// NULL thread roots are two independent messages, not one
+			// synthetic conversation.
+			[7, 1, null, 700, false, false, true, false],
+			[8, 1, null, 800, true, false, false, false],
 		];
 
 		foreach ($rows as [$id, $mailboxId, $threadRoot, $sentAt, $seen, $flagged, $important, $deleted]) {
@@ -244,20 +248,20 @@ class MessageMapperTest extends TestCase {
 
 		self::assertSame([
 			'favorite' => ['total' => 1, 'unread' => 1],
-			'important' => ['total' => 1, 'unread' => 1],
-			'other' => ['total' => 1, 'unread' => 0],
+			'important' => ['total' => 2, 'unread' => 2],
+			'other' => ['total' => 2, 'unread' => 0],
 		], $this->mapper->getPriorityInboxStats([1], true, true));
 
 		self::assertSame([
 			'favorite' => ['total' => 1, 'unread' => 0],
-			'important' => ['total' => 2, 'unread' => 2],
-			'other' => ['total' => 1, 'unread' => 0],
+			'important' => ['total' => 3, 'unread' => 3],
+			'other' => ['total' => 2, 'unread' => 0],
 		], $this->mapper->getPriorityInboxStats([1], false, true));
 
 		self::assertSame([
 			'favorite' => ['total' => 0, 'unread' => 0],
-			'important' => ['total' => 2, 'unread' => 2],
-			'other' => ['total' => 1, 'unread' => 0],
+			'important' => ['total' => 3, 'unread' => 3],
+			'other' => ['total' => 2, 'unread' => 0],
 		], $this->mapper->getPriorityInboxStats([1], true, false));
 
 		self::assertSame([

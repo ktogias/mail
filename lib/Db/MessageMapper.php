@@ -212,11 +212,12 @@ class MessageMapper extends QBMapper {
 	 * does not touch IMAP: the compact overview must never compete with the
 	 * visible message rows it describes.
 	 *
-	 * In threaded mode a conversation is counted once, using the same
-	 * newest-message representative as the normal mailbox query while its
-	 * flags are aggregated across all non-deleted members. Favorite takes
-	 * precedence over Important when the user's separate-favorites
-	 * preference is enabled.
+	 * In threaded mode a conversation is counted once and its flags are
+	 * aggregated across all non-deleted members. A grouped single-pass
+	 * source avoids the mailbox query's representative self-join and
+	 * repeated correlated flag probes, which are needlessly expensive when
+	 * the caller only needs counters. Favorite takes precedence over
+	 * Important when the user's separate-favorites preference is enabled.
 	 *
 	 * @param int[] $mailboxIds
 	 * @return array{
@@ -235,64 +236,44 @@ class MessageMapper extends QBMapper {
 			return $empty;
 		}
 
-		$qb = $this->db->getQueryBuilder();
-		$qb->from($this->getTableName(), 'm');
+		$source = $this->db->getQueryBuilder();
+		$false = $source->createNamedParameter(false, IQueryBuilder::PARAM_BOOL);
+		$true = $source->createNamedParameter(true, IQueryBuilder::PARAM_BOOL);
+		$notDeleted = (string)$source->expr()->eq('pm.flag_deleted', $false, IQueryBuilder::PARAM_BOOL);
+		$aggregateFlag = static function (string $condition) use ($threaded): string {
+			$case = 'CASE WHEN ' . $condition . ' THEN 1 ELSE 0 END';
+			return $threaded ? 'MAX(' . $case . ')' : $case;
+		};
 
-		if ($threaded) {
-			$selfJoin = $qb->expr()->andX(
-				$qb->expr()->eq('m.mailbox_id', 'm2.mailbox_id', IQueryBuilder::PARAM_INT),
-				$qb->expr()->eq('m.thread_root_id', 'm2.thread_root_id', IQueryBuilder::PARAM_STR),
-				$qb->expr()->orX(
-					$qb->expr()->lt('m.sent_at', 'm2.sent_at', IQueryBuilder::PARAM_INT),
-					$qb->expr()->andX(
-						$qb->expr()->eq('m.sent_at', 'm2.sent_at', IQueryBuilder::PARAM_INT),
-						$qb->expr()->lt('m.message_id', 'm2.message_id', IQueryBuilder::PARAM_STR),
-					),
+		$source->select(
+			$source->createFunction($aggregateFlag($notDeleted) . ' AS eligible'),
+			$source->createFunction($aggregateFlag($notDeleted . ' AND pm.flag_seen = ' . $false) . ' AS unread'),
+			$source->createFunction($aggregateFlag($notDeleted . ' AND pm.flag_flagged = ' . $true) . ' AS flagged'),
+			$source->createFunction($aggregateFlag($notDeleted . ' AND pm.flag_important = ' . $true) . ' AS important'),
+		)
+			->from($this->getTableName(), 'pm')
+			->where(
+				$source->expr()->in(
+					'pm.mailbox_id',
+					$source->createNamedParameter(array_values(array_unique($mailboxIds)), IQueryBuilder::PARAM_INT_ARRAY),
+					IQueryBuilder::PARAM_INT_ARRAY,
 				),
 			);
-			$qb->leftJoin('m', $this->getTableName(), 'm2', $selfJoin);
-		}
 
-		$qb->where(
-			$qb->expr()->in(
-				'm.mailbox_id',
-				$qb->createNamedParameter(array_values(array_unique($mailboxIds)), IQueryBuilder::PARAM_INT_ARRAY),
-				IQueryBuilder::PARAM_INT_ARRAY,
-			),
-		);
 		if ($threaded) {
-			$qb->andWhere($qb->expr()->isNull('m2.id'));
+			// NULL thread roots are independent messages. The discriminator
+			// preserves that behavior while grouping real thread roots once.
+			$source->groupBy('pm.mailbox_id')
+				->addGroupBy('pm.thread_root_id')
+				->addGroupBy($source->createFunction(
+					'CASE WHEN pm.thread_root_id IS NULL THEN pm.id ELSE 0 END'
+				));
 		}
 
-		$bool = static fn (bool $value): string => $qb->createNamedParameter($value, IQueryBuilder::PARAM_BOOL);
-		if ($threaded) {
-			$threadHas = function (string $condition) use ($qb): string {
-				$inner = $this->db->getQueryBuilder();
-				$inner->select($inner->expr()->literal(1))
-					->from($this->getTableName(), 'pis')
-					->where(
-						$inner->expr()->eq('pis.mailbox_id', 'm.mailbox_id', IQueryBuilder::PARAM_INT),
-						$inner->expr()->orX(
-							$inner->expr()->eq('pis.id', 'm.id', IQueryBuilder::PARAM_INT),
-							$inner->expr()->eq('pis.thread_root_id', 'm.thread_root_id', IQueryBuilder::PARAM_STR),
-						),
-						$qb->createFunction($condition),
-					);
-
-				return 'EXISTS (' . $inner->getSQL() . ')';
-			};
-
-			$notDeleted = 'pis.flag_deleted = ' . $bool(false);
-			$eligible = $threadHas($notDeleted);
-			$unread = $threadHas($notDeleted . ' AND pis.flag_seen = ' . $bool(false));
-			$flagged = $threadHas($notDeleted . ' AND pis.flag_flagged = ' . $bool(true));
-			$important = $threadHas($notDeleted . ' AND pis.flag_important = ' . $bool(true));
-		} else {
-			$eligible = 'm.flag_deleted = ' . $bool(false);
-			$unread = 'm.flag_seen = ' . $bool(false);
-			$flagged = 'm.flag_flagged = ' . $bool(true);
-			$important = 'm.flag_important = ' . $bool(true);
-		}
+		$eligible = 'priority_rows.eligible = 1';
+		$unread = 'priority_rows.unread = 1';
+		$flagged = 'priority_rows.flagged = 1';
+		$important = 'priority_rows.important = 1';
 
 		if ($sortFavorites) {
 			$categories = [
@@ -314,9 +295,10 @@ class MessageMapper extends QBMapper {
 			$select[] = 'SUM(CASE WHEN ' . $member . ' THEN 1 ELSE 0 END) AS ' . $section . '_total';
 			$select[] = 'SUM(CASE WHEN ' . $member . ' AND (' . $unread . ') THEN 1 ELSE 0 END) AS ' . $section . '_unread';
 		}
-		$qb->select(...$select);
 
-		$result = $qb->executeQuery();
+		$sql = 'SELECT ' . implode(', ', $select)
+			. ' FROM (' . $source->getSQL() . ') priority_rows';
+		$result = $this->db->executeQuery($sql, $source->getParameters(), $source->getParameterTypes());
 		$row = $result->fetchAssociative() ?: [];
 		$result->closeCursor();
 
