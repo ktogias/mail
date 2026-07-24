@@ -60,6 +60,64 @@ describe('service/MessageService test suite', () => {
 		})
 	})
 
+	describe('active message capacity recovery', () => {
+		const capacityError = (status = 429, headers = {}) => ({
+			response: {
+				status,
+				headers,
+				data: {},
+			},
+		})
+
+		beforeEach(() => {
+			vi.useFakeTimers()
+			axios.isCancel.mockReturnValue(false)
+		})
+
+		afterEach(() => {
+			vi.useRealTimers()
+		})
+
+		it('briefly retries a visible message and honors Retry-After', async () => {
+			generateUrl.mockReturnValueOnce('/generated-url')
+			axios.get
+				.mockRejectedValueOnce(capacityError(429, { 'retry-after': '1' }))
+				.mockResolvedValueOnce({ data: { id: 42 } })
+
+			const result = MessageService.fetchMessage(42)
+			await vi.advanceTimersByTimeAsync(999)
+			expect(axios.get).toHaveBeenCalledTimes(1)
+			await vi.advanceTimersByTimeAsync(1)
+
+			await expect(result).resolves.toEqual({ id: 42 })
+			expect(axios.get).toHaveBeenCalledTimes(2)
+		})
+
+		it('never retries speculative prefetch', async () => {
+			generateUrl.mockReturnValueOnce('/generated-url')
+			axios.get.mockRejectedValueOnce(capacityError())
+
+			await expect(MessageService.fetchMessage(42, { speculative: true }))
+				.rejects.toMatchObject({ isTransient: true, httpStatus: 429 })
+			expect(axios.get).toHaveBeenCalledTimes(1)
+		})
+
+		it('marks an exhausted temporary failure as transient instead of not-found', async () => {
+			generateUrl.mockReturnValueOnce('/generated-url')
+			axios.get.mockRejectedValue(capacityError())
+
+			const result = MessageService.fetchMessage(42)
+			const rejection = expect(result).rejects.toMatchObject({
+				isTransient: true,
+				httpStatus: 429,
+			})
+			await vi.runAllTimersAsync()
+
+			await rejection
+			expect(axios.get).toHaveBeenCalledTimes(3)
+		})
+	})
+
 	it('requests an exact server-side Priority Inbox split when asked', async () => {
 		generateUrl.mockReturnValueOnce('/generated-url')
 		axios.get.mockResolvedValueOnce({ data: [] })

@@ -39,6 +39,70 @@ const TEXT_SEARCH_MAX_CONCURRENCY = 2
 const textSearchLimit = pLimit(TEXT_SEARCH_MAX_CONCURRENCY)
 const isFreeTextSearch = (query) => typeof query === 'string' && /(?:^|\s)(?:to|from|cc|bcc|subject|body):/.test(query)
 const envelopeFlagMutationLimit = pLimit(1)
+const ACTIVE_MESSAGE_FETCH_ATTEMPTS = 3
+const ACTIVE_MESSAGE_FETCH_RETRY_STATUSES = new Set([408, 425, 429, 502, 503, 504])
+const ACTIVE_MESSAGE_FETCH_MAX_RETRY_AFTER_MS = 5_000
+
+function retryAfterMs(error, attempt, id) {
+	const headers = error.response?.headers
+	const retryAfter = typeof headers?.get === 'function'
+		? headers.get('retry-after')
+		: headers?.['retry-after']
+	let serverDelay
+	if (retryAfter !== undefined) {
+		const seconds = Number(retryAfter)
+		serverDelay = Number.isFinite(seconds)
+			? seconds * 1_000
+			: Date.parse(retryAfter) - Date.now()
+	}
+
+	const numericId = Number(id)
+	const stagger = Number.isFinite(numericId) ? Math.abs(numericId) % 251 : 0
+	const fallback = 500 * (2 ** attempt) + stagger
+	return Math.min(
+		ACTIVE_MESSAGE_FETCH_MAX_RETRY_AFTER_MS,
+		Math.max(0, Number.isFinite(serverDelay) ? serverDelay : fallback),
+	)
+}
+
+function waitForRetry(delay, signal) {
+	if (signal?.aborted) {
+		return Promise.reject(signal.reason ?? new DOMException('Aborted', 'AbortError'))
+	}
+
+	return new Promise((resolve, reject) => {
+		const retry = {}
+		const onAbort = () => {
+			clearTimeout(retry.timer)
+			reject(signal.reason ?? new DOMException('Aborted', 'AbortError'))
+		}
+		retry.timer = setTimeout(() => {
+			signal?.removeEventListener('abort', onAbort)
+			resolve()
+		}, delay)
+		signal?.addEventListener('abort', onAbort, { once: true })
+	})
+}
+
+async function fetchActiveMessage(url, id, signal, attempt = 0) {
+	try {
+		return await axios.get(url, {
+			signal,
+			mailWorkClass: WorkClass.ACTIVE_CONTENT,
+		})
+	} catch (error) {
+		const status = error.response?.status
+		if (
+			!axios.isCancel(error)
+			&& ACTIVE_MESSAGE_FETCH_RETRY_STATUSES.has(status)
+			&& attempt < ACTIVE_MESSAGE_FETCH_ATTEMPTS - 1
+		) {
+			await waitForRetry(retryAfterMs(error, attempt, id), signal)
+			return fetchActiveMessage(url, id, signal, attempt + 1)
+		}
+		throw error
+	}
+}
 
 export function fetchEnvelope(accountId, id) {
 	const url = generateUrl('/apps/mail/api/messages/{id}', {
@@ -326,10 +390,15 @@ export async function fetchMessage(id, { signal, speculative = false } = {}) {
 	})
 
 	try {
-		const resp = await axios.get(url, {
-			signal,
-			mailWorkClass: speculative ? WorkClass.SPECULATIVE : WorkClass.ACTIVE_CONTENT,
-		})
+		// A visible message load gets two short, bounded retries when reserved
+		// capacity is briefly exhausted. Speculative prefetch remains one-shot
+		// so it can never compete with the user's current action.
+		const resp = speculative
+			? await axios.get(url, {
+					signal,
+					mailWorkClass: WorkClass.SPECULATIVE,
+				})
+			: await fetchActiveMessage(url, id, signal)
 		return resp.data
 	} catch (error) {
 		if (error.response && error.response.status === 404) {
@@ -349,7 +418,15 @@ export async function fetchMessage(id, { signal, speculative = false } = {}) {
 			throw error
 		}
 
-		throw parseErrorResponse(error.response)
+		const parsed = parseErrorResponse(error.response)
+		if (ACTIVE_MESSAGE_FETCH_RETRY_STATUSES.has(error.response.status)) {
+			// Let the UI distinguish temporary capacity/network failures from
+			// a genuine 404. Axios response bodies do not consistently carry
+			// a user-facing message, which previously rendered as "Not found".
+			parsed.isTransient = true
+			parsed.httpStatus = error.response.status
+		}
+		throw parsed
 	}
 }
 

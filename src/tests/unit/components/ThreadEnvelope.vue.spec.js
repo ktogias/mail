@@ -21,6 +21,17 @@ describe('ThreadEnvelope', () => {
 		setActivePinia(createPinia())
 	})
 
+	it('labels exhausted capacity errors as temporary instead of not-found', () => {
+		const t = vi.fn((app, message) => message)
+		const message = ThreadEnvelope.computed.messageFetchError.call({
+			error: { isTransient: true, httpStatus: 429 },
+			t,
+		})
+
+		expect(message).toBe('The mail server is temporarily busy. Please try again.')
+		expect(t).toHaveBeenCalledWith('mail', 'The mail server is temporarily busy. Please try again.')
+	})
+
 	it('allows toggling seen flag without ACLs', () => {
 		const view = shallowMount(ThreadEnvelope, {
 			propsData: {

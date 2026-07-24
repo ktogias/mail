@@ -877,6 +877,7 @@
     "Add share link from Files" : "Προσθήκη συνδέσμου κοινής χρήσης από Αρχεία",
     "Choose a file to add as attachment" : "Επιλέξτε ένα αρχείο για να προσθέσετε ως συνημμένο",
     "Choose a file to share as a link" : "Επιλέξτε ένα αρχείο για κοινή χρήση ως σύνδεσμο",
+    "The mail server is temporarily busy. Please try again." : "Ο διακομιστής αλληλογραφίας είναι προσωρινά απασχολημένος. Δοκιμάστε ξανά.",
     "You are offline. Mail changes will be sent when the connection returns." : "Είστε εκτός σύνδεσης. Οι αλλαγές στην αλληλογραφία θα σταλούν όταν επανέλθει η σύνδεση.",
     "The connection is unstable. Mail actions will retry automatically." : "Η σύνδεση είναι ασταθής. Οι ενέργειες αλληλογραφίας θα επαναληφθούν αυτόματα.",
     "Connection restored. Finishing pending mail changes…" : "Η σύνδεση επανήλθε. Ολοκληρώνονται οι εκκρεμείς αλλαγές αλληλογραφίας…",

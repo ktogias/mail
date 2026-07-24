@@ -53,8 +53,12 @@ function cancellationError(message) {
 	return error
 }
 
-function isMailRequest(config) {
-	return typeof config.url === 'string' && config.url.includes('/apps/mail/')
+export function isMailRequest(config) {
+	// A request interceptor may reject before Axios attaches a config (for
+	// example when the coordinator intentionally drops speculative work).
+	// Response-error interceptors still see that cancellation, so this guard
+	// must accept an absent config instead of masking the original error.
+	return typeof config?.url === 'string' && config.url.includes('/apps/mail/')
 }
 
 function normalizedMethod(config) {

@@ -4,11 +4,18 @@
  */
 
 import {
+	isMailRequest,
 	RequestCoordinator,
 	WorkClass,
 } from '../../../service/RequestCoordinator.js'
 
 describe('RequestCoordinator', () => {
+	it('does not mistake a config-less interceptor cancellation for a mail request', () => {
+		expect(isMailRequest(undefined)).toBe(false)
+		expect(isMailRequest({})).toBe(false)
+		expect(isMailRequest({ url: '/apps/mail/api/messages' })).toBe(true)
+	})
+
 	it('keeps background work single-file and starts a quick mutation ahead of it', async () => {
 		const coordinator = new RequestCoordinator()
 		const releaseBackground = await coordinator.acquire({

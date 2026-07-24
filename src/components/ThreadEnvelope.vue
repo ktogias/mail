@@ -362,7 +362,7 @@
 			@reply="(body) => onReply(body, showFollowUpHeader)" />
 		<Error
 			v-else-if="error"
-			:error="error.message || t('mail', 'Not found')"
+			:error="messageFetchError"
 			message=""
 			:data="error"
 			:auto-margin="true"
@@ -576,6 +576,13 @@ export default {
 
 	computed: {
 		...mapStores(useOutboxStore, useMainStore),
+		messageFetchError() {
+			if (this.error?.isTransient) {
+				return this.t('mail', 'The mail server is temporarily busy. Please try again.')
+			}
+			return this.error?.message || this.t('mail', 'Not found')
+		},
+
 		senderEmail() {
 			return this.envelope.from?.[0]?.email ?? ''
 		},
