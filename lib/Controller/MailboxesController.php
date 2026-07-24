@@ -218,7 +218,7 @@ class MailboxesController extends Controller {
 	 * @throws ServiceException
 	 */
 	#[TrapError]
-	public function sync(int $id, array $ids = [], ?int $lastMessageTimestamp = null, bool $init = false, string $sortOrder = 'newest', ?string $query = null): JSONResponse {
+	public function sync(int $id, array $ids = [], ?int $lastMessageTimestamp = null, bool $init = false, string $sortOrder = 'newest', ?string $query = null, ?array $states = null): JSONResponse {
 		if ($this->userId === null) {
 			return new JSONResponse([], Http::STATUS_UNAUTHORIZED);
 		}
@@ -293,6 +293,7 @@ class MailboxesController extends Controller {
 				$order,
 				$query,
 				$this->syncWorkClass(),
+				$states,
 			);
 		} catch (MailboxNotCachedException $e) {
 			return new JSONResponse([], Http::STATUS_PRECONDITION_REQUIRED);

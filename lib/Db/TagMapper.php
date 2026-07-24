@@ -11,6 +11,7 @@ namespace OCA\Mail\Db;
 
 use OCP\AppFramework\Db\DoesNotExistException;
 use OCP\AppFramework\Db\QBMapper;
+use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\DB\QueryBuilder\IQueryBuilder;
 use OCP\IDBConnection;
 use OCP\IL10N;
@@ -24,8 +25,11 @@ class TagMapper extends QBMapper {
 	/** @var IL10N */
 	private $l10n;
 
-	public function __construct(IDBConnection $db,
-		IL10N $l10n) {
+	public function __construct(
+		IDBConnection $db,
+		IL10N $l10n,
+		private ITimeFactory $timeFactory,
+	) {
 		parent::__construct($db, 'mail_tags');
 		$this->l10n = $l10n;
 	}
@@ -88,6 +92,7 @@ class TagMapper extends QBMapper {
 			->setValue('imap_message_id', $qb->createNamedParameter($messageId))
 			->setValue('tag_id', $qb->createNamedParameter($tag->getId(), IQueryBuilder::PARAM_INT));
 		$qb->executeStatement();
+		$this->touchMessages($messageId);
 	}
 
 	/**
@@ -100,6 +105,25 @@ class TagMapper extends QBMapper {
 		$qb->delete('mail_message_tags')
 			->where($qb->expr()->eq('imap_message_id', $qb->createNamedParameter($messageId)))
 			->andWhere($qb->expr()->eq('tag_id', $qb->createNamedParameter($tag->getId())));
+		$qb->executeStatement();
+		$this->touchMessages($messageId);
+	}
+
+	private function touchMessages(string $messageId): void {
+		$now = $this->timeFactory->getTime();
+		$qb = $this->db->getQueryBuilder();
+		$qb->update('mail_messages')
+			->set(
+				'updated_at',
+				$qb->createFunction(
+					'CASE WHEN updated_at IS NULL OR updated_at < '
+					. $qb->createNamedParameter($now, IQueryBuilder::PARAM_INT)
+					. ' THEN '
+					. $qb->createNamedParameter($now, IQueryBuilder::PARAM_INT)
+					. ' ELSE updated_at + 1 END'
+				)
+			)
+			->where($qb->expr()->eq('message_id', $qb->createNamedParameter($messageId)));
 		$qb->executeStatement();
 	}
 

@@ -150,7 +150,7 @@ class MessageMapperTest extends TestCase {
 		// reasoning ArrayMemcache above exists for IMemcache. IL10N is
 		// only ever touched by createDefaultTags(), which nothing here
 		// calls.
-		$this->tagMapper = new TagMapper($this->db, $this->createMock(IL10N::class));
+		$this->tagMapper = new TagMapper($this->db, $this->createMock(IL10N::class), $this->time);
 		$performanceLogger = $this->createMock(PerformanceLogger::class);
 		// start() has a non-nullable PerformanceLoggerTask return type --
 		// updateBulk() (used by the tests below) calls ->step() on
@@ -209,6 +209,54 @@ class MessageMapperTest extends TestCase {
 				'in_reply_to' => $qb->createNamedParameter('<>')
 			]);
 		$insert->executeStatement();
+	}
+
+	public function testFindSyncStatesTracksThreadWideFlagsAndTagChangesWithoutHydratingEnvelopes(): void {
+		$mailbox = new Mailbox();
+		$mailbox->setId(1);
+		$threadRoot = '<sync-state-thread@example.test>';
+
+		foreach ([
+			[801, 1801, '<sync-state-a@example.test>', false],
+			[802, 1802, '<sync-state-b@example.test>', true],
+		] as [$id, $uid, $messageId, $seen]) {
+			$qb = $this->db->getQueryBuilder();
+			$qb->insert($this->mapper->getTableName())->values([
+				'id' => $qb->createNamedParameter($id, IQueryBuilder::PARAM_INT),
+				'uid' => $qb->createNamedParameter($uid, IQueryBuilder::PARAM_INT),
+				'message_id' => $qb->createNamedParameter($messageId),
+				'thread_root_id' => $qb->createNamedParameter($threadRoot),
+				'mailbox_id' => $qb->createNamedParameter(1, IQueryBuilder::PARAM_INT),
+				'subject' => $qb->createNamedParameter('sync state'),
+				'sent_at' => $qb->createNamedParameter($uid, IQueryBuilder::PARAM_INT),
+				'flag_seen' => $qb->createNamedParameter($seen, IQueryBuilder::PARAM_BOOL),
+				'updated_at' => $qb->createNamedParameter(100, IQueryBuilder::PARAM_INT),
+			])->executeStatement();
+		}
+
+		$initial = $this->mapper->findSyncStatesForIds($mailbox, [802, 999]);
+		self::assertSame([802], array_keys($initial));
+
+		// Changing the older sibling changes the representative row's
+		// thread-wide unread state.
+		$qb = $this->db->getQueryBuilder();
+		$qb->update($this->mapper->getTableName())
+			->set('flag_seen', $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL))
+			->set('updated_at', $qb->createNamedParameter(101, IQueryBuilder::PARAM_INT))
+			->where($qb->expr()->eq('id', $qb->createNamedParameter(801, IQueryBuilder::PARAM_INT)))
+			->executeStatement();
+		$afterThreadChange = $this->mapper->findSyncStatesForIds($mailbox, [802]);
+		self::assertNotSame($initial[802], $afterThreadChange[802]);
+
+		// Tags live in a separate relation; TagMapper deliberately touches
+		// the message revision so the narrow state query sees that change.
+		$tag = new Tag();
+		$tag->setImapLabel('$sync-state-test');
+		$tag->setDisplayName('Sync state test');
+		$tag->setUserId('sync-state-user');
+		$this->tagMapper->tagMessage($tag, '<sync-state-b@example.test>', 'sync-state-user');
+		$afterTagChange = $this->mapper->findSyncStatesForIds($mailbox, [802]);
+		self::assertNotSame($afterThreadChange[802], $afterTagChange[802]);
 	}
 
 	public function testResetInReplyTo() : void {

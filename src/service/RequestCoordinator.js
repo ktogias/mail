@@ -458,12 +458,109 @@ export async function runCrossTabExclusive(name, task, wait = false) {
 	})
 }
 
+const MAIL_TAB_ID = globalThis.crypto?.randomUUID?.()
+	?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+const LEASE_PREFIX = 'nextcloud-mail:leader:'
+
+function browserStorage() {
+	try {
+		return typeof localStorage === 'undefined' ? null : localStorage
+	} catch {
+		return null
+	}
+}
+
+function readLease(storage, key) {
+	try {
+		const parsed = JSON.parse(storage.getItem(key))
+		return typeof parsed?.owner === 'string' && Number.isFinite(parsed.expiresAt)
+			? parsed
+			: null
+	} catch {
+		return null
+	}
+}
+
+/**
+ * Run a periodic task from one browser tab only.
+ *
+ * Web Locks prevents simultaneous execution, while the short localStorage
+ * lease prevents independently-jittered tabs from taking turns and each
+ * running the same sweep a few seconds apart. The lease expires by itself if
+ * a tab crashes; server-side freshness/mutexes remain the cross-device guard.
+ *
+ * @param {string} name Lease namespace.
+ * @param {Function} task Periodic task to run as leader.
+ * @param {object} options Injectable lease settings.
+ * @param {number} options.leaseMs Lease lifetime.
+ * @param {Function} options.now Clock used for expiry.
+ * @param {Storage|null} options.storage Shared browser storage.
+ * @param {string} options.tabId Stable owner id for this tab.
+ */
+export async function runCrossTabLeader(
+	name,
+	task,
+	{
+		leaseMs = 45_000,
+		now = Date.now,
+		storage = browserStorage(),
+		tabId = MAIL_TAB_ID,
+	} = {},
+) {
+	const electAndRun = async () => {
+		if (storage !== null) {
+			const key = `${LEASE_PREFIX}${name}`
+			const timestamp = now()
+			const current = readLease(storage, key)
+			if (current !== null && current.owner !== tabId && current.expiresAt > timestamp) {
+				return { leader: false }
+			}
+			try {
+				storage.setItem(key, JSON.stringify({
+					owner: tabId,
+					expiresAt: timestamp + leaseMs,
+				}))
+				if (readLease(storage, key)?.owner !== tabId) {
+					return { leader: false }
+				}
+			} catch {
+				// Web Locks still gives simultaneous-execution safety when
+				// storage is disabled; fall through to the task.
+			}
+		}
+		return { leader: true, result: await task() }
+	}
+
+	const result = await runCrossTabExclusive(`leader:${name}`, electAndRun)
+	return result ?? { leader: false }
+}
+
+export function releaseCrossTabLeadership(name, {
+	storage = browserStorage(),
+	tabId = MAIL_TAB_ID,
+} = {}) {
+	if (storage === null) {
+		return
+	}
+	const key = `${LEASE_PREFIX}${name}`
+	if (readLease(storage, key)?.owner === tabId) {
+		try {
+			storage.removeItem(key)
+		} catch {
+			// A lease is advisory and self-expiring.
+		}
+	}
+}
+
 const syncChannel = typeof BroadcastChannel === 'undefined'
 	? null
 	: new BroadcastChannel('nextcloud-mail-sync-v1')
 
 export function broadcastMailEvent(event) {
-	syncChannel?.postMessage(event)
+	syncChannel?.postMessage({
+		...event,
+		sourceTabId: MAIL_TAB_ID,
+	})
 }
 
 export function onMailBroadcast(listener) {

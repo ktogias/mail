@@ -458,6 +458,7 @@ const Loading = Object.seal({
 	Silent: 1,
 	Skeleton: 2,
 })
+const SUPPLEMENTARY_FETCH_DELAY_MS = 250
 
 export default {
 	name: 'ThreadEnvelope',
@@ -570,6 +571,8 @@ export default {
 			isInternal: true,
 			enabledFreePrompt: loadState('mail', 'llm_freeprompt_available', false),
 			loadingBodyTimeout: undefined,
+			supplementaryFetchHandle: undefined,
+			supplementaryFetchController: undefined,
 			showMailFilterFromEnvelope: false,
 		}
 	},
@@ -795,6 +798,7 @@ export default {
 				// this component was first created.
 				this.$nextTick(() => this.handleThreadScrolling())
 			} else {
+				this.cancelSupplementaryFetches()
 				this.message = undefined
 				this.loading = Loading.Done
 				this.showRecipients = false
@@ -841,6 +845,11 @@ export default {
 					})
 				}, 2000)
 			}
+			if (this.expanded) {
+				// Body/HTML is now genuinely visible. Only now may secondary
+				// enrichment compete for a network slot.
+				this.scheduleSupplementaryFetches()
+			}
 		},
 	},
 
@@ -876,6 +885,7 @@ export default {
 			logger.info('Navigating away before seenTimer delay, will not mark message as seen/read')
 			clearTimeout(this.seenTimer)
 		}
+		this.cancelSupplementaryFetches()
 		window.removeEventListener('resize', this.redrawMenuBar)
 		this.unregisterViewportPrefetch()
 	},
@@ -966,15 +976,6 @@ export default {
 				logger.error('Could not fetch message', { error })
 			}
 
-			// Fetch itineraries if they haven't been included in the message data
-			if (this.message && !this.message.itineraries) {
-				this.fetchItineraries()
-			}
-			// Fetch dkim
-			if (this.message && this.message.dkimValid === undefined) {
-				this.fetchDkim()
-			}
-
 			// Fetch smart replies
 			if (this.enabledFreePrompt && this.message && !['trash', 'junk'].includes(this.mailbox.specialRole) && !this.showFollowUpHeader) {
 				try {
@@ -983,6 +984,59 @@ export default {
 					logger.error('Could not fetch smart replies', { error })
 				}
 			}
+		},
+
+		scheduleSupplementaryFetches() {
+			if (
+				!this.message
+				|| this.supplementaryFetchHandle !== undefined
+				|| this.supplementaryFetchController !== undefined
+				|| (this.message.itineraries && this.message.dkimValid !== undefined)
+			) {
+				return
+			}
+
+			const run = () => {
+				this.supplementaryFetchHandle = undefined
+				if (!this.expanded || !this.message) {
+					return
+				}
+
+				const controller = new AbortController()
+				this.supplementaryFetchController = controller
+				const fetchSupplementaryData = async () => {
+					// Sequential on purpose: the coordinator permits only one
+					// low-priority request at a time globally, and launching
+					// both together only adds a queued request that may already
+					// be obsolete by the time the user navigates away.
+					if (!this.message.itineraries) {
+						await this.fetchItineraries(controller.signal)
+					}
+					if (!controller.signal.aborted && this.message.dkimValid === undefined) {
+						await this.fetchDkim(controller.signal)
+					}
+				}
+				fetchSupplementaryData().finally(() => {
+					if (this.supplementaryFetchController === controller) {
+						this.supplementaryFetchController = undefined
+					}
+				})
+			}
+
+			// A short post-render quiet period is deterministic across
+			// Firefox/Chromium/mobile WebViews. The request coordinator then
+			// applies the real idle policy: speculative work is dropped while
+			// any foreground request is queued or running.
+			this.supplementaryFetchHandle = setTimeout(run, SUPPLEMENTARY_FETCH_DELAY_MS)
+		},
+
+		cancelSupplementaryFetches() {
+			if (this.supplementaryFetchHandle !== undefined) {
+				clearTimeout(this.supplementaryFetchHandle)
+				this.supplementaryFetchHandle = undefined
+			}
+			this.supplementaryFetchController?.abort()
+			this.supplementaryFetchController = undefined
 		},
 
 		handleThreadScrolling() {
@@ -1029,7 +1083,7 @@ export default {
 			})
 		},
 
-		async fetchItineraries() {
+		async fetchItineraries(signal) {
 			// Sanity check before actually making the request
 			if (!this.message.hasHtmlBody && this.message.attachments.length === 0) {
 				return
@@ -1038,14 +1092,16 @@ export default {
 			logger.debug(`Fetching itineraries for message ${this.envelope.databaseId}`)
 
 			try {
-				const itineraries = await this.mainStore.fetchItineraries(this.envelope.databaseId)
+				const itineraries = await this.mainStore.fetchItineraries(this.envelope.databaseId, { signal })
 				logger.debug(`Itineraries of message ${this.envelope.databaseId} fetched`, { itineraries })
 			} catch (error) {
-				logger.error(`Could not fetch itineraries of message ${this.envelope.databaseId}`, { error })
+				if (!axios.isCancel(error) && error.name !== 'CanceledError') {
+					logger.error(`Could not fetch itineraries of message ${this.envelope.databaseId}`, { error })
+				}
 			}
 		},
 
-		async fetchDkim() {
+		async fetchDkim(signal) {
 			if (this.message.hasDkimSignature === false) {
 				return
 			}
@@ -1053,10 +1109,12 @@ export default {
 			logger.debug(`Fetching DKIM for message ${this.envelope.databaseId}`)
 
 			try {
-				const dkim = await this.mainStore.fetchDkim(this.envelope.databaseId)
+				const dkim = await this.mainStore.fetchDkim(this.envelope.databaseId, { signal })
 				logger.debug(`DKIM of message ${this.envelope.databaseId} fetched`, { dkim })
 			} catch (error) {
-				logger.error(`Could not fetch DKIM of message ${this.envelope.databaseId}`, { error })
+				if (!axios.isCancel(error) && error.name !== 'CanceledError') {
+					logger.error(`Could not fetch DKIM of message ${this.envelope.databaseId}`, { error })
+				}
 			}
 		},
 

@@ -460,6 +460,7 @@ describe('Mailbox', () => {
 				{ databaseId: 2 },
 				{ databaseId: 3 },
 			])
+			store.scheduleEnvelopeRefill = vi.fn().mockResolvedValue([])
 		})
 
 		it('records the mailbox and search query before jumping to the next message via keyboard shortcut', () => {
@@ -495,8 +496,6 @@ describe('Mailbox', () => {
 
 		it('records the mailbox and search query before onDelete() auto-navigates to the next message', () => {
 			const view = mountMailbox({ searchQuery: 'is:starred' }, { $route: { params: { threadId: 1 } } })
-			store.fetchNextEnvelopes = vi.fn().mockResolvedValue([])
-
 			view.vm.onDelete(1)
 
 			expect(store.lastOpenedFromList).toEqual({ mailboxId: mailbox.databaseId, query: 'is:starred', databaseId: 2 })
@@ -507,8 +506,6 @@ describe('Mailbox', () => {
 
 		it('does not record anything when onDelete() deletes a message other than the currently open one', () => {
 			const view = mountMailbox({ searchQuery: 'is:starred' }, { $route: { params: { threadId: 1 } } })
-			store.fetchNextEnvelopes = vi.fn().mockResolvedValue([])
-
 			view.vm.onDelete(2)
 
 			expect(store.lastOpenedFromList).toBeNull()
@@ -597,7 +594,7 @@ describe('Mailbox', () => {
 				{ databaseId: 2 },
 				{ databaseId: 3 },
 			])
-			store.fetchNextEnvelopes = vi.fn().mockResolvedValue([])
+			store.scheduleEnvelopeRefill = vi.fn().mockResolvedValue([])
 		})
 
 		it('opens the previous message when the preference is "previous"', () => {

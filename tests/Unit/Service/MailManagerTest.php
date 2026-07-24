@@ -858,6 +858,15 @@ class MailManagerTest extends TestCase {
 		$mailbox->setId($mailboxId);
 		$mailbox->setAccountId($mailAccount->getId());
 		$mailbox->setName('INBOX');
+		$client = $this->createMock(Horde_Imap_Client_Socket::class);
+		$this->imapClientFactory
+			->expects(self::once())
+			->method('getClient')
+			->with($account, true, true)
+			->willReturn($client);
+		$client
+			->expects(self::once())
+			->method('logout');
 		$this->mailboxMapper
 			->expects(self::exactly(2))
 			->method('find')
@@ -905,6 +914,15 @@ class MailManagerTest extends TestCase {
 		$mailbox->setId($mailboxId);
 		$mailbox->setAccountId($mailAccount->getId());
 		$mailbox->setName('Trash');
+		$client = $this->createMock(Horde_Imap_Client_Socket::class);
+		$this->imapClientFactory
+			->expects(self::once())
+			->method('getClient')
+			->with($account, true, true)
+			->willReturn($client);
+		$client
+			->expects(self::once())
+			->method('logout');
 		$this->mailboxMapper
 			->expects(self::exactly(2))
 			->method('find')

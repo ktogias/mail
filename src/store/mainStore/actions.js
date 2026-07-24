@@ -639,6 +639,14 @@ function stripMalformedUndefinedToken(query) {
 	return cleaned.join(' ')
 }
 
+function knownLocalThreadMembers(store, envelope) {
+	if (!envelope.threadRootId) {
+		return [envelope]
+	}
+	const known = store.getEnvelopesByThreadRootId(envelope.accountId, envelope.threadRootId)
+	return known.length > 0 ? [...known] : [envelope]
+}
+
 /**
  * A flag this client changed moments ago (see flagEnvelopeMutation())
  * wins over whatever a sync/listing response says, since that response
@@ -935,9 +943,20 @@ export async function reconcileNearExpiryLocalChanges(store) {
 	for (const id of idsDue) {
 		const envelope = store.getEnvelope(id)
 		if (!envelope) {
-			// Nothing local left watching this id (already removed by
-			// something else, or never actually loaded into the store) --
-			// nothing to reconcile against.
+			// Nothing local remains to reconcile. Keep a still-live
+			// removedFromMailbox marker until its real expiry (it protects
+			// against an already-in-flight stale sync resurrecting the row),
+			// but prune expired bookkeeping instead of retaining one Map entry
+			// forever for every message the user ever removed.
+			const perEnvelope = recentLocalChanges.get(id)
+			for (const [fieldKey, change] of perEnvelope ?? []) {
+				if (change.expiresAt <= Date.now()) {
+					perEnvelope.delete(fieldKey)
+				}
+			}
+			if (perEnvelope?.size === 0) {
+				recentLocalChanges.delete(id)
+			}
 			continue
 		}
 		try {
@@ -997,6 +1016,17 @@ export function isMailboxSyncRetryPending(mailboxId) {
 // cycle, which is the signature of a genuine (not merely advisory) held
 // lock recurring, not of the pessimistic Retry-After estimate alone.
 const watchedMailboxSyncsInFlight = new Set()
+const DELETE_REFILL_DEBOUNCE_MS = 1000
+let pendingDeleteRefills = new Map()
+
+export function resetPendingDeleteRefillsForTests() {
+	for (const pendingForStore of pendingDeleteRefills.values()) {
+		for (const pending of pendingForStore.values()) {
+			clearTimeout(pending.timeout)
+		}
+	}
+	pendingDeleteRefills = new Map()
+}
 
 // How long a direct user action (opening a message, switching folders,
 // starring/deleting/flagging, ...) gets priority over the background
@@ -1254,6 +1284,18 @@ export default function mainStoreActions() {
 			return account
 		},
 		async syncMailboxesForAccount(account, workClass) {
+			if (account.id === UNIFIED_ACCOUNT_ID) {
+				// Unified/Priority Inbox belongs to a client-only pseudo
+				// account. Sending accountId=0 to the real mailboxes endpoint
+				// produces a deterministic 400 ("no Delegated account with
+				// id 0") on every manual/pull refresh. Refresh the physical
+				// accounts instead, sequentially so an explicit refresh cannot
+				// fan out enough IMAP work to consume the foreground budget.
+				for (const physicalAccount of this.getAccounts.filter(({ id }) => id !== UNIFIED_ACCOUNT_ID)) {
+					await this.syncMailboxesForAccount(physicalAccount, workClass)
+				}
+				return
+			}
 			logger.debug(`Fetching mailboxes for account ${account.id},  …`, { account })
 			account.mailboxes = await (workClass === undefined
 				? fetchAllMailboxes(account.id, true)
@@ -2323,12 +2365,55 @@ export default function mainStoreActions() {
 				return envelopes
 			})
 		},
+		scheduleEnvelopeRefill({
+			mailboxId,
+			query,
+			quantity = 1,
+		}) {
+			let pendingForStore = pendingDeleteRefills.get(this)
+			if (!pendingForStore) {
+				pendingForStore = new Map()
+				pendingDeleteRefills.set(this, pendingForStore)
+			}
+			const key = `${mailboxId}::${normalizedEnvelopeListId(query)}`
+			let pending = pendingForStore.get(key)
+			if (!pending) {
+				pending = {
+					quantity: 0,
+					waiters: [],
+					timeout: undefined,
+				}
+				pendingForStore.set(key, pending)
+			}
+			pending.quantity += quantity
+			clearTimeout(pending.timeout)
+
+			const result = new Promise((resolve, reject) => {
+				pending.waiters.push({ resolve, reject })
+			})
+			pending.timeout = setTimeout(async () => {
+				pendingForStore.delete(key)
+				try {
+					const envelopes = await this.fetchNextEnvelopes({
+						mailboxId,
+						query,
+						quantity: pending.quantity,
+						workClass: WorkClass.SPECULATIVE,
+					})
+					pending.waiters.forEach(({ resolve }) => resolve(envelopes))
+				} catch (error) {
+					pending.waiters.forEach(({ reject }) => reject(error))
+				}
+			}, DELETE_REFILL_DEBOUNCE_MS)
+			return result
+		},
 		async fetchNextEnvelopes({
 			mailboxId,
 			query,
 			quantity,
 			rec = true,
 			addToUnifiedMailboxes = true,
+			workClass = WorkClass.ACTIVE_CONTENT,
 		}) {
 			return handleHttpAuthErrors(async () => {
 				const mailbox = this.getMailbox(mailboxId)
@@ -2402,6 +2487,7 @@ export default function mainStoreActions() {
 										query,
 										quantity,
 										addToUnifiedMailboxes: false,
+										workClass,
 									}).catch((error) => {
 										logger.error(`Failed deep search for fanned-out constituent mailbox ${mb.databaseId}: ${error}`, { error })
 										return []
@@ -2456,6 +2542,7 @@ export default function mainStoreActions() {
 									query,
 									quantity,
 									addToUnifiedMailboxes: false,
+									workClass,
 								}).catch((error) => {
 									logger.error(`Failed to fetch next envelopes for fanned-out constituent mailbox ${mb.databaseId}: ${error}`, { error })
 									return []
@@ -2527,6 +2614,7 @@ export default function mainStoreActions() {
 					undefined,
 					false,
 					lastEnvelope.databaseId,
+					workClass,
 				).then((envelopes) => {
 					logger.debug(`fetched ${envelopes.length} messages for mailbox ${mailboxId}`, {
 						envelopes,
@@ -2665,10 +2753,14 @@ export default function mainStoreActions() {
 					}))
 				}
 
-				const ids = this.getEnvelopes(mailboxId, query).map((env) => env.databaseId)
-				const lastTimestamp = this.getPreference('sort-order') === 'newest' ? null : this.getEnvelopes(mailboxId, query)[0]?.dateInt
+				const knownEnvelopes = this.getEnvelopes(mailboxId, query)
+				const ids = knownEnvelopes.map((env) => env.databaseId)
+				const states = Object.fromEntries(knownEnvelopes
+					.filter((env) => env.syncState !== undefined)
+					.map((env) => [env.databaseId, env.syncState]))
+				const lastTimestamp = this.getPreference('sort-order') === 'newest' ? null : knownEnvelopes[0]?.dateInt
 				logger.debug(`mailbox sync of ${mailboxId} (${query}) has ${ids.length} known IDs. ${lastTimestamp} is the last known message timestamp`, { mailbox })
-				return syncEnvelopesExternal(mailbox.accountId, mailboxId, ids, lastTimestamp, query, init, this.getPreference('sort-order'), workClass)
+				return syncEnvelopesExternal(mailbox.accountId, mailboxId, ids, lastTimestamp, query, init, this.getPreference('sort-order'), workClass, states)
 					.then((syncData) => {
 						logger.debug(`mailbox ${mailboxId} (${query}) synchronized, ${syncData.newMessages.length} new, ${syncData.changedMessages.length} changed and ${syncData.vanishedMessages.length} vanished messages`)
 
@@ -3888,9 +3980,9 @@ export default function mainStoreActions() {
 				}
 			}
 		},
-		async fetchItineraries(id) {
+		async fetchItineraries(id, { signal } = {}) {
 			return handleHttpAuthErrors(async () => {
-				const itineraries = await fetchMessageItineraries(id)
+				const itineraries = await fetchMessageItineraries(id, { signal })
 				this.addMessageItinerariesMutation({
 					id,
 					itineraries,
@@ -3898,9 +3990,9 @@ export default function mainStoreActions() {
 				return itineraries
 			})
 		},
-		async fetchDkim(id) {
+		async fetchDkim(id, { signal } = {}) {
 			return handleHttpAuthErrors(async () => {
-				const result = await fetchMessageDkim(id)
+				const result = await fetchMessageDkim(id, { signal })
 				this.addMessageDkimMutation({
 					id,
 					result,
@@ -4304,7 +4396,16 @@ export default function mainStoreActions() {
 			// later. See nextcloud-mail-oauth-integration.md.
 			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
-				this.removeEnvelopeMutation({ id: envelope.databaseId })
+				// The server deletes every message in the thread, while the
+				// list passes only its representative envelope. Removing only
+				// that representative leaves any locally-known siblings in the
+				// store even though their DB rows are gone. If one was just
+				// marked read, the near-expiry reconciliation sweep then GETs
+				// it forever (403 on every tick). Capture and optimistically
+				// remove the complete locally-known thread so local state
+				// matches the operation the endpoint actually performs.
+				const members = knownLocalThreadMembers(this, envelope)
+				members.forEach((member) => this.removeEnvelopeMutation({ id: member.databaseId }))
 
 				try {
 					await ThreadService.deleteThread(envelope.databaseId)
@@ -4321,7 +4422,7 @@ export default function mainStoreActions() {
 						logger.debug('thread was already deleted', { id: envelope.databaseId })
 						return
 					}
-					this.addEnvelopesMutation({ envelopes: [envelope], bypassRemovalSuppression: true })
+					this.addEnvelopesMutation({ envelopes: members, bypassRemovalSuppression: true })
 					logger.error('could not delete thread', { error: e })
 					throw e
 				}
@@ -4352,6 +4453,55 @@ export default function mainStoreActions() {
 
 					throw e
 				}
+			})
+		},
+		async deleteThreads({ envelopes }) {
+			this.setInteractionPriorityMutation()
+			return handleHttpAuthErrors(async () => {
+				const groupsByAccount = new Map()
+				envelopes.forEach((envelope) => {
+					const accountId = envelope.accountId ?? this.getMailbox(envelope.mailboxId)?.accountId
+					// A unified list can contain selections from multiple
+					// accounts. Keep one request per account so a provider
+					// failure cannot make the client restore threads that a
+					// different account already deleted successfully.
+					const groupKey = accountId ?? `mailbox:${envelope.mailboxId}`
+					const group = groupsByAccount.get(groupKey) ?? {
+						ids: [],
+						membersById: new Map(),
+					}
+					group.ids.push(envelope.databaseId)
+					knownLocalThreadMembers(this, envelope)
+						.forEach((member) => group.membersById.set(member.databaseId, member))
+					groupsByAccount.set(groupKey, group)
+				})
+
+				groupsByAccount.forEach(({ membersById }) => {
+					membersById.forEach((member) => this.removeEnvelopeMutation({ id: member.databaseId }))
+				})
+
+				const failures = []
+				for (const [accountId, group] of groupsByAccount) {
+					try {
+						await ThreadService.deleteThreads(group.ids)
+						logger.debug('account thread batch removed', {
+							accountId,
+							count: group.ids.length,
+						})
+					} catch (error) {
+						this.addEnvelopesMutation({
+							envelopes: [...group.membersById.values()],
+							bypassRemovalSuppression: true,
+						})
+						logger.error('could not delete account thread batch', { accountId, error })
+						failures.push(error)
+					}
+				}
+
+				if (failures.length > 0) {
+					throw failures[0]
+				}
+				logger.debug('thread batch removed', { count: envelopes.length })
 			})
 		},
 		async snoozeThread({

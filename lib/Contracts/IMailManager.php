@@ -363,6 +363,12 @@ interface IMailManager {
 
 	/**
 	 * @param Account $account
+	 * @param array<int, array{mailbox: Mailbox, threadRootId: string}> $threads
+	 */
+	public function deleteThreads(Account $account, array $threads): void;
+
+	/**
+	 * @param Account $account
 	 * @param string $messageId
 	 * @return Message[]
 	 */

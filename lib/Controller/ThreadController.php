@@ -232,4 +232,52 @@ class ThreadController extends Controller {
 
 		return new JSONResponse();
 	}
+
+	/**
+	 * @NoAdminRequired
+	 *
+	 * @param int[] $ids
+	 *
+	 * @throws ClientException
+	 * @throws ServiceException
+	 */
+	#[TrapError]
+	public function deleteBatch(array $ids): JSONResponse {
+		$groups = [];
+		$resolved = [];
+		foreach (array_unique(array_map('intval', $ids)) as $id) {
+			try {
+				$effectiveUserId = $this->delegationService->resolveMessageUserId($id, $this->userId);
+				$message = $this->mailManager->getMessage($effectiveUserId, $id);
+				$mailbox = $this->mailManager->getMailbox($effectiveUserId, $message->getMailboxId());
+				$account = $this->accountService->find($effectiveUserId, $mailbox->getAccountId());
+			} catch (DoesNotExistException $e) {
+				// Idempotent bulk semantics: another tab/client may already
+				// have deleted one selected thread. The remaining selection
+				// should still be processed.
+				continue;
+			}
+
+			$threadRootId = $message->getThreadRootId();
+			if ($threadRootId === null) {
+				continue;
+			}
+			$key = $effectiveUserId . "\0" . $account->getId();
+			$groups[$key]['account'] = $account;
+			$groups[$key]['threads'][] = [
+				'mailbox' => $mailbox,
+				'threadRootId' => $threadRootId,
+			];
+			$resolved[] = [$id, $effectiveUserId];
+		}
+
+		foreach ($groups as $group) {
+			$this->mailManager->deleteThreads($group['account'], $group['threads']);
+		}
+		foreach ($resolved as [$id, $effectiveUserId]) {
+			$this->delegationService->logDelegatedAction($this->userId, $effectiveUserId, "$this->userId deleted thread <$id> on behalf of $effectiveUserId");
+		}
+
+		return new JSONResponse();
+	}
 }

@@ -21,11 +21,16 @@ import { subscribePendingMutations } from './service/MutationOutbox.js'
 import {
 	broadcastMailEvent,
 	onMailBroadcast,
+	releaseCrossTabLeadership,
 	requestCoordinator,
 	runCrossTabExclusive,
+	runCrossTabLeader,
 	WorkClass,
 } from './service/RequestCoordinator.js'
 import useMainStore from './store/mainStore.js'
+
+const WATCHED_MAILBOX_LEASE_MS = 45_000
+const CROSS_TAB_REVALIDATION_COOLDOWN_MS = 60_000
 
 export function shouldRetryConnectivityRecovery(error, online = navigator.onLine !== false) {
 	const status = error?.response?.status
@@ -131,6 +136,9 @@ export default {
 		window.removeEventListener('touchstart', this.onUserActivity)
 		document.removeEventListener('visibilitychange', this.onVisibilityChange)
 		window.removeEventListener('online', this.onNetworkOnline)
+		window.removeEventListener('focus', this.onWindowFocus)
+		window.removeEventListener('blur', this.onWindowBlur)
+		releaseCrossTabLeadership('watched-mailboxes')
 		this.unsubscribeRequestCoordinator?.()
 		this.unsubscribePendingMutations?.()
 		this.unsubscribeMailBroadcast?.()
@@ -255,7 +263,7 @@ export default {
 
 			const tick = () => {
 				const lightweight = attentionTier() === 'hidden'
-				runCrossTabExclusive('watched-mailboxes', () => {
+				runCrossTabLeader('watched-mailboxes', () => {
 					return this.mainStore.syncWatchedMailboxes({ lightweight })
 						.then((result) => {
 							broadcastMailEvent({
@@ -264,9 +272,11 @@ export default {
 							})
 							return result
 						})
-				})
-					.then(() => {
-						logger.debug(`Watched mailboxes sync'ed in background (${lightweight ? 'lightweight' : 'full'} tick)`)
+				}, { leaseMs: WATCHED_MAILBOX_LEASE_MS })
+					.then(({ leader }) => {
+						if (leader) {
+							logger.debug(`Watched mailboxes sync'ed by this tab's background leader (${lightweight ? 'lightweight' : 'full'} tick)`)
+						}
 					})
 					.catch((error) => {
 						matchError(error, {
@@ -319,12 +329,23 @@ export default {
 					}
 				} else {
 					this.hiddenAt = Date.now()
+					releaseCrossTabLeadership('watched-mailboxes')
 				}
+			}
+			this.onWindowFocus = () => {
+				this.lastActivity = Date.now()
+				this.mainStore.resetNotificationEngagementMutation()
+				this.rescheduleTickNow(tick)
+			}
+			this.onWindowBlur = () => {
+				releaseCrossTabLeadership('watched-mailboxes')
 			}
 			window.addEventListener('mousemove', this.onUserActivity, { passive: true })
 			window.addEventListener('keydown', this.onUserActivity, { passive: true })
 			window.addEventListener('touchstart', this.onUserActivity, { passive: true })
 			document.addEventListener('visibilitychange', this.onVisibilityChange)
+			window.addEventListener('focus', this.onWindowFocus)
+			window.addEventListener('blur', this.onWindowBlur)
 		},
 
 		rescheduleTickNow(tick) {
@@ -400,7 +421,9 @@ export default {
 			if (
 				event?.type !== 'watched-sync-complete'
 				|| document.visibilityState !== 'visible'
+				|| (typeof document.hasFocus === 'function' && !document.hasFocus())
 				|| this.mainStore.isInteractionPriorityActive()
+				|| Date.now() - (this.lastCrossTabRevalidationAt ?? 0) < CROSS_TAB_REVALIDATION_COOLDOWN_MS
 			) {
 				return
 			}
@@ -408,6 +431,7 @@ export default {
 			if (mailboxId === undefined || !this.mainStore.getMailbox(mailboxId)) {
 				return
 			}
+			this.lastCrossTabRevalidationAt = Date.now()
 			// The other tab already paid for IMAP. This active-view diff rides
 			// the server freshness gate and updates this tab's independent store.
 			this.mainStore.syncEnvelopes({

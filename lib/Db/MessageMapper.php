@@ -318,6 +318,7 @@ class MessageMapper extends QBMapper {
 			$query = $this->db->getQueryBuilder();
 			$query->update($this->getTableName())
 				->set('thread_root_id', $query->createParameter('thread_root_id'))
+				->set('updated_at', $query->createNamedParameter($this->timeFactory->getTime(), IQueryBuilder::PARAM_INT))
 				->where($query->expr()->eq('id', $query->createParameter('id')));
 
 			foreach ($messages as $message) {
@@ -1913,10 +1914,11 @@ class MessageMapper extends QBMapper {
 		$unseenThreadKeys = [];
 		$flaggedThreadKeys = [];
 		$importantThreadKeys = [];
+		$threadUpdatedAt = [];
 		$isTrue = static fn ($value): bool => in_array($value, [true, 1, '1', 't', 'true'], true);
 		foreach ($threadRootIdsByMailbox as $mailboxId => $threadRootIds) {
 			$qb = $this->db->getQueryBuilder();
-			$qb->select('thread_root_id', 'flag_seen', 'flag_flagged', 'flag_important')
+			$qb->select('thread_root_id', 'flag_seen', 'flag_flagged', 'flag_important', 'updated_at')
 				->from($this->getTableName())
 				->where(
 					$qb->expr()->eq('mailbox_id', $qb->createNamedParameter($mailboxId, IQueryBuilder::PARAM_INT)),
@@ -1934,6 +1936,10 @@ class MessageMapper extends QBMapper {
 				if ($isTrue($row['flag_important'])) {
 					$importantThreadKeys[$key] = true;
 				}
+				$threadUpdatedAt[$key] = max(
+					$threadUpdatedAt[$key] ?? 0,
+					(int)($row['updated_at'] ?? 0),
+				);
 			}
 			$result->closeCursor();
 		}
@@ -1946,15 +1952,136 @@ class MessageMapper extends QBMapper {
 				$message->setHasUnseenInThread($message->getFlagSeen() !== true);
 				$message->setHasFlaggedInThread($message->getFlagFlagged() === true);
 				$message->setHasImportantInThread($message->getFlagImportant() === true);
+				$message->setThreadUpdatedAt($message->getUpdatedAt());
 			} else {
 				$key = $message->getMailboxId() . ':' . $threadRootId;
 				$message->setHasUnseenInThread(isset($unseenThreadKeys[$key]));
 				$message->setHasFlaggedInThread(isset($flaggedThreadKeys[$key]));
 				$message->setHasImportantInThread(isset($importantThreadKeys[$key]));
+				$message->setThreadUpdatedAt($threadUpdatedAt[$key] ?? $message->getUpdatedAt());
 			}
 		}
 
 		return $messages;
+	}
+
+	/**
+	 * Return the smallest state required to diff a client's known envelopes.
+	 *
+	 * Unlike findByMailboxAndIds(), this never hydrates recipients, tags,
+	 * avatars or attachment metadata. Thread-wide flag aggregates are still
+	 * included because a threaded list row changes when any sibling becomes
+	 * read, starred or important.
+	 *
+	 * @param int[] $ids
+	 * @return array<int, string>
+	 */
+	public function findSyncStatesForIds(Mailbox $mailbox, array $ids): array {
+		if ($ids === []) {
+			return [];
+		}
+
+		$rows = [];
+		$threadRootIds = [];
+		foreach (array_chunk(array_values(array_unique($ids)), 1000) as $chunk) {
+			$qb = $this->db->getQueryBuilder();
+			$qb->select(
+				'id',
+				'thread_root_id',
+				'updated_at',
+				'flag_answered',
+				'flag_deleted',
+				'flag_draft',
+				'flag_flagged',
+				'flag_seen',
+				'flag_forwarded',
+				'flag_junk',
+				'flag_notjunk',
+				'flag_attachments',
+				'flag_important',
+				'flag_mdnsent',
+			)
+				->from($this->getTableName())
+				->where(
+					$qb->expr()->eq('mailbox_id', $qb->createNamedParameter($mailbox->getId(), IQueryBuilder::PARAM_INT)),
+					$qb->expr()->in('id', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_INT_ARRAY)),
+				);
+			$result = $qb->executeQuery();
+			while (($row = $result->fetchAssociative()) !== false) {
+				$id = (int)$row['id'];
+				$rows[$id] = $row;
+				if ($row['thread_root_id'] !== null) {
+					$threadRootIds[] = $row['thread_root_id'];
+				}
+			}
+			$result->closeCursor();
+		}
+
+		$threadStates = [];
+		$isTrue = static fn ($value): bool => in_array($value, [true, 1, '1', 't', 'true'], true);
+		foreach (array_chunk(array_values(array_unique($threadRootIds)), 1000) as $chunk) {
+			$qb = $this->db->getQueryBuilder();
+			$qb->select('thread_root_id', 'updated_at', 'flag_seen', 'flag_flagged', 'flag_important')
+				->from($this->getTableName())
+				->where(
+					$qb->expr()->eq('mailbox_id', $qb->createNamedParameter($mailbox->getId(), IQueryBuilder::PARAM_INT)),
+					$qb->expr()->in('thread_root_id', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_STR_ARRAY)),
+				);
+			$result = $qb->executeQuery();
+			while (($row = $result->fetchAssociative()) !== false) {
+				$key = $row['thread_root_id'];
+				$state = $threadStates[$key] ?? [
+					'updatedAt' => 0,
+					'hasUnseen' => false,
+					'hasFlagged' => false,
+					'hasImportant' => false,
+				];
+				$state['updatedAt'] = max($state['updatedAt'], (int)($row['updated_at'] ?? 0));
+				$state['hasUnseen'] = $state['hasUnseen'] || !$isTrue($row['flag_seen']);
+				$state['hasFlagged'] = $state['hasFlagged'] || $isTrue($row['flag_flagged']);
+				$state['hasImportant'] = $state['hasImportant'] || $isTrue($row['flag_important']);
+				$threadStates[$key] = $state;
+			}
+			$result->closeCursor();
+		}
+
+		$states = [];
+		foreach ($rows as $id => $row) {
+			$threadState = $row['thread_root_id'] === null
+				? [
+					'updatedAt' => (int)($row['updated_at'] ?? 0),
+					'hasUnseen' => !$isTrue($row['flag_seen']),
+					'hasFlagged' => $isTrue($row['flag_flagged']),
+					'hasImportant' => $isTrue($row['flag_important']),
+				]
+				: ($threadStates[$row['thread_root_id']] ?? [
+					'updatedAt' => (int)($row['updated_at'] ?? 0),
+					'hasUnseen' => !$isTrue($row['flag_seen']),
+					'hasFlagged' => $isTrue($row['flag_flagged']),
+					'hasImportant' => $isTrue($row['flag_important']),
+				]);
+			$states[$id] = Message::buildSyncState(
+				(int)($row['updated_at'] ?? 0),
+				[
+					$row['flag_answered'],
+					$row['flag_deleted'],
+					$row['flag_draft'],
+					$row['flag_flagged'],
+					$row['flag_seen'],
+					$row['flag_forwarded'],
+					$row['flag_junk'],
+					$row['flag_notjunk'],
+					$row['flag_attachments'],
+					$row['flag_important'],
+					$row['flag_mdnsent'],
+				],
+				$threadState['updatedAt'],
+				$threadState['hasUnseen'],
+				$threadState['hasFlagged'],
+				$threadState['hasImportant'],
+			);
+		}
+		return $states;
 	}
 
 	/**

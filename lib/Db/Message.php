@@ -167,6 +167,7 @@ class Message extends Entity implements JsonSerializable {
 	 */
 	private bool $hasFlaggedInThread = false;
 	private bool $hasImportantInThread = false;
+	private ?int $threadUpdatedAt = null;
 
 	public function __construct() {
 		$this->from = new AddressList([]);
@@ -375,6 +376,63 @@ class Message extends Entity implements JsonSerializable {
 		return $this->hasImportantInThread;
 	}
 
+	public function setThreadUpdatedAt(?int $threadUpdatedAt): void {
+		$this->threadUpdatedAt = $threadUpdatedAt;
+	}
+
+	/**
+	 * Compact, deterministic state used by mailbox sync clients.
+	 *
+	 * This deliberately contains only mutable list-envelope state. It lets a
+	 * sync compare thousands of known rows through a narrow id/state query and
+	 * hydrate full messages (recipients, tags, avatars, attachments) only for
+	 * rows that actually changed.
+	 */
+	public function getSyncState(): string {
+		return self::buildSyncState(
+			$this->getUpdatedAt(),
+			[
+				$this->getFlagAnswered(),
+				$this->getFlagDeleted(),
+				$this->getFlagDraft(),
+				$this->getFlagFlagged(),
+				$this->getFlagSeen(),
+				$this->getFlagForwarded(),
+				$this->getFlagJunk(),
+				$this->getFlagNotjunk(),
+				$this->getFlagAttachments(),
+				$this->getFlagImportant(),
+				$this->getFlagMdnsent(),
+			],
+			$this->threadUpdatedAt,
+			$this->hasUnseenInThread,
+			$this->hasFlaggedInThread,
+			$this->hasImportantInThread,
+		);
+	}
+
+	/**
+	 * @param array<int, mixed> $flags
+	 */
+	public static function buildSyncState(
+		?int $updatedAt,
+		array $flags,
+		?int $threadUpdatedAt,
+		bool $hasUnseenInThread,
+		bool $hasFlaggedInThread,
+		bool $hasImportantInThread,
+	): string {
+		$flagBits = implode('', array_map(
+			static fn ($flag): string => in_array($flag, [true, 1, '1', 't', 'true'], true) ? '1' : '0',
+			$flags,
+		));
+		$threadBits = ($hasUnseenInThread ? '1' : '0')
+			. ($hasFlaggedInThread ? '1' : '0')
+			. ($hasImportantInThread ? '1' : '0');
+
+		return max($updatedAt ?? 0, $threadUpdatedAt ?? 0) . ':' . $flagBits . ':' . $threadBits;
+	}
+
 	#[\Override]
 	#[ReturnTypeWillChange]
 	public function jsonSerialize() {
@@ -387,6 +445,7 @@ class Message extends Entity implements JsonSerializable {
 
 		return [
 			'databaseId' => $this->getId(),
+			'syncState' => $this->getSyncState(),
 			'uid' => $this->getUid(),
 			'subject' => $this->getSubject(),
 			'dateInt' => $this->getSentAt(),

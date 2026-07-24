@@ -11,6 +11,7 @@ namespace OCA\Mail\Tests\Unit\Service\Sync;
 
 use OCA\Mail\Account;
 use OCA\Mail\Db\Mailbox;
+use OCA\Mail\Db\Message;
 use OCA\Mail\Db\MessageMapper;
 use OCA\Mail\Exception\MailboxNotCachedException;
 use OCA\Mail\IMAP\IMAPClientFactory;
@@ -202,6 +203,91 @@ final class SyncServiceTest extends TestCase {
 			[],
 			'DESC'
 		);
+	}
+
+	public function testKnownSyncStatesOnlyHydrateActuallyChangedRowsAndReportMissingRows(): void {
+		$account = $this->createMock(Account::class);
+		$account->method('getUserId')->willReturn('user');
+		$mailbox = new Mailbox();
+		$mailbox->setId(149);
+		$mailbox->setMessages(42);
+		$mailbox->setUnseen(10);
+		$mailbox->setSyncNewToken('a');
+		$mailbox->setSyncChangedToken('b');
+		$mailbox->setSyncVanishedToken('c');
+
+		$this->freshnessCache->method('get')->with('149')->willReturn(10_003);
+		$this->messageMapper->expects($this->once())
+			->method('findNewIds')
+			->with($mailbox, [101, 102, 103], null, 'DESC')
+			->willReturn([]);
+		$this->messageMapper->expects($this->once())
+			->method('findSyncStatesForIds')
+			->with($mailbox, [101, 102, 103])
+			->willReturn([
+				101 => 'same',
+				102 => 'changed-server-state',
+				// 103 no longer exists.
+			]);
+		$changed = new Message();
+		$changed->setId(102);
+		$this->messageMapper->expects($this->once())
+			->method('findByMailboxAndIds')
+			->with($mailbox, 'user', [102])
+			->willReturn([$changed]);
+
+		$response = $this->syncService->syncMailbox(
+			$account,
+			$mailbox,
+			0,
+			true,
+			null,
+			[101, 102, 103],
+			'DESC',
+			null,
+			\OCA\Mail\IMAP\ImapWorkClass::MAINTENANCE,
+			[
+				101 => 'same',
+				102 => 'old-client-state',
+				103 => 'old-client-state',
+			],
+		);
+
+		$this->assertSame([$changed], $response->getChangedMessages());
+		$this->assertSame([103], $response->getVanishedMessageUids());
+	}
+
+	public function testKnownSyncStatesAvoidHydratingUnchangedRows(): void {
+		$account = $this->createMock(Account::class);
+		$account->method('getUserId')->willReturn('user');
+		$mailbox = new Mailbox();
+		$mailbox->setId(149);
+		$mailbox->setMessages(42);
+		$mailbox->setUnseen(10);
+		$mailbox->setSyncNewToken('a');
+		$mailbox->setSyncChangedToken('b');
+		$mailbox->setSyncVanishedToken('c');
+
+		$this->freshnessCache->method('get')->with('149')->willReturn(10_003);
+		$this->messageMapper->method('findNewIds')->willReturn([]);
+		$this->messageMapper->method('findSyncStatesForIds')->willReturn([101 => 'same']);
+		$this->messageMapper->expects($this->never())->method('findByMailboxAndIds');
+
+		$response = $this->syncService->syncMailbox(
+			$account,
+			$mailbox,
+			0,
+			true,
+			null,
+			[101],
+			'DESC',
+			null,
+			\OCA\Mail\IMAP\ImapWorkClass::MAINTENANCE,
+			[101 => 'same'],
+		);
+
+		$this->assertSame([], $response->getChangedMessages());
+		$this->assertSame([], $response->getVanishedMessageUids());
 	}
 
 	public function testStaleFreshnessMarkerRunsARealSyncAndArmsTheGate(): void {

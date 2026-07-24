@@ -244,6 +244,46 @@ class ThreadControllerTest extends TestCase {
 		$this->assertEquals(Http::STATUS_OK, $response->getStatus());
 	}
 
+	public function testDeleteBatchUsesOneAccountLocalManagerBatch(): void {
+		$mailAccount = new MailAccount();
+		$mailAccount->setId(1);
+		$account = new Account($mailAccount);
+		$this->accountService
+			->method('find')
+			->willReturn($account);
+		$mailbox = new Mailbox();
+		$mailbox->setId(20);
+		$mailbox->setAccountId($mailAccount->getId());
+		$this->mailManager
+			->method('getMailbox')
+			->willReturn($mailbox);
+		$messages = [];
+		foreach ([300 => 'thread-a', 301 => 'thread-b'] as $id => $threadRootId) {
+			$message = new Message();
+			$message->setId($id);
+			$message->setMailboxId($mailbox->getId());
+			$message->setThreadRootId($threadRootId);
+			$messages[$id] = $message;
+		}
+		$this->mailManager
+			->method('getMessage')
+			->willReturnCallback(fn (string $userId, int $id) => $messages[$id]);
+		$this->mailManager
+			->expects(self::once())
+			->method('deleteThreads')
+			->with($account, [
+				['mailbox' => $mailbox, 'threadRootId' => '<thread-a>'],
+				['mailbox' => $mailbox, 'threadRootId' => '<thread-b>'],
+			]);
+		$this->delegationService
+			->expects(self::exactly(2))
+			->method('logDelegatedAction');
+
+		$response = $this->controller->deleteBatch([300, 301]);
+
+		$this->assertEquals(Http::STATUS_OK, $response->getStatus());
+	}
+
 	public function testSummarizeThread(): void {
 		$mailAccount = new MailAccount();
 		$mailAccount->setId(1);

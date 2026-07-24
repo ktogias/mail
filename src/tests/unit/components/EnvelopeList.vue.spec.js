@@ -120,6 +120,7 @@ describe('EnvelopeList', () => {
 		beforeEach(() => {
 			vi.useFakeTimers()
 			store.deleteThread = vi.fn().mockResolvedValue()
+			store.deleteThreads = vi.fn().mockResolvedValue()
 			store.deleteMessage = vi.fn().mockResolvedValue()
 			showUndo.mockClear()
 		})
@@ -138,6 +139,7 @@ describe('EnvelopeList', () => {
 			// Nothing irreversible yet -- the real call only happens once
 			// the undo window passes without being cancelled.
 			expect(store.deleteThread).not.toHaveBeenCalled()
+			expect(store.deleteThreads).not.toHaveBeenCalled()
 		})
 
 		it('only actually deletes once the undo window passes uninterrupted', async () => {
@@ -147,7 +149,8 @@ describe('EnvelopeList', () => {
 			await view.vm.deleteAllSelected()
 			await vi.advanceTimersByTimeAsync(10000)
 
-			expect(store.deleteThread).toHaveBeenCalledTimes(2)
+			expect(store.deleteThreads).toHaveBeenCalledTimes(1)
+			expect(store.deleteThreads).toHaveBeenCalledWith({ envelopes: [envelopes[0], envelopes[1]] })
 		})
 
 		it('never calls the real delete at all if Undo is clicked in time', async () => {
@@ -160,6 +163,7 @@ describe('EnvelopeList', () => {
 			await vi.advanceTimersByTimeAsync(10000)
 
 			expect(store.deleteThread).not.toHaveBeenCalled()
+			expect(store.deleteThreads).not.toHaveBeenCalled()
 			expect(view.vm.sortedEnvelops.map((e) => e.databaseId).sort()).toEqual([1, 2, 3])
 		})
 

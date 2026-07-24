@@ -844,11 +844,16 @@ export default {
 		// onDelete(id): Load more message and navigate to other message if needed
 		// id: The id of the message being delete
 		onDelete(id) {
-			// Get a new message
-			this.mainStore.fetchNextEnvelopes({
+			// Several deletes in one gesture used to issue one independent
+			// cross-account `limit=1` fan-out each. Coalesce a short burst into
+			// one low-priority refill for the total number removed; navigation
+			// below stays immediate and never waits for it.
+			this.mainStore.scheduleEnvelopeRefill({
 				mailboxId: this.mailbox.databaseId,
 				query: this.searchQuery,
 				quantity: 1,
+			}).catch((error) => {
+				logger.debug('deferred envelope-list refill failed', { error })
 			})
 			const idx = findIndex(propEq(id, 'databaseId'), this.envelopes)
 			if (idx === -1) {

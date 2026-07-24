@@ -456,6 +456,7 @@ describe('ThreadEnvelope', () => {
 
 		beforeEach(() => {
 			vi.useFakeTimers()
+			window.HTMLElement.prototype.scrollIntoView = vi.fn()
 			store = useMainStore()
 			store.toggleEnvelopeSeen = vi.fn()
 			store.getAccount = vi.fn().mockReturnValue({ name: 'Test', emailAddress: 'test@test.com' })
@@ -465,13 +466,14 @@ describe('ThreadEnvelope', () => {
 			vi.useRealTimers()
 		})
 
-		function mountThreadEnvelope(expanded, hasHtmlBody) {
+		function mountThreadEnvelope(expanded, hasHtmlBody, messageOverrides = {}) {
 			store.fetchMessage = vi.fn().mockResolvedValue({
 				databaseId: 999,
 				hasHtmlBody,
 				attachments: [],
 				dkimValid: true,
 				itineraries: [],
+				...messageOverrides,
 			})
 			return shallowMount(ThreadEnvelope, {
 				propsData: {
@@ -504,7 +506,9 @@ describe('ThreadEnvelope', () => {
 		}
 
 		it('does not mark as read merely because the data fetch resolved -- rendering is still pending', async () => {
-			mountThreadEnvelope(true, true) // hasHtmlBody: true -> waits on Message.vue's own @load
+			const view = mountThreadEnvelope(true, true) // hasHtmlBody: true -> waits on Message.vue's own @load
+			store.fetchItineraries = vi.fn()
+			store.fetchDkim = vi.fn()
 			await vi.advanceTimersByTimeAsync(0)
 
 			// The data is in hand, but nothing has told us the content
@@ -513,6 +517,36 @@ describe('ThreadEnvelope', () => {
 			await vi.advanceTimersByTimeAsync(5000)
 
 			expect(store.toggleEnvelopeSeen).not.toHaveBeenCalled()
+			expect(store.fetchItineraries).not.toHaveBeenCalled()
+			expect(store.fetchDkim).not.toHaveBeenCalled()
+			view.destroy()
+		})
+
+		it('starts supplementary fetches only after the body rendered, and runs them sequentially', async () => {
+			const view = mountThreadEnvelope(true, true, {
+				attachments: [{}],
+				hasDkimSignature: true,
+				dkimValid: undefined,
+				itineraries: undefined,
+			})
+			let resolveItineraries
+			store.fetchItineraries = vi.fn().mockReturnValue(new Promise((resolve) => {
+				resolveItineraries = resolve
+			}))
+			store.fetchDkim = vi.fn().mockResolvedValue({})
+			await vi.advanceTimersByTimeAsync(0)
+
+			expect(store.fetchItineraries).not.toHaveBeenCalled()
+			view.vm.onMessageLoaded()
+			await vi.advanceTimersByTimeAsync(250)
+
+			expect(store.fetchItineraries).toHaveBeenCalledTimes(1)
+			expect(store.fetchDkim).not.toHaveBeenCalled()
+
+			resolveItineraries([])
+			await vi.advanceTimersByTimeAsync(0)
+			expect(store.fetchDkim).toHaveBeenCalledTimes(1)
+			view.destroy()
 		})
 
 		it('marks as read 2s after the content actually finishes rendering', async () => {

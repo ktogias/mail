@@ -196,7 +196,8 @@ class SyncService {
 		?array $knownIds = null,
 		string $sortOrder = IMailSearch::ORDER_NEWEST_FIRST,
 		?string $filter = null,
-		string $workClass = ImapWorkClass::MAINTENANCE): Response {
+		string $workClass = ImapWorkClass::MAINTENANCE,
+		?array $knownStates = null): Response {
 		if ($partialOnly && !$mailbox->isCached()) {
 			throw MailboxNotCachedException::from($mailbox);
 		}
@@ -222,7 +223,8 @@ class SyncService {
 					$lastMessageTimestamp,
 					$sortOrder,
 					$query,
-					$filter
+					$filter,
+					$knownStates,
 				);
 			}
 		}
@@ -252,7 +254,8 @@ class SyncService {
 				$lastMessageTimestamp,
 				$sortOrder,
 				$query,
-				$filter
+				$filter,
+				$knownStates,
 			);
 		}
 
@@ -330,7 +333,8 @@ class SyncService {
 			$lastMessageTimestamp,
 			$sortOrder,
 			$query,
-			$filter
+			$filter,
+			$knownStates,
 		);
 	}
 
@@ -435,7 +439,8 @@ class SyncService {
 		?int $lastMessageTimestamp,
 		string $sortOrder,
 		?SearchQuery $query,
-		?string $filterForLogging = null): Response {
+		?string $filterForLogging = null,
+		?array $knownStates = null): Response {
 		if ($knownIds === []) {
 			$newIds = $this->messageMapper->findAllIds($mailbox, $sortOrder, self::COLD_START_SYNC_LIMIT);
 		} else {
@@ -451,19 +456,63 @@ class SyncService {
 			$newUids = $this->messageMapper->findUidsForIds($mailbox, $newIds);
 			$newIds = $this->messageMapper->findIdsByQuery($mailbox, $query, $order, null, $newUids, true);
 		}
-		$new = $this->messageMapper->findByMailboxAndIds($mailbox, $account->getUserId(), $newIds);
+		$new = $newIds === []
+			? []
+			: $this->messageMapper->findByMailboxAndIds($mailbox, $account->getUserId(), $newIds);
 
-		// TODO: $changed = $this->messageMapper->findChanged($account, $mailbox, $uids);
+		// New clients send the compact syncState received with every
+		// envelope. Compare those states with one narrow database read and
+		// hydrate full messages only for actual changes. The compatibility
+		// path intentionally keeps the old all-known behavior for clients
+		// loaded before this release; their first response gives every row a
+		// state and subsequent ticks become incremental.
+		$currentStates = $knownStates === null
+			? null
+			: $this->messageMapper->findSyncStatesForIds($mailbox, $knownIds);
+		$stillKnownIds = $currentStates === null
+			? $knownIds
+			: array_keys($currentStates);
+		$missingIds = array_values(array_diff($knownIds, $stillKnownIds));
+		$changedCandidates = $currentStates === null
+			? $knownIds
+			: array_values(array_filter(
+				$stillKnownIds,
+				static function (int $id) use ($currentStates, $knownStates): bool {
+					if (!array_key_exists($id, $knownStates) && !array_key_exists((string)$id, $knownStates)) {
+						return true;
+					}
+					return (string)$currentStates[$id] !== (string)($knownStates[$id] ?? $knownStates[(string)$id]);
+				},
+			));
+
 		if ($query !== null) {
-			$changedUids = $this->messageMapper->findUidsForIds($mailbox, $knownIds);
-			$changedIds = $this->messageMapper->findIdsByQuery($mailbox, $query, $order, null, $changedUids, true);
+			if ($changedCandidates === []) {
+				$changedIds = [];
+			} else {
+				$changedUids = $this->messageMapper->findUidsForIds($mailbox, $changedCandidates);
+				$changedIds = $changedUids === []
+					? []
+					: $this->messageMapper->findIdsByQuery($mailbox, $query, $order, null, $changedUids, true);
+			}
+			// A known row whose state changed and no longer matches this
+			// filtered bucket is a bucket-level vanish, even though the
+			// underlying message still exists.
+			$vanished = array_values(array_unique(array_merge(
+				$missingIds,
+				array_diff($changedCandidates, $changedIds),
+			)));
 		} else {
-			$changedIds = $knownIds;
+			$changedIds = $changedCandidates;
+			$vanished = $missingIds;
 		}
-		$changed = $this->messageMapper->findByMailboxAndIds($mailbox, $account->getUserId(), $changedIds);
+		$changed = $changedIds === []
+			? []
+			: $this->messageMapper->findByMailboxAndIds($mailbox, $account->getUserId(), $changedIds);
 
-		$stillKnownIds = array_map(static fn (Message $msg) => $msg->getId(), $changed);
-		$vanished = array_values(array_diff($knownIds, $stillKnownIds));
+		if ($currentStates === null) {
+			$loadedIds = array_map(static fn (Message $msg) => $msg->getId(), $changed);
+			$vanished = array_values(array_diff($knownIds, $loadedIds));
+		}
 
 		// A filtered bucket (is:pi-other, is:pi-important, ...) reporting
 		// MOST or ALL of its previously-known ids vanished in one sync is

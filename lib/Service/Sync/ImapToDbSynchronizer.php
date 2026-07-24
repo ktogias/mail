@@ -45,12 +45,20 @@ use Throwable;
 use function array_chunk;
 use function array_filter;
 use function array_map;
+use function array_splice;
 use function register_shutdown_function;
 use function sprintf;
 
 class ImapToDbSynchronizer {
-	/** @var int */
-	public const MAX_NEW_MESSAGES = 5000;
+	/**
+	 * Upper bound for one initial-sync/backfill fetch.
+	 *
+	 * A 5,000-message page was measured at 347 MB on the production NAS,
+	 * enough to force swap and contend with user-facing PHP workers. Smaller
+	 * pages mean more resumable background passes but sharply lower peak
+	 * memory and provider/cache pressure.
+	 */
+	public const MAX_NEW_MESSAGES = 1000;
 
 	/** @var int Upper bound of missing messages backfilled per repair run */
 	public const MAX_REPAIR_BACKFILL = 1000;
@@ -369,12 +377,19 @@ class ImapToDbSynchronizer {
 				throw new ServiceException('Can not get messages from mailbox ' . $mailbox->getName() . ': ' . $e->getMessage(), 0, $e);
 			}
 
-			foreach (array_chunk($imapMessages['messages'], 500) as $chunk) {
+			// Detach and consume the page destructively. array_chunk() left
+			// the original array holding every processed IMAPMessage until the
+			// whole page completed, keeping recipients/headers for thousands
+			// of already-persisted messages alive at peak memory.
+			$imapMessageBatch = $imapMessages['messages'];
+			unset($imapMessages['messages']);
+			while ($imapMessageBatch !== []) {
+				$chunk = array_splice($imapMessageBatch, 0, 500);
 				$messages = array_map(static fn (IMAPMessage $imapMessage) => $imapMessage->toDbMessage($mailbox->getId(), $account->getMailAccount()), $chunk);
 				$this->dbMapper->insertBulk($account, ...$messages);
 				$perf->step(sprintf('persist %d messages in database', count($chunk)));
 				// Free the memory
-				unset($messages);
+				unset($messages, $chunk);
 			}
 
 			if (!$imapMessages['all']) {

@@ -421,6 +421,11 @@ return [
 			'verb' => 'DELETE'
 		],
 		[
+			'name' => 'thread#deleteBatch',
+			'url' => '/api/threads',
+			'verb' => 'DELETE'
+		],
+		[
 			'name' => 'thread#move',
 			'url' => '/api/thread/{id}',
 			'verb' => 'POST'

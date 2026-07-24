@@ -21,6 +21,19 @@ export async function deleteThread(id) {
 	}
 }
 
+export async function deleteThreads(ids) {
+	const url = generateUrl('/apps/mail/api/threads')
+
+	try {
+		return await axios.delete(url, {
+			data: { ids },
+			mailWorkClass: WorkClass.QUICK_MUTATION,
+		})
+	} catch (e) {
+		throw convertAxiosError(e)
+	}
+}
+
 export async function moveThread(id, destMailboxId) {
 	const url = generateUrl('/apps/mail/api/thread/{id}', {
 		id,

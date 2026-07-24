@@ -5,7 +5,9 @@
 
 import {
 	isMailRequest,
+	releaseCrossTabLeadership,
 	RequestCoordinator,
+	runCrossTabLeader,
 	WorkClass,
 } from '../../../service/RequestCoordinator.js'
 
@@ -92,5 +94,58 @@ describe('RequestCoordinator', () => {
 			accountId: 'account-1',
 		})
 		releaseMutation()
+	})
+
+	it('keeps one periodic leader across staggered tab ticks and fails over after expiry', async () => {
+		const values = new Map()
+		const storage = {
+			getItem: (key) => values.get(key) ?? null,
+			setItem: (key, value) => values.set(key, value),
+			removeItem: (key) => values.delete(key),
+		}
+		let timestamp = 1_000
+		const firstTask = vi.fn().mockResolvedValue('first')
+		const secondTask = vi.fn().mockResolvedValue('second')
+
+		await expect(runCrossTabLeader('poll', firstTask, {
+			storage,
+			tabId: 'tab-a',
+			now: () => timestamp,
+			leaseMs: 100,
+		})).resolves.toEqual({ leader: true, result: 'first' })
+		await expect(runCrossTabLeader('poll', secondTask, {
+			storage,
+			tabId: 'tab-b',
+			now: () => timestamp + 50,
+			leaseMs: 100,
+		})).resolves.toEqual({ leader: false })
+		expect(secondTask).not.toHaveBeenCalled()
+
+		timestamp += 101
+		await expect(runCrossTabLeader('poll', secondTask, {
+			storage,
+			tabId: 'tab-b',
+			now: () => timestamp,
+			leaseMs: 100,
+		})).resolves.toEqual({ leader: true, result: 'second' })
+	})
+
+	it('only lets the owning tab release a leadership lease', async () => {
+		const values = new Map()
+		const storage = {
+			getItem: (key) => values.get(key) ?? null,
+			setItem: (key, value) => values.set(key, value),
+			removeItem: (key) => values.delete(key),
+		}
+		await runCrossTabLeader('poll', vi.fn(), {
+			storage,
+			tabId: 'tab-a',
+			now: () => 1_000,
+		})
+
+		releaseCrossTabLeadership('poll', { storage, tabId: 'tab-b' })
+		expect(values.size).toBe(1)
+		releaseCrossTabLeadership('poll', { storage, tabId: 'tab-a' })
+		expect(values.size).toBe(0)
 	})
 })

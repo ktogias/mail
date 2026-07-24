@@ -617,12 +617,8 @@ export default {
 					{ number: envelopesToDelete.length },
 				),
 				action: async () => {
-					await Promise.all(envelopesToDelete.map(async (envelope) => {
-						logger.info(`deleting thread ${envelope.threadRootId}`)
-						await this.mainStore.deleteThread({
-							envelope,
-						})
-					}))
+					logger.info(`deleting ${envelopesToDelete.length} selected threads`)
+					await this.mainStore.deleteThreads({ envelopes: envelopesToDelete })
 				},
 			}).catch(async (error) => {
 				showError(await matchError(error, {

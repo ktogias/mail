@@ -6,6 +6,7 @@
 import axios from '@nextcloud/axios'
 import { generateUrl } from '@nextcloud/router'
 import * as MessageService from '../../../service/MessageService.js'
+import { WorkClass } from '../../../service/RequestCoordinator.js'
 
 vi.mock('@nextcloud/axios')
 vi.mock('@nextcloud/router')
@@ -198,6 +199,19 @@ describe('service/MessageService test suite', () => {
 			await expect(MessageService.fetchMessageItineraries(42)).rejects.toBe(networkError)
 		})
 
+		it('classifies itineraries as cancellable speculative enrichment', async () => {
+			generateUrl.mockReturnValueOnce('/generated-url')
+			axios.get.mockResolvedValueOnce({ data: [] })
+			const controller = new AbortController()
+
+			await MessageService.fetchMessageItineraries(42, { signal: controller.signal })
+
+			expect(axios.get).toHaveBeenCalledWith('/generated-url', {
+				signal: controller.signal,
+				mailWorkClass: WorkClass.SPECULATIVE,
+			})
+		})
+
 		it('fetchMessageDkim', async () => {
 			generateUrl.mockReturnValueOnce('/generated-url')
 			const networkError = new Error('Network Error')
@@ -206,12 +220,32 @@ describe('service/MessageService test suite', () => {
 			await expect(MessageService.fetchMessageDkim(42)).rejects.toBe(networkError)
 		})
 
+		it('classifies DKIM as cancellable speculative enrichment', async () => {
+			generateUrl.mockReturnValueOnce('/generated-url')
+			axios.get.mockResolvedValueOnce({ data: {} })
+			const controller = new AbortController()
+
+			await MessageService.fetchMessageDkim(42, { signal: controller.signal })
+
+			expect(axios.get).toHaveBeenCalledWith('/generated-url', {
+				signal: controller.signal,
+				mailWorkClass: WorkClass.SPECULATIVE,
+			})
+		})
+
 		it('fetchEnvelope', async () => {
 			generateUrl.mockReturnValueOnce('/generated-url')
 			const networkError = new Error('Network Error')
 			axios.get.mockRejectedValueOnce(networkError)
 
 			await expect(MessageService.fetchEnvelope(13, 42)).rejects.toBe(networkError)
+		})
+
+		it.each([403, 404])('treats a terminal %i envelope response as gone', async (status) => {
+			generateUrl.mockReturnValueOnce('/generated-url')
+			axios.get.mockRejectedValueOnce({ response: { status, headers: {}, data: [] } })
+
+			await expect(MessageService.fetchEnvelope(13, 42)).resolves.toBeUndefined()
 		})
 	})
 
@@ -232,11 +266,17 @@ describe('service/MessageService test suite', () => {
 				},
 			})
 
-			const result = await MessageService.syncEnvelopes(13, 21, [], null, undefined, false, 'newest')
+			const result = await MessageService.syncEnvelopes(13, 21, [1], null, undefined, false, 'newest', WorkClass.VISIBLE_REVALIDATION, {
+				1: '123:010:100',
+			})
 
 			expect(result.newMessages).toEqual([{ accountId: 13, databaseId: 1 }])
 			expect(result.changedMessages).toEqual([{ accountId: 13, databaseId: 2 }])
 			expect(result.vanishedMessages).toEqual([3])
+			expect(axios.post).toHaveBeenCalledWith('/generated-url', expect.objectContaining({
+				ids: [1],
+				states: { 1: '123:010:100' },
+			}), expect.any(Object))
 		})
 
 		it('throws a clear, catchable error instead of crashing on a malformed response body', async () => {

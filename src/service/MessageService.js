@@ -117,7 +117,14 @@ export function fetchEnvelope(accountId, id) {
 		.then((resp) => resp.data)
 		.then(amendEnvelopeWithIds(accountId))
 		.catch((error) => {
-			if (error.response && error.response.status === 404) {
+			if (error.response && [403, 404].includes(error.response.status)) {
+				// MessagesController::show() intentionally returns 403 for a
+				// row that no longer exists as well as for a row the current
+				// user cannot access. For a caller fetching one already-known
+				// envelope both answers are terminal: there is no envelope it
+				// may keep or reconcile locally. Treat both like "gone" so a
+				// deleted thread sibling cannot remain in the store and be
+				// retried by every near-expiry reconciliation sweep forever.
 				return undefined
 			}
 			if (!error.response) {
@@ -199,7 +206,7 @@ export async function fetchThread(id, { signal, speculative = false } = {}) {
 	return resp.data
 }
 
-export async function syncEnvelopes(accountId, id, ids, lastMessageTimestamp, query, init = false, sortOrder, workClass = WorkClass.VISIBLE_REVALIDATION) {
+export async function syncEnvelopes(accountId, id, ids, lastMessageTimestamp, query, init = false, sortOrder, workClass = WorkClass.VISIBLE_REVALIDATION, states) {
 	const url = generateUrl('/apps/mail/api/mailboxes/{id}/sync', {
 		id,
 	})
@@ -211,6 +218,7 @@ export async function syncEnvelopes(accountId, id, ids, lastMessageTimestamp, qu
 			init,
 			sortOrder,
 			query,
+			states,
 		}, {
 			mailWorkClass: workClass,
 			mailAccountId: accountId,
@@ -444,14 +452,18 @@ export async function fetchMessageHtmlBody(id) {
 	}
 }
 
-export async function fetchMessageItineraries(id) {
+export async function fetchMessageItineraries(id, { signal } = {}) {
 	const url = generateUrl('/apps/mail/api/messages/{id}/itineraries', {
 		id,
 	})
 
 	try {
 		const resp = await axios.get(url, {
-			mailWorkClass: WorkClass.ACTIVE_CONTENT,
+			signal,
+			// Itinerary extraction enriches an already-rendered message. It
+			// must yield to bodies, attachments and direct mutations rather
+			// than occupying one of their browser-side request slots.
+			mailWorkClass: WorkClass.SPECULATIVE,
 		})
 		return resp.data
 	} catch (error) {
@@ -470,14 +482,17 @@ export async function fetchMessageItineraries(id) {
 	}
 }
 
-export async function fetchMessageDkim(id) {
+export async function fetchMessageDkim(id, { signal } = {}) {
 	const url = generateUrl('/apps/mail/api/messages/{id}/dkim', {
 		id,
 	})
 
 	try {
 		const resp = await axios.get(url, {
-			mailWorkClass: WorkClass.ACTIVE_CONTENT,
+			signal,
+			// DKIM details are useful secondary metadata, not a prerequisite
+			// for displaying the message body.
+			mailWorkClass: WorkClass.SPECULATIVE,
 		})
 		return resp.data
 	} catch (error) {

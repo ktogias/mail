@@ -932,26 +932,59 @@ class MailManager implements IMailManager {
 	 */
 	#[\Override]
 	public function deleteThread(Account $account, Mailbox $mailbox, string $threadRootId): void {
+		$this->deleteThreads($account, [[
+			'mailbox' => $mailbox,
+			'threadRootId' => $threadRootId,
+		]]);
+	}
+
+	#[\Override]
+	public function deleteThreads(Account $account, array $threads): void {
 		$mailAccount = $account->getMailAccount();
-		$messageInTrash = $mailbox->getId() === $mailAccount->getTrashMailboxId();
-
-		$messages = $this->threadMapper->findMessageUidsAndMailboxNamesByAccountAndThreadRoot(
-			$mailAccount,
-			$threadRootId,
-			$messageInTrash
-		);
-
-		foreach ($messages as $message) {
-			$this->logger->debug('deleting message', [
-				'messageId' => $message['messageUid'],
-				'mailboxId' => $mailbox->getId(),
-			]);
-
-			$this->deleteMessage(
-				$account,
-				$message['mailboxName'],
-				$message['messageUid']
+		$messagesByLocation = [];
+		foreach ($threads as $thread) {
+			$messageInTrash = $thread['mailbox']->getId() === $mailAccount->getTrashMailboxId();
+			$threadMessages = $this->threadMapper->findMessageUidsAndMailboxNamesByAccountAndThreadRoot(
+				$mailAccount,
+				$thread['threadRootId'],
+				$messageInTrash
 			);
+			foreach ($threadMessages as $message) {
+				$messagesByLocation[$message['mailboxName'] . "\0" . $message['messageUid']] = $message;
+			}
+		}
+		$messages = array_values($messagesByLocation);
+
+		if ($messages === []) {
+			return;
+		}
+
+		// A thread or bulk selection may contain many messages, potentially
+		// spread across folders. Keep one reserved interactive client for the
+		// complete account-local batch and reuse the existing with-client
+		// primitive for every member.
+		$client = $this->imapClientFactory->getClient($account, allowReservedSlot: true);
+		try {
+			foreach ($messages as $message) {
+				$this->logger->debug('deleting message', [
+					'messageId' => $message['messageUid'],
+					'mailbox' => $message['mailboxName'],
+				]);
+
+				try {
+					$sourceMailbox = $this->mailboxMapper->find($account, $message['mailboxName']);
+				} catch (DoesNotExistException $e) {
+					throw new ServiceException("Source mailbox {$message['mailboxName']} does not exist", 0, $e);
+				}
+				$this->deleteMessageWithClient(
+					$account,
+					$sourceMailbox,
+					$message['messageUid'],
+					$client,
+				);
+			}
+		} finally {
+			$client->logout();
 		}
 	}
 

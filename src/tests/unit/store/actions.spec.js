@@ -13,10 +13,11 @@ import * as DeepSearchService from '../../../service/DeepSearchService.js'
 import * as MailboxService from '../../../service/MailboxService.js'
 import * as MessageService from '../../../service/MessageService.js'
 import * as NotificationService from '../../../service/NotificationService.js'
+import { WorkClass } from '../../../service/RequestCoordinator.js'
 import * as ThreadService from '../../../service/ThreadService.js'
 import { PAGE_SIZE, UNIFIED_INBOX_ID } from '../../../store/constants.js'
 import useMainStore from '../../../store/mainStore.js'
-import { computeLockRetryDelayMs, mapWithConcurrencyLimit, reconcileNearExpiryLocalChanges, resetRecentLocalChangesForTests, resetSharedNetworkLimiterForTests } from '../../../store/mainStore/actions.js'
+import { computeLockRetryDelayMs, mapWithConcurrencyLimit, reconcileNearExpiryLocalChanges, resetPendingDeleteRefillsForTests, resetRecentLocalChangesForTests, resetSharedNetworkLimiterForTests } from '../../../store/mainStore/actions.js'
 import { normalizedEnvelopeListId } from '../../../util/normalization.js'
 import { wait } from '../../../util/wait.js'
 
@@ -55,6 +56,7 @@ describe('Vuex store actions', () => {
 		store = useMainStore()
 		resetSharedNetworkLimiterForTests()
 		resetRecentLocalChangesForTests()
+		resetPendingDeleteRefillsForTests()
 		DeepSearchService.startDeepSearch.mockResolvedValue({
 			id: 1,
 			accountId: 13,
@@ -93,6 +95,24 @@ describe('Vuex store actions', () => {
 		expect(MailboxService.create).toHaveBeenCalledWith(13, 'Important')
 	})
 
+	it('fans a virtual-account mailbox refresh out to physical accounts without requesting account 0', async () => {
+		const account13 = { id: 13, personalNamespace: '', mailboxes: [] }
+		const account14 = { id: 14, personalNamespace: '', mailboxes: [] }
+		store.addAccountMutation(account13)
+		store.addAccountMutation(account14)
+		MailboxService.fetchAll.mockResolvedValue([])
+
+		await store.syncMailboxesForAccount(
+			store.accountsUnmapped[0],
+			WorkClass.EXPLICIT_HEAVY,
+		)
+
+		expect(MailboxService.fetchAll.mock.calls).toEqual([
+			[13, true, WorkClass.EXPLICIT_HEAVY],
+			[14, true, WorkClass.EXPLICIT_HEAVY],
+		])
+	})
+
 	it('creates a sub-mailbox', async () => {
 		const account = {
 			id: 13,
@@ -112,6 +132,31 @@ describe('Vuex store actions', () => {
 
 		expect(result).toEqual(mailbox)
 		expect(MailboxService.create).toHaveBeenCalledWith(13, 'Archive.2020')
+	})
+
+	it('coalesces a burst of delete refills into one speculative page fetch', async () => {
+		vi.useFakeTimers()
+		try {
+			store.fetchNextEnvelopes = vi.fn().mockResolvedValue([])
+
+			const first = store.scheduleEnvelopeRefill({ mailboxId: 21, query: 'not:starred', quantity: 1 })
+			const second = store.scheduleEnvelopeRefill({ mailboxId: 21, query: 'not:starred', quantity: 2 })
+			await vi.advanceTimersByTimeAsync(999)
+			expect(store.fetchNextEnvelopes).not.toHaveBeenCalled()
+
+			await vi.advanceTimersByTimeAsync(1)
+			await Promise.all([first, second])
+
+			expect(store.fetchNextEnvelopes).toHaveBeenCalledTimes(1)
+			expect(store.fetchNextEnvelopes).toHaveBeenCalledWith({
+				mailboxId: 21,
+				query: 'not:starred',
+				quantity: 3,
+				workClass: WorkClass.SPECULATIVE,
+			})
+		} finally {
+			vi.useRealTimers()
+		}
 	})
 
 	it('adds a prefix to new mailboxes if the account has a personal namespace', async () => {
@@ -1206,6 +1251,17 @@ describe('Vuex store actions', () => {
 		})
 
 		it('syncEnvelopes strips a trailing "undefined" token before calling the service', async () => {
+			store.addEnvelopesMutation({
+				query: 'to:ramantas from:ramantas subject:ramantas mentions:false match:anyof',
+				envelopes: [{
+					accountId: 13,
+					mailboxId: 33,
+					databaseId: 901,
+					dateInt: 901,
+					syncState: '123:010:100',
+					flags: {},
+				}],
+			})
 			MessageService.syncEnvelopes.mockResolvedValue({
 				newMessages: [],
 				changedMessages: [],
@@ -1218,6 +1274,9 @@ describe('Vuex store actions', () => {
 			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(1)
 			const calledQuery = MessageService.syncEnvelopes.mock.calls[0][4]
 			expect(calledQuery).toBe('to:ramantas from:ramantas subject:ramantas mentions:false match:anyof')
+			expect(MessageService.syncEnvelopes.mock.calls[0][8]).toEqual({
+				901: '123:010:100',
+			})
 		})
 
 		it('leaves a well-formed query completely untouched', async () => {
@@ -2083,7 +2142,7 @@ describe('Vuex store actions', () => {
 
 		expect(MessageService.fetchEnvelopes).toHaveBeenCalledTimes(1)
 		expect(MessageService.fetchEnvelopes)
-			.toHaveBeenNthCalledWith(1, 13, 11, undefined, 300000, PAGE_SIZE, 'newest', 'threaded', undefined, undefined, false, 11030)
+			.toHaveBeenNthCalledWith(1, 13, 11, undefined, 300000, PAGE_SIZE, 'newest', 'threaded', undefined, undefined, false, 11030, WorkClass.ACTIVE_CONTENT)
 		expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists[''].toSorted()).toEqual([
 			// Initial envelopes
 			...msgs1.map(mockEnvelope(11)),
@@ -2242,9 +2301,9 @@ describe('Vuex store actions', () => {
 
 		expect(MessageService.fetchEnvelopes).toHaveBeenCalledTimes(2)
 		expect(MessageService.fetchEnvelopes)
-			.toHaveBeenNthCalledWith(1, 13, 11, undefined, 300000, PAGE_SIZE, 'newest', 'threaded', undefined, undefined, false, 11030)
+			.toHaveBeenNthCalledWith(1, 13, 11, undefined, 300000, PAGE_SIZE, 'newest', 'threaded', undefined, undefined, false, 11030, WorkClass.ACTIVE_CONTENT)
 		expect(MessageService.fetchEnvelopes)
-			.toHaveBeenNthCalledWith(2, 26, 21, undefined, 600000, PAGE_SIZE, 'newest', 'threaded', undefined, undefined, false, 21060)
+			.toHaveBeenNthCalledWith(2, 26, 21, undefined, 600000, PAGE_SIZE, 'newest', 'threaded', undefined, undefined, false, 21060, WorkClass.ACTIVE_CONTENT)
 		expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists[''].toSorted()).toEqual([
 			// Initial envelopes
 			...page1.map(mockEnvelope(11)),
@@ -4264,6 +4323,106 @@ describe('Vuex store actions', () => {
 			await expect(store.deleteThread({ envelope })).resolves.toBeUndefined()
 		})
 
+		it('deleteThread removes every locally-known sibling, not only the representative', async () => {
+			const account = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: { databaseId: 11, accountId: 13, name: 'INBOX' },
+			})
+			const siblings = [
+				{ databaseId: 1, accountId: 13, mailboxId: 11, threadRootId: 'thread-a', dateInt: 2, flags: {} },
+				{ databaseId: 2, accountId: 13, mailboxId: 11, threadRootId: 'thread-a', dateInt: 1, flags: {} },
+			]
+			store.addEnvelopesMutation({ envelopes: siblings, addToUnifiedMailboxes: false })
+			ThreadService.deleteThread.mockResolvedValue({})
+
+			await store.deleteThread({ envelope: store.envelopes[1] })
+
+			expect(store.getEnvelope(1)).toBeUndefined()
+			expect(store.getEnvelope(2)).toBeUndefined()
+		})
+
+		it('deleteThread restores every optimistically removed sibling after a genuine failure', async () => {
+			const account = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: { databaseId: 11, accountId: 13, name: 'INBOX' },
+			})
+			const siblings = [
+				{ databaseId: 1, accountId: 13, mailboxId: 11, threadRootId: 'thread-a', dateInt: 2, flags: {} },
+				{ databaseId: 2, accountId: 13, mailboxId: 11, threadRootId: 'thread-a', dateInt: 1, flags: {} },
+			]
+			store.addEnvelopesMutation({ envelopes: siblings, addToUnifiedMailboxes: false })
+			ThreadService.deleteThread.mockRejectedValue({ response: { status: 500 } })
+
+			await expect(store.deleteThread({ envelope: store.envelopes[1] })).rejects.toBeDefined()
+
+			expect(store.getEnvelope(1)).toBeDefined()
+			expect(store.getEnvelope(2)).toBeDefined()
+		})
+
+		it('deleteThreads sends one batch request and removes all selected thread siblings', async () => {
+			const account = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: { databaseId: 11, accountId: 13, name: 'INBOX' },
+			})
+			const envelopes = [
+				{ databaseId: 1, accountId: 13, mailboxId: 11, threadRootId: 'thread-a', dateInt: 4, flags: {} },
+				{ databaseId: 2, accountId: 13, mailboxId: 11, threadRootId: 'thread-a', dateInt: 3, flags: {} },
+				{ databaseId: 3, accountId: 13, mailboxId: 11, threadRootId: 'thread-b', dateInt: 2, flags: {} },
+				{ databaseId: 4, accountId: 13, mailboxId: 11, threadRootId: 'thread-b', dateInt: 1, flags: {} },
+			]
+			store.addEnvelopesMutation({ envelopes, addToUnifiedMailboxes: false })
+			ThreadService.deleteThreads.mockResolvedValue({})
+
+			await store.deleteThreads({ envelopes: [store.envelopes[1], store.envelopes[3]] })
+
+			expect(ThreadService.deleteThreads).toHaveBeenCalledWith([1, 3])
+			envelopes.forEach(({ databaseId }) => {
+				expect(store.getEnvelope(databaseId)).toBeUndefined()
+			})
+		})
+
+		it('deleteThreads batches per account and restores only a failed account', async () => {
+			const account13 = { id: 13, personalNamespace: '', mailboxes: [] }
+			const account26 = { id: 26, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account13)
+			store.addAccountMutation(account26)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: { databaseId: 11, accountId: 13, name: 'INBOX' },
+			})
+			store.addMailboxMutation({
+				account: account26,
+				mailbox: { databaseId: 21, accountId: 26, name: 'INBOX' },
+			})
+			const envelopes = [
+				{ databaseId: 1, accountId: 13, mailboxId: 11, threadRootId: 'thread-a', dateInt: 4, flags: {} },
+				{ databaseId: 2, accountId: 13, mailboxId: 11, threadRootId: 'thread-a', dateInt: 3, flags: {} },
+				{ databaseId: 3, accountId: 26, mailboxId: 21, threadRootId: 'thread-b', dateInt: 2, flags: {} },
+				{ databaseId: 4, accountId: 26, mailboxId: 21, threadRootId: 'thread-b', dateInt: 1, flags: {} },
+			]
+			store.addEnvelopesMutation({ envelopes, addToUnifiedMailboxes: false })
+			ThreadService.deleteThreads
+				.mockResolvedValueOnce({})
+				.mockRejectedValueOnce({ response: { status: 500 } })
+
+			await expect(store.deleteThreads({
+				envelopes: [store.envelopes[1], store.envelopes[3]],
+			})).rejects.toBeDefined()
+
+			expect(ThreadService.deleteThreads).toHaveBeenNthCalledWith(1, [1])
+			expect(ThreadService.deleteThreads).toHaveBeenNthCalledWith(2, [3])
+			expect(store.getEnvelope(1)).toBeUndefined()
+			expect(store.getEnvelope(2)).toBeUndefined()
+			expect(store.getEnvelope(3)).toBeDefined()
+			expect(store.getEnvelope(4)).toBeDefined()
+		})
+
 		it('deleteThread still surfaces a genuine failure (not 403)', async () => {
 			ThreadService.deleteThread.mockRejectedValue({ response: { status: 500 } })
 			const envelope = { databaseId: 1, mailboxId: 11, dateInt: 1, flags: {} }
@@ -4619,6 +4778,25 @@ describe('Vuex store actions', () => {
 				await reconcileNearExpiryLocalChanges(store)
 
 				expect(MessageService.fetchEnvelope).not.toHaveBeenCalled()
+			} finally {
+				vi.useRealTimers()
+			}
+		})
+
+		it('removes a locally stale envelope when the authoritative fetch says it is gone', async () => {
+			vi.useFakeTimers()
+			try {
+				store.addEnvelopesMutation({
+					envelopes: [{ databaseId: 953, mailboxId: 11, dateInt: 1, flags: { flagged: false }, tags: [] }],
+					addToUnifiedMailboxes: false,
+				})
+				store.flagEnvelopeMutation({ envelope: store.envelopes[953], flag: 'flagged', value: true })
+				vi.advanceTimersByTime(80 * 1000)
+				MessageService.fetchEnvelope.mockResolvedValue(undefined)
+
+				await reconcileNearExpiryLocalChanges(store)
+
+				expect(store.getEnvelope(953)).toBeUndefined()
 			} finally {
 				vi.useRealTimers()
 			}
