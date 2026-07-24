@@ -36,6 +36,7 @@ use OCA\Mail\Folder;
 use OCA\Mail\IMAP\FolderMapper;
 use OCA\Mail\IMAP\IMAPClientFactory;
 use OCA\Mail\IMAP\ImapFlag;
+use OCA\Mail\IMAP\ImapWorkClass;
 use OCA\Mail\IMAP\MailboxSync;
 use OCA\Mail\IMAP\MessageMapper as ImapMessageMapper;
 use OCA\Mail\Model\IMAPMessage;
@@ -95,8 +96,16 @@ class MailManager implements IMailManager {
 	 * @throws ServiceException
 	 */
 	#[\Override]
-	public function getMailboxes(Account $account, bool $forceSync = false): array {
-		$this->mailboxSync->sync($account, $this->logger, $forceSync);
+	public function getMailboxes(
+		Account $account,
+		bool $forceSync = false,
+		string $workClass = ImapWorkClass::MAINTENANCE,
+	): array {
+		if ($workClass === ImapWorkClass::MAINTENANCE) {
+			$this->mailboxSync->sync($account, $this->logger, $forceSync);
+		} else {
+			$this->mailboxSync->sync($account, $this->logger, $forceSync, workClass: $workClass);
+		}
 
 		return $this->mailboxMapper->findAll($account);
 	}
@@ -407,34 +416,46 @@ class MailManager implements IMailManager {
 
 	#[\Override]
 	public function flagMessage(Account $account, string $mailbox, int $uid, string $flag, bool $value): void {
+		$this->flagMessages($account, $mailbox, [$uid], [$flag => $value]);
+	}
+
+	#[\Override]
+	public function flagMessages(Account $account, string $mailbox, array $uids, array $flags): void {
 		try {
 			$mb = $this->mailboxMapper->find($account, $mailbox);
 		} catch (DoesNotExistException $e) {
 			throw new ClientException("Mailbox $mailbox does not exist", 0, $e);
 		}
 
-		$client = $this->imapClientFactory->getClient($account, allowReservedSlot: true);
+		$uids = array_values(array_unique(array_map(static fn ($uid) => (int)$uid, $uids)));
+		if ($uids === [] || $flags === []) {
+			return;
+		}
+
+		$client = $this->imapClientFactory->getClient(
+			$account,
+			allowReservedSlot: true,
+			workClass: ImapWorkClass::QUICK_MUTATION,
+		);
 		try {
-			// RFC 8457 interop: the importance keyword this app has always
-			// written ($label1 -- Thunderbird's legacy "Important" label)
-			// is invisible to standards-aware servers and clients; mirror
-			// every importance change onto the standard $important keyword
-			// too. Our own sync already reads both back into
-			// flag_important (IMAPMessage::setFlagImportant), so the round
-			// trip is lossless in both directions, and any other client
-			// honoring RFC 8457 now sees the same importance state.
-			$flagsToWrite = $flag === Tag::LABEL_IMPORTANT ? [$flag, '$important'] : [$flag];
-			foreach ($flagsToWrite as $writeFlag) {
-				// Only send system flags to the IMAP server as other flags might not be supported
-				$imapFlags = $this->filterFlags($client, $account, $writeFlag, $mailbox);
-				foreach ($imapFlags as $imapFlag) {
-					if (empty($imapFlag) === true) {
-						continue;
-					}
-					if ($value) {
-						$this->imapMessageMapper->addFlag($client, $mb, [$uid], $imapFlag);
-					} else {
-						$this->imapMessageMapper->removeFlag($client, $mb, [$uid], $imapFlag);
+			foreach ($flags as $flag => $value) {
+				$value = filter_var($value, FILTER_VALIDATE_BOOLEAN);
+				// RFC 8457 interop: mirror the legacy $label1 importance
+				// keyword onto the standards-aware $important keyword.
+				$flagsToWrite = $flag === Tag::LABEL_IMPORTANT ? [$flag, '$important'] : [$flag];
+				foreach ($flagsToWrite as $writeFlag) {
+					// Only send system flags to the IMAP server as other
+					// flags might not be supported.
+					$imapFlags = $this->filterFlags($client, $account, $writeFlag, $mailbox);
+					foreach ($imapFlags as $imapFlag) {
+						if (empty($imapFlag) === true) {
+							continue;
+						}
+						if ($value) {
+							$this->imapMessageMapper->addFlag($client, $mb, $uids, $imapFlag);
+						} else {
+							$this->imapMessageMapper->removeFlag($client, $mb, $uids, $imapFlag);
+						}
 					}
 				}
 			}
@@ -448,16 +469,20 @@ class MailManager implements IMailManager {
 			$client->logout();
 		}
 
-		$this->eventDispatcher->dispatch(
-			MessageFlaggedEvent::class,
-			new MessageFlaggedEvent(
-				$account,
-				$mb,
-				$uid,
-				$flag,
-				$value
-			)
-		);
+		foreach ($flags as $flag => $value) {
+			foreach ($uids as $uid) {
+				$this->eventDispatcher->dispatch(
+					MessageFlaggedEvent::class,
+					new MessageFlaggedEvent(
+						$account,
+						$mb,
+						$uid,
+						$flag,
+						filter_var($value, FILTER_VALIDATE_BOOLEAN),
+					)
+				);
+			}
+		}
 	}
 
 	/**
@@ -668,7 +693,7 @@ class MailManager implements IMailManager {
 	 */
 	#[\Override]
 	public function getMailAttachments(Account $account, Mailbox $mailbox, Message $message): array {
-		$client = $this->imapClientFactory->getClient($account, waitForSlot: true);
+		$client = $this->imapClientFactory->getClient($account, workClass: ImapWorkClass::ACTIVE_CONTENT);
 		try {
 			return $this->imapMessageMapper->getAttachments(
 				$client,
@@ -699,7 +724,7 @@ class MailManager implements IMailManager {
 		Mailbox $mailbox,
 		Message $message,
 		string $attachmentId): Attachment {
-		$client = $this->imapClientFactory->getClient($account, waitForSlot: true);
+		$client = $this->imapClientFactory->getClient($account, workClass: ImapWorkClass::ACTIVE_CONTENT);
 		try {
 			return $this->imapMessageMapper->getAttachment(
 				$client,

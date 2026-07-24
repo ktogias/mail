@@ -5,12 +5,17 @@
 import axios from '@nextcloud/axios'
 import { generateUrl } from '@nextcloud/router'
 
-export async function fetchAll(accountId, forceSync = false) {
+export async function fetchAll(accountId, forceSync = false, workClass) {
 	const url = generateUrl(`/apps/mail/api/mailboxes?accountId={accountId}&forceSync=${forceSync}`, {
 		accountId,
 	})
 
-	const resp = await axios.get(url)
+	const resp = await axios.get(url, workClass === undefined
+		? undefined
+		: {
+				mailWorkClass: workClass,
+				mailAccountId: accountId,
+			})
 
 	// FIXME: this return format is weird and should be avoided
 	// TODO: respect `resp.data.delimiter` value

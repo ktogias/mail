@@ -12,6 +12,7 @@ namespace OCA\Mail\Http\Middleware;
 use Exception;
 use Horde_Imap_Client_Exception;
 use OCA\Mail\Exception\ClientException;
+use OCA\Mail\Exception\ImapCapacityException;
 use OCA\Mail\Exception\NotImplemented;
 use OCA\Mail\Exception\ServiceException;
 use OCA\Mail\Http\JsonResponse;
@@ -82,6 +83,18 @@ class ErrorMiddleware extends Middleware {
 			return JSONResponse::fail([], Http::STATUS_NOT_IMPLEMENTED);
 		}
 
+		if ($this->containsImapCapacityException($exception)) {
+			$this->logger->warning($exception->getMessage(), [
+				'exception' => $exception,
+			]);
+			$response = JsonResponse::error(
+				'Mail account is busy',
+				Http::STATUS_TOO_MANY_REQUESTS,
+			);
+			$response->addHeader('Retry-After', '1');
+			return $response;
+		}
+
 		$temporary = $this->isTemporaryException($exception);
 		if ($temporary) {
 			$this->logger->warning($exception->getMessage(), [
@@ -124,6 +137,17 @@ class ErrorMiddleware extends Middleware {
 				true
 			);
 		}
+
+		return false;
+	}
+
+	private function containsImapCapacityException(Throwable $exception): bool {
+		do {
+			if ($exception instanceof ImapCapacityException) {
+				return true;
+			}
+			$exception = $exception->getPrevious();
+		} while ($exception !== null);
 
 		return false;
 	}

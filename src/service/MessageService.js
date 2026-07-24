@@ -11,6 +11,11 @@ import MalformedSyncResponseError from '../errors/MalformedSyncResponseError.js'
 import SyncIncompleteError from '../errors/SyncIncompleteError.js'
 import { parseErrorResponse } from '../http/ErrorResponseParser.js'
 import logger from '../logger.js'
+import {
+	executeDurableMutation,
+	replayMutationOutbox,
+} from './MutationOutbox.js'
+import { WorkClass } from './RequestCoordinator.js'
 
 const amendEnvelopeWithIds = curry((accountId, envelope) => ({
 	accountId,
@@ -33,12 +38,6 @@ const amendEnvelopeWithIds = curry((accountId, envelope) => ({
 const TEXT_SEARCH_MAX_CONCURRENCY = 2
 const textSearchLimit = pLimit(TEXT_SEARCH_MAX_CONCURRENCY)
 const isFreeTextSearch = (query) => typeof query === 'string' && /(?:^|\s)(?:to|from|cc|bcc|subject|body):/.test(query)
-
-// Flag writes are user mutations, not speculative reads. Keep one in flight
-// per app instance so "mark whole thread read" and duplicate component timers
-// cannot stampede the single IMAP connection slot reserved server-side for
-// interactive mutations. Different browser tabs remain protected by the
-// distributed server-side semaphore and its shared hard total limit.
 const envelopeFlagMutationLimit = pLimit(1)
 
 export function fetchEnvelope(accountId, id) {
@@ -47,7 +46,10 @@ export function fetchEnvelope(accountId, id) {
 	})
 
 	return axios
-		.get(url)
+		.get(url, {
+			mailWorkClass: WorkClass.ACTIVE_CONTENT,
+			mailAccountId: accountId,
+		})
 		.then((resp) => resp.data)
 		.then(amendEnvelopeWithIds(accountId))
 		.catch((error) => {
@@ -66,7 +68,7 @@ export function fetchEnvelope(accountId, id) {
 		})
 }
 
-export function fetchEnvelopes(accountId, mailboxId, query, cursor, limit, sort, view, cacheBuster, signal, prioritySplit = false, cursorId) {
+export function fetchEnvelopes(accountId, mailboxId, query, cursor, limit, sort, view, cacheBuster, signal, prioritySplit = false, cursorId, workClass = WorkClass.ACTIVE_CONTENT) {
 	const url = generateUrl('/apps/mail/api/messages')
 	const params = {
 		mailboxId,
@@ -101,6 +103,8 @@ export function fetchEnvelopes(accountId, mailboxId, query, cursor, limit, sort,
 		.get(url, {
 			params,
 			signal,
+			mailWorkClass: workClass,
+			mailAccountId: accountId,
 		})
 		.then((resp) => resp.data)
 		.then((envelopes) => envelopes.map(amendEnvelopeWithIds(accountId)))
@@ -120,15 +124,18 @@ export function fetchEnvelopes(accountId, mailboxId, query, cursor, limit, sort,
 	// signal without touching the network, so it never occupies a worker.
 	return isFreeTextSearch(query) ? textSearchLimit(run) : run()
 }
-export async function fetchThread(id, { signal } = {}) {
+export async function fetchThread(id, { signal, speculative = false } = {}) {
 	const url = generateUrl('apps/mail/api/messages/{id}/thread', {
 		id,
 	})
-	const resp = await axios.get(url, { signal })
+	const resp = await axios.get(url, {
+		signal,
+		mailWorkClass: speculative ? WorkClass.SPECULATIVE : WorkClass.ACTIVE_CONTENT,
+	})
 	return resp.data
 }
 
-export async function syncEnvelopes(accountId, id, ids, lastMessageTimestamp, query, init = false, sortOrder) {
+export async function syncEnvelopes(accountId, id, ids, lastMessageTimestamp, query, init = false, sortOrder, workClass = WorkClass.VISIBLE_REVALIDATION) {
 	const url = generateUrl('/apps/mail/api/mailboxes/{id}/sync', {
 		id,
 	})
@@ -140,6 +147,9 @@ export async function syncEnvelopes(accountId, id, ids, lastMessageTimestamp, qu
 			init,
 			sortOrder,
 			query,
+		}, {
+			mailWorkClass: workClass,
+			mailAccountId: accountId,
 		})
 
 		if (response.status === 202) {
@@ -207,12 +217,64 @@ export async function setEnvelopeFlags(id, flags) {
 		id,
 	})
 
-	return envelopeFlagMutationLimit(async () => {
-		const { data } = await axios.put(url, {
-			flags,
-		})
-		return data
-	})
+	return envelopeFlagMutationLimit(() => executeDurableMutation({
+		type: 'set-flags',
+		payload: { id, flags },
+		send: async (operationId) => {
+			const { data } = await axios.put(url, {
+				flags,
+				operationId,
+			}, {
+				mailWorkClass: WorkClass.QUICK_MUTATION,
+			})
+			return data
+		},
+	}))
+}
+
+export async function setEnvelopeFlagsBatch(ids, flags) {
+	const url = generateUrl('/apps/mail/api/messages/flags')
+	return envelopeFlagMutationLimit(() => executeDurableMutation({
+		type: 'set-flags-batch',
+		payload: { ids, flags },
+		send: async (operationId) => {
+			const { data } = await axios.put(url, {
+				ids,
+				flags,
+				operationId,
+			}, {
+				mailWorkClass: WorkClass.QUICK_MUTATION,
+			})
+			return data
+		},
+	}))
+}
+
+export function replayQueuedMutations() {
+	return envelopeFlagMutationLimit(() => replayMutationOutbox(async (operation) => {
+		if (operation.type === 'set-flags') {
+			const url = generateUrl('/apps/mail/api/messages/{id}/flags', {
+				id: operation.payload.id,
+			})
+			const { data } = await axios.put(url, {
+				flags: operation.payload.flags,
+				operationId: operation.id,
+			}, {
+				mailWorkClass: WorkClass.QUICK_MUTATION,
+			})
+			return data
+		}
+		if (operation.type === 'set-flags-batch') {
+			const { data } = await axios.put(generateUrl('/apps/mail/api/messages/flags'), {
+				...operation.payload,
+				operationId: operation.id,
+			}, {
+				mailWorkClass: WorkClass.QUICK_MUTATION,
+			})
+			return data
+		}
+		throw new Error(`Unsupported queued mail mutation: ${operation.type}`)
+	}))
 }
 
 export async function createEnvelopeTag(displayName, color) {
@@ -258,13 +320,16 @@ export async function removeEnvelopeTag(id, imapLabel) {
 	return data
 }
 
-export async function fetchMessage(id, { signal } = {}) {
+export async function fetchMessage(id, { signal, speculative = false } = {}) {
 	const url = generateUrl('/apps/mail/api/messages/{id}/body', {
 		id,
 	})
 
 	try {
-		const resp = await axios.get(url, { signal })
+		const resp = await axios.get(url, {
+			signal,
+			mailWorkClass: speculative ? WorkClass.SPECULATIVE : WorkClass.ACTIVE_CONTENT,
+		})
 		return resp.data
 	} catch (error) {
 		if (error.response && error.response.status === 404) {
@@ -294,7 +359,9 @@ export async function fetchMessageHtmlBody(id) {
 	})
 
 	try {
-		return (await axios.get(url)).data
+		return (await axios.get(url, {
+			mailWorkClass: WorkClass.ACTIVE_CONTENT,
+		})).data
 	} catch (e) {
 		throw convertAxiosError(e)
 	}
@@ -306,7 +373,9 @@ export async function fetchMessageItineraries(id) {
 	})
 
 	try {
-		const resp = await axios.get(url)
+		const resp = await axios.get(url, {
+			mailWorkClass: WorkClass.ACTIVE_CONTENT,
+		})
 		return resp.data
 	} catch (error) {
 		if (error.response && error.response.status === 404) {
@@ -330,7 +399,9 @@ export async function fetchMessageDkim(id) {
 	})
 
 	try {
-		const resp = await axios.get(url)
+		const resp = await axios.get(url, {
+			mailWorkClass: WorkClass.ACTIVE_CONTENT,
+		})
 		return resp.data
 	} catch (error) {
 		if (error.response && error.response.status === 404) {
@@ -366,7 +437,9 @@ export async function deleteMessage(id) {
 	})
 
 	try {
-		return (await axios.delete(url)).data
+		return (await axios.delete(url, {
+			mailWorkClass: WorkClass.QUICK_MUTATION,
+		})).data
 	} catch (e) {
 		throw convertAxiosError(e)
 	}
@@ -379,6 +452,8 @@ export function moveMessage(id, destFolderId) {
 
 	return axios.post(url, {
 		destFolderId,
+	}, {
+		mailWorkClass: WorkClass.QUICK_MUTATION,
 	})
 }
 
@@ -390,6 +465,8 @@ export function snoozeMessage(id, unixTimestamp, destMailboxId) {
 	return axios.post(url, {
 		unixTimestamp,
 		destMailboxId,
+	}, {
+		mailWorkClass: WorkClass.QUICK_MUTATION,
 	})
 }
 
@@ -398,7 +475,9 @@ export function unSnoozeMessage(id) {
 		id,
 	})
 
-	return axios.post(url, {})
+	return axios.post(url, {}, {
+		mailWorkClass: WorkClass.QUICK_MUTATION,
+	})
 }
 
 export async function sendMdn(id, data) {

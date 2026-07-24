@@ -936,6 +936,10 @@ OC.L10N.register(
     "Choose a file to share as a link" : "Choose a file to share as a link",
     "Delegated access to {userId}" : "Delegated access to {userId}",
     "Revoked access for {userId}" : "Revoked access for {userId}",
+    "You are offline. Mail changes will be sent when the connection returns." : "You are offline. Mail changes will be sent when the connection returns.",
+    "The connection is unstable. Mail actions will retry automatically." : "The connection is unstable. Mail actions will retry automatically.",
+    "Connection restored. Finishing pending mail changes…" : "Connection restored. Finishing pending mail changes…",
+    "Pending mail changes: {count}" : "Pending mail changes: {count}",
     "This summary was AI generated" : "This summary was AI generated",
     "This summary is AI generated and may contain mistakes." : "This summary is AI generated and may contain mistakes."
 },

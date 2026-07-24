@@ -42,7 +42,11 @@ interface IMailManager {
 	 *
 	 * @throws ServiceException
 	 */
-	public function getMailboxes(Account $account, bool $forceSync = false): array;
+	public function getMailboxes(
+		Account $account,
+		bool $forceSync = false,
+		string $workClass = \OCA\Mail\IMAP\ImapWorkClass::MAINTENANCE,
+	): array;
 
 	/**
 	 * Number of messages currently imported into the local DB for a mailbox
@@ -187,6 +191,12 @@ interface IMailManager {
 	 * @throws ServiceException
 	 */
 	public function flagMessage(Account $account, string $mailbox, int $uid, string $flag, bool $value): void;
+
+	/**
+	 * @param int[] $uids
+	 * @param array<string, bool> $flags
+	 */
+	public function flagMessages(Account $account, string $mailbox, array $uids, array $flags): void;
 
 	/**
 	 * @param Account $account

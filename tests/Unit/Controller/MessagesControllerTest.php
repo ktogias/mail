@@ -999,6 +999,46 @@ class MessagesControllerTest extends TestCase {
 		$this->assertEquals(new JSONResponse(['hasUnseenInThread' => true]), $response);
 	}
 
+	public function testSetFlagsBatchGroupsMessagesIntoOneMailboxWrite(): void {
+		$accountId = 17;
+		$mailboxId = 987;
+		$this->account->method('getId')->willReturn($accountId);
+		$first = new \OCA\Mail\Db\Message();
+		$first->setUid(441);
+		$first->setMailboxId($mailboxId);
+		$first->setHasUnseenInThread(false);
+		$second = new \OCA\Mail\Db\Message();
+		$second->setUid(442);
+		$second->setMailboxId($mailboxId);
+		$second->setHasUnseenInThread(true);
+		$mailbox = new \OCA\Mail\Db\Mailbox();
+		$mailbox->setId($mailboxId);
+		$mailbox->setName('INBOX');
+		$mailbox->setAccountId($accountId);
+		$this->mailManager->method('getMessage')
+			->willReturnMap([
+				[$this->userId, 123, $first],
+				[$this->userId, 124, $second],
+			]);
+		$this->mailManager->method('getMailbox')
+			->with($this->userId, $mailboxId)
+			->willReturn($mailbox);
+		$this->accountService->method('find')
+			->willReturn($this->account);
+		$this->mailManager->expects($this->once())
+			->method('flagMessages')
+			->with($this->account, 'INBOX', [441, 442], ['seen' => true]);
+
+		$response = $this->controller->setFlagsBatch([123, 124], ['seen' => true]);
+
+		$this->assertEquals(new JSONResponse([
+			'messages' => [
+				'123' => ['hasUnseenInThread' => false],
+				'124' => ['hasUnseenInThread' => true],
+			],
+		]), $response);
+	}
+
 	public function testSetTagFailing() {
 		$accountId = 17;
 		$mailboxId = 987;

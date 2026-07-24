@@ -19,6 +19,7 @@ use OCA\Mail\Exception\MailboxLockedException;
 use OCA\Mail\Exception\MailboxNotCachedException;
 use OCA\Mail\Exception\ServiceException;
 use OCA\Mail\IMAP\IMAPClientFactory;
+use OCA\Mail\IMAP\ImapWorkClass;
 use OCA\Mail\IMAP\MailboxSync;
 use OCA\Mail\IMAP\PreviewEnhancer;
 use OCA\Mail\IMAP\Sync\Response;
@@ -194,7 +195,8 @@ class SyncService {
 		?int $lastMessageTimestamp,
 		?array $knownIds = null,
 		string $sortOrder = IMailSearch::ORDER_NEWEST_FIRST,
-		?string $filter = null): Response {
+		?string $filter = null,
+		string $workClass = ImapWorkClass::MAINTENANCE): Response {
 		if ($partialOnly && !$mailbox->isCached()) {
 			throw MailboxNotCachedException::from($mailbox);
 		}
@@ -266,7 +268,7 @@ class SyncService {
 			$countingLoad = true;
 		}
 
-		$client = $this->clientFactory->getClient($account);
+		$client = $this->clientFactory->getClient($account, workClass: $workClass);
 
 		// Measures the whole real-sync attempt (connection included --
 		// establishing it is itself part of "how slow is this account

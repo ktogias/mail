@@ -6,6 +6,7 @@
 import axios from '@nextcloud/axios'
 import { generateUrl } from '@nextcloud/router'
 import * as DeepSearchService from '../../../service/DeepSearchService.js'
+import { WorkClass } from '../../../service/RequestCoordinator.js'
 
 vi.mock('@nextcloud/axios')
 vi.mock('@nextcloud/router')
@@ -46,7 +47,10 @@ describe('service/DeepSearchService', () => {
 			view: 'threaded',
 			limit: 20,
 			prioritySplit: true,
-		}, { signal })
+		}, {
+			signal,
+			mailWorkClass: WorkClass.MAINTENANCE,
+		})
 		expect(job.results[0]).toEqual(expect.objectContaining({ accountId: 4, databaseId: 91 }))
 	})
 
@@ -58,7 +62,12 @@ describe('service/DeepSearchService', () => {
 		await DeepSearchService.getDeepSearch(9)
 		await DeepSearchService.cancelDeepSearch(9)
 
-		expect(axios.get).toHaveBeenCalledWith('/apps/mail/api/search-jobs/9', { signal: undefined })
-		expect(axios.delete).toHaveBeenCalledWith('/apps/mail/api/search-jobs/9')
+		expect(axios.get).toHaveBeenCalledWith('/apps/mail/api/search-jobs/9', {
+			signal: undefined,
+			mailWorkClass: WorkClass.MAINTENANCE,
+		})
+		expect(axios.delete).toHaveBeenCalledWith('/apps/mail/api/search-jobs/9', {
+			mailWorkClass: WorkClass.MAINTENANCE,
+		})
 	})
 })

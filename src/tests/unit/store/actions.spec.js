@@ -2316,17 +2316,25 @@ describe('Vuex store actions', () => {
 			expect(store.fetchEnvelopes).toHaveBeenCalledTimes(2)
 			expect(store.fetchEnvelopes).toHaveBeenNthCalledWith(1, {
 				mailboxId: 11,
+				query: undefined,
+				workClass: 'maintenance',
 			})
 			expect(store.fetchEnvelopes).toHaveBeenNthCalledWith(2, {
 				mailboxId: 21,
+				query: undefined,
+				workClass: 'maintenance',
 			})
 
 			expect(store.syncEnvelopes).toHaveBeenCalledTimes(2)
 			expect(store.syncEnvelopes).toHaveBeenNthCalledWith(1, {
 				mailboxId: 11,
+				query: undefined,
+				workClass: 'maintenance',
 			})
 			expect(store.syncEnvelopes).toHaveBeenNthCalledWith(2, {
 				mailboxId: 21,
+				query: undefined,
+				workClass: 'maintenance',
 			})
 
 			// We can't detect new messages here
@@ -2401,17 +2409,23 @@ describe('Vuex store actions', () => {
 			expect(store.syncEnvelopes).toHaveBeenCalledTimes(4)
 			expect(store.syncEnvelopes).toHaveBeenNthCalledWith(1, {
 				mailboxId: 11,
+				query: undefined,
+				workClass: 'maintenance',
 			})
 			expect(store.syncEnvelopes).toHaveBeenNthCalledWith(2, {
 				mailboxId: 21,
+				query: undefined,
+				workClass: 'maintenance',
 			})
 			expect(store.syncEnvelopes).toHaveBeenNthCalledWith(3, {
 				mailboxId: UNIFIED_INBOX_ID,
 				query: 'is:pi-important',
+				workClass: 'maintenance',
 			})
 			expect(store.syncEnvelopes).toHaveBeenNthCalledWith(4, {
 				mailboxId: UNIFIED_INBOX_ID,
 				query: 'is:pi-other',
+				workClass: 'maintenance',
 			})
 			// Only the genuinely unseen message is news -- the one that came
 			// back already marked seen (read elsewhere before this sync) must
@@ -2960,10 +2974,12 @@ describe('Vuex store actions', () => {
 			expect(store.syncEnvelopes).toHaveBeenCalledWith({
 				mailboxId: 11,
 				query: '',
+				workClass: 'maintenance',
 			})
 			expect(store.syncEnvelopes).toHaveBeenCalledWith({
 				mailboxId: 11,
 				query: 'subject:foo',
+				workClass: 'maintenance',
 			})
 		})
 
@@ -2989,7 +3005,7 @@ describe('Vuex store actions', () => {
 			await store.syncWatchedMailboxes()
 
 			expect(store.syncEnvelopes).toHaveBeenCalledTimes(1)
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 911, query: '' })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 911, query: '', workClass: 'maintenance' })
 		})
 
 		it('wave 1b: does NOT coalesce when the unfiltered bucket is not loaded (no regression for that case)', async () => {
@@ -3015,8 +3031,8 @@ describe('Vuex store actions', () => {
 			await store.syncWatchedMailboxes()
 
 			expect(store.syncEnvelopes).toHaveBeenCalledTimes(2)
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 921, query: 'is:starred' })
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 921, query: 'not:starred' })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 921, query: 'is:starred', workClass: 'maintenance' })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 921, query: 'not:starred', workClass: 'maintenance' })
 		})
 
 		it('never independently syncs is:pi-important/is:pi-other on a real mailbox -- maybeStartPriorityInboxRefresh() already owns them', async () => {
@@ -3053,7 +3069,7 @@ describe('Vuex store actions', () => {
 			await store.syncWatchedMailboxes()
 
 			expect(store.syncEnvelopes).toHaveBeenCalledTimes(1)
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 922, query: 'is:starred' })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 922, query: 'is:starred', workClass: 'maintenance' })
 		})
 
 		it('lightweight tick: syncs only the unfiltered bucket and skips the priority refresh', async () => {
@@ -3091,6 +3107,7 @@ describe('Vuex store actions', () => {
 			expect(store.syncEnvelopes).toHaveBeenCalledWith({
 				mailboxId: 11,
 				query: '',
+				workClass: 'maintenance',
 			})
 			// The notification still fired (that's the whole point).
 			expect(NotificationService.showNewMessagesNotification).toHaveBeenCalledWith([newMessage])
@@ -3138,8 +3155,8 @@ describe('Vuex store actions', () => {
 
 			// The refresh fires while mailbox 21's sync is still pending.
 			await vi.waitFor(() => {
-				expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-important' })
-				expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-other' })
+				expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-important', workClass: 'maintenance' })
+				expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-other', workClass: 'maintenance' })
 			})
 			expect(resolveSlow).toBeDefined()
 
@@ -3184,10 +3201,10 @@ describe('Vuex store actions', () => {
 
 			await store.syncWatchedMailboxes()
 
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'not:starred is:pi-important' })
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'not:starred is:pi-other' })
-			expect(store.syncEnvelopes).not.toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-important' })
-			expect(store.syncEnvelopes).not.toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-other' })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'not:starred is:pi-important', workClass: 'maintenance' })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'not:starred is:pi-other', workClass: 'maintenance' })
+			expect(store.syncEnvelopes).not.toHaveBeenCalledWith(expect.objectContaining({ mailboxId: 'unified', query: 'is:pi-important' }))
+			expect(store.syncEnvelopes).not.toHaveBeenCalledWith(expect.objectContaining({ mailboxId: 'unified', query: 'is:pi-other' }))
 		})
 
 		it("also refreshes the priority inbox's Favorites section (is:starred), not just Important/Other", async () => {
@@ -3222,7 +3239,7 @@ describe('Vuex store actions', () => {
 
 			await store.syncWatchedMailboxes()
 
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:starred' })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:starred', workClass: 'maintenance' })
 		})
 
 		it('falls back to the bare priority queries when neither the bare nor compound keys are loaded yet', async () => {
@@ -3249,8 +3266,8 @@ describe('Vuex store actions', () => {
 
 			await store.syncWatchedMailboxes()
 
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-important' })
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-other' })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-important', workClass: 'maintenance' })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-other', workClass: 'maintenance' })
 		})
 
 		it('keeps refreshing an OPEN priority inbox when interaction priority activates mid-tick', async () => {
@@ -3286,8 +3303,8 @@ describe('Vuex store actions', () => {
 
 			await store.syncWatchedMailboxes()
 
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-important' })
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-other' })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-important', workClass: 'maintenance' })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-other', workClass: 'maintenance' })
 		})
 
 		it('still defers the refresh on mid-tick interaction when the priority inbox is NOT open', async () => {
@@ -3502,9 +3519,9 @@ describe('Vuex store actions', () => {
 			// Drafts (13) has neither specialRole 'inbox' nor syncInBackground --
 			// only the inbox and the explicitly-flagged mailbox are watched.
 			expect(store.syncEnvelopes).toHaveBeenCalledTimes(2)
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 11 })
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 13 })
-			expect(store.syncEnvelopes).not.toHaveBeenCalledWith({ mailboxId: 12 })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 11, query: undefined, workClass: 'maintenance' })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 13, query: undefined, workClass: 'maintenance' })
+			expect(store.syncEnvelopes).not.toHaveBeenCalledWith(expect.objectContaining({ mailboxId: 12 }))
 		})
 
 		it('skips a mailbox with a sync retry already pending, without holding back any other watched mailbox', async () => {
@@ -5973,6 +5990,65 @@ describe('Vuex store actions', () => {
 	})
 
 	describe('toggleEnvelopeSeen thread-wide unread correction', () => {
+		it('updates a selected batch synchronously and sends one request', async () => {
+			const first = {
+				databaseId: 38,
+				accountId: 13,
+				mailboxId: 11,
+				threadRootId: 'thread-first',
+				flags: { seen: false, hasUnseenInThread: true },
+			}
+			const second = {
+				databaseId: 39,
+				accountId: 13,
+				mailboxId: 11,
+				threadRootId: 'thread-second',
+				flags: { seen: false, hasUnseenInThread: true },
+			}
+			store.envelopes[first.databaseId] = first
+			store.envelopes[second.databaseId] = second
+			let resolveRequest
+			MessageService.setEnvelopeFlagsBatch.mockReturnValue(new Promise((resolve) => {
+				resolveRequest = resolve
+			}))
+
+			const pending = store.setEnvelopesSeen({
+				envelopes: [first, second],
+				seen: true,
+			})
+
+			expect(first.flags).toMatchObject({ seen: true, hasUnseenInThread: false })
+			expect(second.flags).toMatchObject({ seen: true, hasUnseenInThread: false })
+			expect(MessageService.setEnvelopeFlagsBatch).toHaveBeenCalledWith([38, 39], { seen: true })
+
+			resolveRequest({
+				messages: {
+					38: { hasUnseenInThread: false },
+					39: { hasUnseenInThread: true },
+				},
+			})
+			await pending
+			expect(first.flags.hasUnseenInThread).toBe(false)
+			expect(second.flags.hasUnseenInThread).toBe(true)
+		})
+
+		it('keeps the optimistic batch when an ambiguous failure is queued for replay', async () => {
+			const envelope = {
+				databaseId: 37,
+				accountId: 13,
+				mailboxId: 11,
+				flags: { seen: false, hasUnseenInThread: true },
+			}
+			const error = new Error('offline')
+			error.mailMutationQueued = true
+			MessageService.setEnvelopeFlagsBatch.mockRejectedValue(error)
+
+			await store.setEnvelopesSeen({ envelopes: [envelope], seen: true })
+
+			expect(envelope.flags).toMatchObject({ seen: true, hasUnseenInThread: false })
+			expect(MessageService.fetchEnvelope).not.toHaveBeenCalled()
+		})
+
 		it('clears every selected row thread aggregate immediately, before any request resolves', () => {
 			const first = {
 				databaseId: 40,

@@ -13,6 +13,7 @@ use ChristophWurst\Nextcloud\Testing\TestCase;
 use Exception;
 use Horde_Imap_Client_Exception;
 use OCA\Mail\Exception\ClientException;
+use OCA\Mail\Exception\ImapCapacityException;
 use OCA\Mail\Exception\NotImplemented;
 use OCA\Mail\Exception\ServiceException;
 use OCA\Mail\Http\Middleware\ErrorMiddleware;
@@ -205,5 +206,31 @@ class ErrorMiddlewareTest extends TestCase {
 			$temporary ? Http::STATUS_SERVICE_UNAVAILABLE : Http::STATUS_INTERNAL_SERVER_ERROR,
 			$response->getStatus()
 		);
+	}
+
+	public function testReturnsRetryAfterForImapCapacity(): void {
+		$capacity = new ImapCapacityException(
+			'IMAP account concurrency limit reached',
+			Horde_Imap_Client_Exception::SERVER_CONNECT,
+		);
+		$exception = new ServiceException('Could not fetch message', 0, $capacity);
+		$request = $this->createStub(IRequest::class);
+		$controller = new class($request) extends Controller {
+			public function __construct(IRequest $request) {
+				parent::__construct('myapp', $request);
+			}
+
+			#[TrapError]
+			public function foo() {
+			}
+		};
+		$this->logger->expects($this->once())
+			->method('warning')
+			->with($exception->getMessage(), ['exception' => $exception]);
+
+		$response = $this->middleware->afterException($controller, 'foo', $exception);
+
+		self::assertSame(Http::STATUS_TOO_MANY_REQUESTS, $response->getStatus());
+		self::assertSame('1', $response->getHeaders()['Retry-After']);
 	}
 }

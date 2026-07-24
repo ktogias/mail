@@ -5,6 +5,7 @@
 
 import Axios from '@nextcloud/axios'
 import { generateUrl } from '@nextcloud/router'
+import { WorkClass } from './RequestCoordinator.js'
 
 export async function saveAttachmentToFiles(id, attachmentId, directory) {
 	const url = generateUrl(
@@ -17,6 +18,8 @@ export async function saveAttachmentToFiles(id, attachmentId, directory) {
 
 	return await Axios.post(url, {
 		targetPath: directory,
+	}, {
+		mailWorkClass: WorkClass.ACTIVE_CONTENT,
 	})
 }
 
@@ -26,7 +29,9 @@ export async function saveAttachmentsToFiles(id, directory) {
 }
 
 export function downloadAttachment(url) {
-	return Axios.get(url).then((res) => res.data)
+	return Axios.get(url, {
+		mailWorkClass: WorkClass.ACTIVE_CONTENT,
+	}).then((res) => res.data)
 }
 
 export function uploadLocalAttachment(file, accountId, progress, controller) {

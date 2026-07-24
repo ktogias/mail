@@ -31,10 +31,13 @@ describe('service/MessageService test suite', () => {
 		)
 
 		expect(axios.get).toHaveBeenCalledWith('/generated-url', {
+			mailAccountId: 13,
+			mailWorkClass: 'active-content',
 			params: {
 				mailboxId: 21,
 				v: 'abcdef123',
 			},
+			signal: undefined,
 		})
 	})
 
@@ -48,9 +51,12 @@ describe('service/MessageService test suite', () => {
 		)
 
 		expect(axios.get).toHaveBeenCalledWith('/generated-url', {
+			mailAccountId: 13,
+			mailWorkClass: 'active-content',
 			params: {
 				mailboxId: 21,
 			},
+			signal: undefined,
 		})
 	})
 
@@ -72,6 +78,8 @@ describe('service/MessageService test suite', () => {
 		)
 
 		expect(axios.get).toHaveBeenCalledWith('/generated-url', {
+			mailAccountId: 13,
+			mailWorkClass: 'active-content',
 			params: {
 				mailboxId: 21,
 				filter: 'subject:needle',
@@ -80,6 +88,7 @@ describe('service/MessageService test suite', () => {
 				view: 'threaded',
 				prioritySplit: true,
 			},
+			signal: undefined,
 		})
 	})
 
@@ -90,6 +99,8 @@ describe('service/MessageService test suite', () => {
 		await MessageService.fetchEnvelopes(13, 21, 'subject:needle', 1700000000, 20, 'newest', 'threaded', undefined, undefined, false, 4321)
 
 		expect(axios.get).toHaveBeenCalledWith('/generated-url', {
+			mailAccountId: 13,
+			mailWorkClass: 'active-content',
 			params: {
 				mailboxId: 21,
 				filter: 'subject:needle',
@@ -99,6 +110,7 @@ describe('service/MessageService test suite', () => {
 				sort: 'newest',
 				view: 'threaded',
 			},
+			signal: undefined,
 		})
 	})
 
@@ -285,6 +297,29 @@ describe('service/MessageService test suite', () => {
 				{ hasUnseenInThread: true },
 				{ hasUnseenInThread: false },
 			])
+		})
+
+		it('sends one durable operation for a selected batch', async () => {
+			generateUrl.mockReturnValue('/flags-batch')
+			axios.put.mockResolvedValue({
+				data: {
+					messages: {
+						1: { hasUnseenInThread: false },
+						2: { hasUnseenInThread: true },
+					},
+				},
+			})
+
+			await MessageService.setEnvelopeFlagsBatch([1, 2], { seen: true })
+
+			expect(axios.put).toHaveBeenCalledTimes(1)
+			expect(axios.put).toHaveBeenCalledWith('/flags-batch', {
+				ids: [1, 2],
+				flags: { seen: true },
+				operationId: expect.any(String),
+			}, {
+				mailWorkClass: 'quick-mutation',
+			})
 		})
 	})
 })

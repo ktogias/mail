@@ -28,6 +28,7 @@ use OCA\Mail\Folder;
 use OCA\Mail\IMAP\FolderMapper;
 use OCA\Mail\IMAP\IMAPClientFactory;
 use OCA\Mail\IMAP\ImapFlag;
+use OCA\Mail\IMAP\ImapWorkClass;
 use OCA\Mail\IMAP\MailboxSync;
 use OCA\Mail\IMAP\MessageMapper as ImapMessageMapper;
 use OCA\Mail\Service\MailManager;
@@ -122,6 +123,22 @@ class MailManagerTest extends TestCase {
 		$result = $this->manager->getMailboxes($account);
 
 		$this->assertSame($mailboxes, $result);
+	}
+
+	public function testExplicitMailboxRefreshCarriesWorkClassToImapSync(): void {
+		$account = $this->createStub(Account::class);
+		$this->mailboxSync->expects($this->once())
+			->method('sync')
+			->with(
+				$account,
+				$this->logger,
+				true,
+				null,
+				ImapWorkClass::EXPLICIT_HEAVY,
+			);
+		$this->mailboxMapper->method('findAll')->willReturn([]);
+
+		$this->manager->getMailboxes($account, true, ImapWorkClass::EXPLICIT_HEAVY);
 	}
 
 	public function testCreateFolder() {
@@ -594,7 +611,7 @@ class MailManagerTest extends TestCase {
 		$message->setUid(123);
 		$this->imapClientFactory->expects($this->once())
 			->method('getClient')
-			->with($account, true, false, true)
+			->with($account, true, false, false, ImapWorkClass::ACTIVE_CONTENT)
 			->willReturn($client);
 		$this->imapMessageMapper->expects($this->once())
 			->method('getAttachments')
@@ -629,7 +646,7 @@ class MailManagerTest extends TestCase {
 
 		$this->imapClientFactory->expects(self::once())
 			->method('getClient')
-			->with($account, true, false, true)
+			->with($account, true, false, false, ImapWorkClass::ACTIVE_CONTENT)
 			->willReturn($client);
 		$this->imapMessageMapper->expects(self::once())
 			->method('getAttachment')

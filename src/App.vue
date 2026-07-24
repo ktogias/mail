@@ -15,7 +15,40 @@ import MailboxLockedError from './errors/MailboxLockedError.js'
 import { matchError } from './errors/match.js'
 import initAfterAppCreation from './init.js'
 import logger from './logger.js'
+import { probeMailHealth } from './service/MailHealthService.js'
+import { replayQueuedMutations } from './service/MessageService.js'
+import { subscribePendingMutations } from './service/MutationOutbox.js'
+import {
+	broadcastMailEvent,
+	onMailBroadcast,
+	requestCoordinator,
+	runCrossTabExclusive,
+	WorkClass,
+} from './service/RequestCoordinator.js'
 import useMainStore from './store/mainStore.js'
+
+export function shouldRetryConnectivityRecovery(error, online = navigator.onLine !== false) {
+	const status = error?.response?.status
+	return online && !(
+		status >= 400
+		&& status < 500
+		&& ![408, 409, 425, 429].includes(status)
+	)
+}
+
+export function connectivityRecoveryDelay(error, attempt, minimumDelay = 0, random = Math.random(), now = Date.now()) {
+	const retryAfter = error?.response?.headers?.['retry-after']
+	const retryAfterSeconds = Number.parseInt(retryAfter, 10)
+	const retryAfterDate = Date.parse(retryAfter)
+	const serverDelay = Number.isFinite(retryAfterSeconds)
+		? retryAfterSeconds * 1_000
+		: (Number.isFinite(retryAfterDate) ? Math.max(retryAfterDate - now, 0) : 0)
+	const exponentialCap = Math.min(1_000 * (2 ** attempt), 60_000)
+	// Equal jitter prevents every returning tab/device retrying on the same
+	// boundary while guaranteeing some minimum recovery pace.
+	const jitteredDelay = (exponentialCap / 2) + (random * exponentialCap / 2)
+	return Math.max(minimumDelay, serverDelay, jitteredDelay)
+}
 
 export default {
 	name: 'App',
@@ -24,6 +57,8 @@ export default {
 		...mapStores(useMainStore),
 		...mapState(useMainStore, [
 			'isExpiredSession',
+			'networkState',
+			'pendingMutationCount',
 		]),
 
 		hasMailAccounts() {
@@ -45,6 +80,33 @@ export default {
 
 	async mounted() {
 		initAfterAppCreation()
+		this.connectivityRecoveryAttempt = 0
+		this.unsubscribeRequestCoordinator = requestCoordinator.subscribe(({ networkState }) => {
+			this.mainStore.setNetworkStateMutation(networkState)
+			this.renderNetworkStatus()
+			if (
+				networkState === 'degraded'
+				&& navigator.onLine !== false
+				&& this.connectivityRecoveryPromise === undefined
+				&& this.connectivityRecoveryTimeout === undefined
+			) {
+				this.scheduleConnectivityRecovery()
+			}
+		})
+		this.unsubscribePendingMutations = subscribePendingMutations((count) => {
+			this.mainStore.setPendingMutationCountMutation(count)
+			this.renderNetworkStatus()
+			if (
+				count > 0
+				&& navigator.onLine !== false
+				&& this.networkState !== 'recovering'
+				&& this.connectivityRecoveryTimeout === undefined
+			) {
+				this.scheduleConnectivityRecovery(undefined, 1_000)
+			}
+		})
+		this.unsubscribeMailBroadcast = onMailBroadcast(this.onMailBroadcast)
+		window.addEventListener('online', this.onNetworkOnline)
 		// Redirect to setup page if no accounts are configured
 		if (!this.hasMailAccounts) {
 			this.$router.replace({
@@ -56,14 +118,23 @@ export default {
 		await this.mainStore.fetchCurrentUserPrincipal()
 		await this.mainStore.loadCollections()
 		this.mainStore.hasCurrentUserPrincipalAndCollectionsMutation(true)
+		if (navigator.onLine !== false) {
+			this.recoverConnectivity()
+		}
 	},
 
 	beforeDestroy() {
 		clearTimeout(this.watchedMailboxSyncTimeout)
+		clearTimeout(this.connectivityRecoveryTimeout)
 		window.removeEventListener('mousemove', this.onUserActivity)
 		window.removeEventListener('keydown', this.onUserActivity)
 		window.removeEventListener('touchstart', this.onUserActivity)
 		document.removeEventListener('visibilitychange', this.onVisibilityChange)
+		window.removeEventListener('online', this.onNetworkOnline)
+		this.unsubscribeRequestCoordinator?.()
+		this.unsubscribePendingMutations?.()
+		this.unsubscribeMailBroadcast?.()
+		this.networkStatusElement?.remove()
 	},
 
 	methods: {
@@ -184,7 +255,16 @@ export default {
 
 			const tick = () => {
 				const lightweight = attentionTier() === 'hidden'
-				this.mainStore.syncWatchedMailboxes({ lightweight })
+				runCrossTabExclusive('watched-mailboxes', () => {
+					return this.mainStore.syncWatchedMailboxes({ lightweight })
+						.then((result) => {
+							broadcastMailEvent({
+								type: 'watched-sync-complete',
+								at: Date.now(),
+							})
+							return result
+						})
+				})
 					.then(() => {
 						logger.debug(`Watched mailboxes sync'ed in background (${lightweight ? 'lightweight' : 'full'} tick)`)
 					})
@@ -225,11 +305,20 @@ export default {
 			}
 			this.onVisibilityChange = () => {
 				if (document.visibilityState === 'visible') {
+					const returnedAfterLongAbsence = this.hiddenAt !== undefined
+						&& Date.now() - this.hiddenAt >= 60_000
+					this.hiddenAt = undefined
 					this.lastActivity = Date.now()
 					this.mainStore.resetNotificationEngagementMutation()
-					// Full tick right away: list, badges and the open
-					// thread must be consistent the moment the user looks.
-					this.rescheduleTickNow(tick)
+					if (this.networkState === 'healthy' && !returnedAfterLongAbsence) {
+						// Full tick right away: list, badges and the open
+						// thread must be consistent the moment the user looks.
+						this.rescheduleTickNow(tick)
+					} else {
+						this.recoverConnectivity().finally(() => this.rescheduleTickNow(tick))
+					}
+				} else {
+					this.hiddenAt = Date.now()
 				}
 			}
 			window.addEventListener('mousemove', this.onUserActivity, { passive: true })
@@ -242,6 +331,134 @@ export default {
 			clearTimeout(this.watchedMailboxSyncTimeout)
 			this.watchedMailboxSyncTimeout = setTimeout(tick, 0)
 		},
+
+		onNetworkOnline() {
+			// `online` is only a hint. The state becomes healthy only after
+			// the authenticated, IMAP-free Mail probe succeeds.
+			this.connectivityRecoveryAttempt = 0
+			this.recoverConnectivity()
+		},
+
+		async recoverConnectivity() {
+			if (this.connectivityRecoveryPromise !== undefined) {
+				return this.connectivityRecoveryPromise
+			}
+			clearTimeout(this.connectivityRecoveryTimeout)
+			this.connectivityRecoveryTimeout = undefined
+			requestCoordinator.setNetworkState('recovering')
+			this.connectivityRecoveryPromise = (async () => {
+				await probeMailHealth()
+				await runCrossTabExclusive(
+					'mutation-outbox',
+					() => replayQueuedMutations(),
+					true,
+				)
+
+				const mailboxId = this.mainStore.currentViewMailboxId
+				if (mailboxId !== undefined && this.mainStore.getMailbox(mailboxId)) {
+					await this.mainStore.syncEnvelopes({
+						mailboxId,
+						workClass: WorkClass.VISIBLE_REVALIDATION,
+					})
+				}
+				requestCoordinator.setNetworkState('healthy')
+				this.connectivityRecoveryAttempt = 0
+				broadcastMailEvent({
+					type: 'connectivity-recovered',
+					at: Date.now(),
+				})
+			})().catch((error) => {
+				requestCoordinator.reportFailure(error)
+				logger.info('Mail connectivity recovery is still pending', { error })
+				this.scheduleConnectivityRecovery(error)
+			}).finally(() => {
+				this.connectivityRecoveryPromise = undefined
+			})
+			return this.connectivityRecoveryPromise
+		},
+
+		scheduleConnectivityRecovery(error, minimumDelay = 0) {
+			clearTimeout(this.connectivityRecoveryTimeout)
+			this.connectivityRecoveryTimeout = undefined
+			if (!shouldRetryConnectivityRecovery(error)) {
+				return
+			}
+
+			const delay = connectivityRecoveryDelay(
+				error,
+				this.connectivityRecoveryAttempt,
+				minimumDelay,
+			)
+			this.connectivityRecoveryAttempt++
+			this.connectivityRecoveryTimeout = setTimeout(() => {
+				this.connectivityRecoveryTimeout = undefined
+				this.recoverConnectivity()
+			}, delay)
+		},
+
+		onMailBroadcast(event) {
+			if (
+				event?.type !== 'watched-sync-complete'
+				|| document.visibilityState !== 'visible'
+				|| this.mainStore.isInteractionPriorityActive()
+			) {
+				return
+			}
+			const mailboxId = this.mainStore.currentViewMailboxId
+			if (mailboxId === undefined || !this.mainStore.getMailbox(mailboxId)) {
+				return
+			}
+			// The other tab already paid for IMAP. This active-view diff rides
+			// the server freshness gate and updates this tab's independent store.
+			this.mainStore.syncEnvelopes({
+				mailboxId,
+				workClass: WorkClass.VISIBLE_REVALIDATION,
+			}).catch((error) => {
+				logger.debug('Cross-tab active view revalidation failed', { error })
+			})
+		},
+
+		renderNetworkStatus() {
+			const shouldShow = this.networkState !== 'healthy' || this.pendingMutationCount > 0
+			if (!shouldShow) {
+				this.networkStatusElement?.remove()
+				this.networkStatusElement = undefined
+				return
+			}
+			if (this.networkStatusElement === undefined) {
+				this.networkStatusElement = document.createElement('div')
+				this.networkStatusElement.className = 'mail-network-status'
+				this.networkStatusElement.setAttribute('role', 'status')
+				this.networkStatusElement.setAttribute('aria-live', 'polite')
+				document.body.appendChild(this.networkStatusElement)
+			}
+			const stateMessage = {
+				offline: t('mail', 'You are offline. Mail changes will be sent when the connection returns.'),
+				degraded: t('mail', 'The connection is unstable. Mail actions will retry automatically.'),
+				recovering: t('mail', 'Connection restored. Finishing pending mail changes…'),
+				healthy: '',
+			}[this.networkState]
+			const pending = this.pendingMutationCount > 0
+				? t('mail', 'Pending mail changes: {count}', { count: this.pendingMutationCount })
+				: ''
+			this.networkStatusElement.textContent = [stateMessage, pending].filter(Boolean).join(' ')
+		},
 	},
 }
 </script>
+
+<style lang="scss">
+.mail-network-status {
+	position: fixed;
+	z-index: 2000;
+	inset-inline-end: calc(2 * var(--default-grid-baseline));
+	bottom: calc(2 * var(--default-grid-baseline));
+	max-width: calc(80 * var(--default-grid-baseline));
+	padding: calc(2 * var(--default-grid-baseline));
+	border: 1px solid var(--color-border);
+	border-radius: var(--border-radius-large);
+	background: var(--color-main-background);
+	box-shadow: 0 0 calc(2 * var(--default-grid-baseline)) var(--color-box-shadow);
+	color: var(--color-main-text);
+}
+</style>

@@ -93,7 +93,13 @@ class IMAPClientFactory {
 	 * @return Horde_Imap_Client_Socket
 	 * @throws ServiceException
 	 */
-	public function getClient(Account $account, bool $useCache = true, bool $allowReservedSlot = false, bool $waitForSlot = false): Horde_Imap_Client_Socket {
+	public function getClient(
+		Account $account,
+		bool $useCache = true,
+		bool $allowReservedSlot = false,
+		bool $waitForSlot = false,
+		?string $workClass = null,
+	): Horde_Imap_Client_Socket {
 		$this->eventDispatcher->dispatchTyped(
 			new BeforeImapClientCreated($account)
 		);
@@ -164,7 +170,13 @@ class IMAPClientFactory {
 		);
 		$concurrencyCache = $this->cacheFactory->createDistributed('mail_imap_concurrency');
 		if ($accountConcurrency > 0 && $concurrencyCache instanceof IMemcache) {
-			$waitMilliseconds = $waitForSlot
+			$workClass = ImapWorkClass::normalize(
+				$workClass,
+				$allowReservedSlot
+					? ImapWorkClass::QUICK_MUTATION
+					: ($waitForSlot ? ImapWorkClass::ACTIVE_CONTENT : ImapWorkClass::MAINTENANCE),
+			);
+			$waitMilliseconds = ($waitForSlot || ImapWorkClass::isForeground($workClass) || $workClass === ImapWorkClass::QUICK_MUTATION)
 				? min(
 					max(
 						$this->config->getSystemValueInt(
@@ -181,7 +193,7 @@ class IMAPClientFactory {
 				$rateLimiterHash,
 				min($accountConcurrency, self::MAX_ACCOUNT_CONCURRENCY),
 				self::RESERVED_INTERACTIVE_CONNECTIONS,
-			), $allowReservedSlot, $waitMilliseconds);
+			), $allowReservedSlot, $waitMilliseconds, $workClass);
 		}
 
 		// Lets _login() force a real token refresh and retry once, itself,

@@ -76,6 +76,11 @@ return [
 			'verb' => 'GET'
 		],
 		[
+			'name' => 'health#index',
+			'url' => '/api/health',
+			'verb' => 'GET',
+		],
+		[
 			'name' => 'accounts#draft',
 			'url' => '/api/accounts/{id}/draft',
 			'verb' => 'POST'
@@ -244,6 +249,11 @@ return [
 			'name' => 'messages#getThread',
 			'url' => '/api/messages/{id}/thread',
 			'verb' => 'GET'
+		],
+		[
+			'name' => 'messages#setFlagsBatch',
+			'url' => '/api/messages/flags',
+			'verb' => 'PUT'
 		],
 		[
 			'name' => 'messages#setFlags',

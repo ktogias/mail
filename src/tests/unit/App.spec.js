@@ -5,7 +5,10 @@
 
 import { createLocalVue, shallowMount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import App from '../../App.vue'
+import App, {
+	connectivityRecoveryDelay,
+	shouldRetryConnectivityRecovery,
+} from '../../App.vue'
 import Nextcloud from '../../mixins/Nextcloud.js'
 import useMainStore from '../../store/mainStore.js'
 
@@ -163,6 +166,22 @@ describe('App', () => {
 			expect(store.syncWatchedMailboxes).toHaveBeenCalledWith({ lightweight: false })
 			expect(store.unengagedNotificationBursts).toBe(0)
 		})
+
+		it('probes and replays before syncing after a long hidden interval', async () => {
+			vi.useFakeTimers()
+			store.syncWatchedMailboxes = vi.fn().mockResolvedValue()
+			view.vm.recoverConnectivity = vi.fn().mockResolvedValue()
+			view.vm.startWatchedMailboxSync()
+			view.vm.hiddenAt = Date.now() - 60_001
+
+			setVisibility('visible')
+			document.dispatchEvent(new Event('visibilitychange'))
+			await Promise.resolve()
+			vi.advanceTimersByTime(1)
+
+			expect(view.vm.recoverConnectivity).toHaveBeenCalledTimes(1)
+			expect(store.syncWatchedMailboxes).toHaveBeenCalledTimes(1)
+		})
 	})
 
 	it('doubles the tick period when the server reports itself busy', async () => {
@@ -186,5 +205,25 @@ describe('App', () => {
 		expect(store.syncWatchedMailboxes).toHaveBeenCalledTimes(1)
 
 		vi.useRealTimers()
+	})
+
+	it('honors Retry-After when calculating staged recovery backoff', () => {
+		const delay = connectivityRecoveryDelay({
+			response: {
+				status: 429,
+				headers: { 'retry-after': '3' },
+			},
+		}, 0, 0, 0)
+
+		expect(delay).toBe(3_000)
+	})
+
+	it('does not retry a definitive authentication failure', () => {
+		expect(shouldRetryConnectivityRecovery({
+			response: {
+				status: 401,
+				headers: {},
+			},
+		}, true)).toBe(false)
 	})
 })

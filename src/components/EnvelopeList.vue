@@ -449,19 +449,10 @@ export default {
 
 		markSelectedRead() {
 			const envelopes = this.selectedEnvelopes
-			Promise.all(envelopes.map((envelope) => {
-				return this.mainStore.toggleEnvelopeSeen({
-					envelope,
-					seen: true,
-					// A list row renders its thread aggregate, not just
-					// envelope.flags.seen. Flip both optimistically so every
-					// selected row changes in the same Vue render instead of
-					// one at a time as serialized IMAP writes finish. Each
-					// action still corrects or rolls back its own row from
-					// the authoritative response.
-					optimisticHasUnseenInThread: false,
-				})
-			})).catch((error) => {
+			this.mainStore.setEnvelopesSeen({
+				envelopes,
+				seen: true,
+			}).catch((error) => {
 				logger.error('could not mark selected messages as read', { error })
 				showError(t('mail', 'Could not update read status for the selected messages'))
 			})
@@ -470,12 +461,10 @@ export default {
 
 		markSelectedUnread() {
 			const envelopes = this.selectedEnvelopes
-			Promise.all(envelopes.map((envelope) => {
-				return this.mainStore.toggleEnvelopeSeen({
-					envelope,
-					seen: false,
-				})
-			})).catch((error) => {
+			this.mainStore.setEnvelopesSeen({
+				envelopes,
+				seen: false,
+			}).catch((error) => {
 				logger.error('could not mark selected messages as unread', { error })
 				showError(t('mail', 'Could not update read status for the selected messages'))
 			})

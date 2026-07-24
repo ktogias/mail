@@ -41,6 +41,7 @@ import IconLoading from '@nextcloud/vue/components/NcLoadingIcon'
 import IconAdd from 'vue-material-design-icons/Plus.vue'
 import IconRefresh from 'vue-material-design-icons/Refresh.vue'
 import logger from '../logger.js'
+import { WorkClass } from '../service/RequestCoordinator.js'
 import useMainStore from '../store/mainStore.js'
 
 export default {
@@ -85,9 +86,13 @@ export default {
 				return
 			}
 			this.refreshing = true
+			this.mainStore.setInteractionPriorityMutation()
 			try {
-				await this.mainStore.syncEnvelopes({ mailboxId: this.currentMailbox.databaseId })
-				await this.mainStore.syncMailboxesForAccount(this.account)
+				await this.mainStore.syncEnvelopes({
+					mailboxId: this.currentMailbox.databaseId,
+					workClass: WorkClass.EXPLICIT_HEAVY,
+				})
+				await this.mainStore.syncMailboxesForAccount(this.account, WorkClass.EXPLICIT_HEAVY)
 				logger.debug('Current folder is sync\'ing ')
 			} catch (error) {
 				logger.error('could not sync current folder', { error })

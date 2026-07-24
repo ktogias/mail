@@ -5,6 +5,7 @@
 import axios from '@nextcloud/axios'
 import { generateUrl } from '@nextcloud/router'
 import { convertAxiosError } from '../errors/convert.js'
+import { WorkClass } from './RequestCoordinator.js'
 
 export async function deleteThread(id) {
 	const url = generateUrl('/apps/mail/api/thread/{id}', {
@@ -12,7 +13,9 @@ export async function deleteThread(id) {
 	})
 
 	try {
-		return await axios.delete(url)
+		return await axios.delete(url, {
+			mailWorkClass: WorkClass.QUICK_MUTATION,
+		})
 	} catch (e) {
 		throw convertAxiosError(e)
 	}
@@ -24,7 +27,9 @@ export async function moveThread(id, destMailboxId) {
 	})
 
 	try {
-		return await axios.post(url, { destMailboxId })
+		return await axios.post(url, { destMailboxId }, {
+			mailWorkClass: WorkClass.QUICK_MUTATION,
+		})
 	} catch (e) {
 		throw convertAxiosError(e)
 	}
@@ -36,7 +41,9 @@ export async function snoozeThread(id, unixTimestamp, destMailboxId) {
 	})
 
 	try {
-		return await axios.post(url, { unixTimestamp, destMailboxId })
+		return await axios.post(url, { unixTimestamp, destMailboxId }, {
+			mailWorkClass: WorkClass.QUICK_MUTATION,
+		})
 	} catch (e) {
 		throw convertAxiosError(e)
 	}
@@ -48,7 +55,9 @@ export async function unSnoozeThread(id) {
 	})
 
 	try {
-		return await axios.post(url, {})
+		return await axios.post(url, {}, {
+			mailWorkClass: WorkClass.QUICK_MUTATION,
+		})
 	} catch (e) {
 		throw convertAxiosError(e)
 	}

@@ -66,14 +66,15 @@ class MailboxSync {
 	public function sync(Account $account,
 		LoggerInterface $logger,
 		bool $force = false,
-		?Horde_Imap_Client_Socket $client = null): void {
+		?Horde_Imap_Client_Socket $client = null,
+		string $workClass = ImapWorkClass::MAINTENANCE): void {
 		if (!$force && $account->getMailAccount()->getLastMailboxSync() >= ($this->timeFactory->getTime() - 7200)) {
 			$logger->debug('account is up to date, skipping mailbox sync');
 			return;
 		}
 
 		if ($client === null) {
-			$client = $this->imapClientFactory->getClient($account);
+			$client = $this->imapClientFactory->getClient($account, workClass: $workClass);
 			$ownClient = true;
 		} else {
 			$ownClient = false;

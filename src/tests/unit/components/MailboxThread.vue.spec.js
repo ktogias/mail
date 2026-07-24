@@ -8,6 +8,7 @@ import { createPinia, setActivePinia } from 'pinia'
 import MailboxThread from '../../../components/MailboxThread.vue'
 import LoadMoreSentinelMixin from '../../../mixins/LoadMoreSentinelMixin.js'
 import Nextcloud from '../../../mixins/Nextcloud.js'
+import { WorkClass } from '../../../service/RequestCoordinator.js'
 import { PRIORITY_INBOX_ID, UNIFIED_INBOX_ID } from '../../../store/constants.js'
 import useMainStore from '../../../store/mainStore.js'
 import { priorityImportantQuery, priorityOtherQuery } from '../../../util/priorityInbox.js'
@@ -194,7 +195,10 @@ describe('MailboxThread', () => {
 			// Past the min-visible window, but the sync is still pending, so
 			// the spinner must NOT have retracted (the whole point of the fix).
 			await vi.advanceTimersByTimeAsync(1500)
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: wrapper.vm.mailbox.databaseId })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({
+				mailboxId: wrapper.vm.mailbox.databaseId,
+				workClass: WorkClass.EXPLICIT_HEAVY,
+			})
 			expect(wrapper.vm.pullToRefreshSpinning).toBe(true)
 
 			// Sync resolves -> the whole refresh settles and the spinner clears.

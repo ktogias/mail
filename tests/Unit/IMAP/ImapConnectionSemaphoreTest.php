@@ -11,6 +11,7 @@ namespace OCA\Mail\Tests\Unit\IMAP;
 
 use ChristophWurst\Nextcloud\Testing\TestCase;
 use OCA\Mail\IMAP\ImapConnectionSemaphore;
+use OCA\Mail\IMAP\ImapWorkClass;
 use OCP\IMemcache;
 use OCP\IMemcacheTTL;
 
@@ -256,5 +257,30 @@ class ImapConnectionSemaphoreTest extends TestCase {
 		self::assertFalse($waiting->acquire(false, 120));
 		self::assertSame([50_000, 50_000, 20_000], $sleeps);
 		self::assertTrue($cache->hasKey('account_slot_0'));
+	}
+
+	public function testForegroundWaiterStopsBackgroundFromBorrowingSecondCommonSlot(): void {
+		$cache = new SemaphoreCache();
+		$firstBackground = new ImapConnectionSemaphore($cache, 'account', 3, 1);
+		$secondBackground = new ImapConnectionSemaphore($cache, 'account', 3, 1);
+		self::assertTrue($firstBackground->acquireFor(ImapWorkClass::MAINTENANCE));
+		self::assertTrue($secondBackground->acquireFor(ImapWorkClass::MAINTENANCE));
+
+		$foreground = new ImapConnectionSemaphore($cache, 'account', 3, 1);
+		self::assertFalse($foreground->acquireFor(ImapWorkClass::ACTIVE_CONTENT));
+		$secondBackground->release();
+
+		$newBackground = new ImapConnectionSemaphore($cache, 'account', 3, 1);
+		self::assertFalse($newBackground->acquireFor(ImapWorkClass::MAINTENANCE));
+		self::assertTrue($foreground->acquireFor(ImapWorkClass::ACTIVE_CONTENT));
+		self::assertTrue($cache->hasKey('account_slot_1'));
+	}
+
+	public function testQuickMutationStillPrefersTheReservedSlot(): void {
+		$cache = new SemaphoreCache();
+		$mutation = new ImapConnectionSemaphore($cache, 'account', 3, 1);
+
+		self::assertTrue($mutation->acquireFor(ImapWorkClass::QUICK_MUTATION));
+		self::assertTrue($cache->hasKey('account_slot_2'));
 	}
 }

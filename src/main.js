@@ -13,6 +13,7 @@ import VueShortKey from 'vue-shortkey'
 import App from './App.vue'
 import Nextcloud from './mixins/Nextcloud.js'
 import router from './router.js'
+import { installRequestCoordinator } from './service/RequestCoordinator.js'
 
 import '@nextcloud/dialogs/style.css'
 import './directives/drag-and-drop/styles/drag-and-drop.scss'
@@ -30,6 +31,10 @@ Vue.use(VueShortKey, { prevent: ['input', 'div', 'textarea'] })
 Vue.use(vToolTip)
 
 registerDavProperty('nc:share-attributes', { nc: 'http://nextcloud.org/ns' })
+
+// Install before constructing Vue: child route components mount before App's
+// mounted hook and may start initial Mail API requests immediately.
+installRequestCoordinator()
 
 export default new Vue({
 	el: '#content',

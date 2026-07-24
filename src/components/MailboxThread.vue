@@ -257,6 +257,7 @@ import Thread from './Thread.vue'
 import { getScrollEventTarget, getScrollTop } from '../directives/infinite-scroll.js'
 import logger from '../logger.js'
 import LoadMoreSentinelMixin from '../mixins/LoadMoreSentinelMixin.js'
+import { WorkClass } from '../service/RequestCoordinator.js'
 import {
 	FOLLOW_UP_MAILBOX_ID,
 	PRIORITY_INBOX_ID,
@@ -679,8 +680,12 @@ export default {
 		// refresh mailbox metadata/counts. Awaiting BOTH is what makes the
 		// pull-to-refresh spinner reflect real completion.
 		async refreshCurrentView() {
-			await this.mainStore.syncEnvelopes({ mailboxId: this.mailbox.databaseId })
-			await this.mainStore.syncMailboxesForAccount(this.account)
+			this.mainStore.setInteractionPriorityMutation()
+			await this.mainStore.syncEnvelopes({
+				mailboxId: this.mailbox.databaseId,
+				workClass: WorkClass.EXPLICIT_HEAVY,
+			})
+			await this.mainStore.syncMailboxesForAccount(this.account, WorkClass.EXPLICIT_HEAVY)
 		},
 
 		getGroupedEnvelopes(envelopes, syncTimestamp) {

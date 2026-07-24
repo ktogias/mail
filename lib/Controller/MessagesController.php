@@ -26,9 +26,11 @@ use OCA\Mail\Http\AttachmentDownloadResponse;
 use OCA\Mail\Http\HtmlResponse;
 use OCA\Mail\Http\TrapError;
 use OCA\Mail\IMAP\IMAPClientFactory;
+use OCA\Mail\IMAP\ImapWorkClass;
 use OCA\Mail\Model\SmimeData;
 use OCA\Mail\Service\AccountService;
 use OCA\Mail\Service\AiIntegrations\AiIntegrationsService;
+use OCA\Mail\Service\ClientOperationService;
 use OCA\Mail\Service\DelegationService;
 use OCA\Mail\Service\ItineraryService;
 use OCA\Mail\Service\SmimeService;
@@ -93,6 +95,7 @@ class MessagesController extends Controller {
 		private AiIntegrationsService $aiIntegrationService,
 		private ICacheFactory $cacheFactory,
 		private DelegationService $delegationService,
+		private ?ClientOperationService $clientOperationService = null,
 	) {
 		parent::__construct($appName, $request);
 		$this->l10n = $l10n;
@@ -235,7 +238,7 @@ class MessagesController extends Controller {
 			// itself). The same message reloaded slowly (11-33s) 7 times
 			// within 7 minutes in one observed window, each a fresh,
 			// uncached round trip against a slow-responding account.
-			$client = $this->clientFactory->getClient($account);
+			$client = $this->clientFactory->getClient($account, workClass: ImapWorkClass::ACTIVE_CONTENT);
 			try {
 				$imapMessage = $this->mailManager->getImapMessage(
 					$client,
@@ -555,7 +558,7 @@ class MessagesController extends Controller {
 			return new JSONResponse([], Http::STATUS_FORBIDDEN);
 		}
 
-		$client = $this->clientFactory->getClient($account);
+		$client = $this->clientFactory->getClient($account, workClass: ImapWorkClass::ACTIVE_CONTENT);
 		try {
 			$response = new JSONResponse([
 				'source' => $this->mailManager->getSource(
@@ -600,7 +603,7 @@ class MessagesController extends Controller {
 			return new JSONResponse([], Http::STATUS_FORBIDDEN);
 		}
 
-		$client = $this->clientFactory->getClient($account);
+		$client = $this->clientFactory->getClient($account, workClass: ImapWorkClass::ACTIVE_CONTENT);
 		try {
 			$source = $this->mailManager->getSource(
 				$client,
@@ -670,7 +673,7 @@ class MessagesController extends Controller {
 			if (is_array($cached) && array_key_exists('body', $cached)) {
 				$html = $cached['body'];
 			} else {
-				$client = $this->clientFactory->getClient($account);
+				$client = $this->clientFactory->getClient($account, workClass: ImapWorkClass::ACTIVE_CONTENT);
 				try {
 					$imapMessage = $this->mailManager->getImapMessage(
 						$client,
@@ -914,7 +917,7 @@ class MessagesController extends Controller {
 	 * @throws ServiceException
 	 */
 	#[TrapError]
-	public function setFlags(int $id, array $flags): JSONResponse {
+	public function setFlags(int $id, array $flags, ?string $operationId = null): JSONResponse {
 		if ($this->userId === null) {
 			return new JSONResponse([], Http::STATUS_UNAUTHORIZED);
 		}
@@ -927,25 +930,138 @@ class MessagesController extends Controller {
 			return new JSONResponse([], Http::STATUS_FORBIDDEN);
 		}
 
-		$flagChanges = [];
-		foreach ($flags as $flag => $value) {
-			$value = filter_var($value, FILTER_VALIDATE_BOOLEAN);
-			$this->mailManager->flagMessage($account, $mailbox->getName(), $message->getUid(), $flag, $value);
-			$flagChanges[] = "$flag=" . ($value ? 'true' : 'false');
-		}
-		$flagsSummary = implode(', ', $flagChanges);
-		$this->delegationService->logDelegatedAction($this->userId, $effectiveUserId, "$this->userId updated flags on message <$id> with [$flagsSummary] on behalf of $effectiveUserId");
+		return $this->runIdempotentFlagOperation(
+			$operationId,
+			['ids' => [$id], 'flags' => $flags],
+			function () use ($account, $mailbox, $message, $flags, $effectiveUserId, $id): array {
+				$flagChanges = [];
+				foreach ($flags as $flag => $value) {
+					$value = filter_var($value, FILTER_VALIDATE_BOOLEAN);
+					$this->mailManager->flagMessage($account, $mailbox->getName(), $message->getUid(), $flag, $value);
+					$flagChanges[] = "$flag=" . ($value ? 'true' : 'false');
+				}
+				$flagsSummary = implode(', ', $flagChanges);
+				$this->delegationService->logDelegatedAction($this->userId, $effectiveUserId, "$this->userId updated flags on message <$id> with [$flagsSummary] on behalf of $effectiveUserId");
 
-		// Re-fetch: the frontend optimistically flips this message's own
-		// flags before this request even completes, but it has no way to
-		// know whether OTHER messages in the same thread are still unseen
-		// (see Message::hasUnseenInThread) -- only the server can say for
-		// sure, so give it the authoritative value in the same round trip
-		// instead of leaving it stale until the next full listing fetch.
-		$updated = $this->mailManager->getMessage($effectiveUserId, $id);
-		return new JSONResponse([
-			'hasUnseenInThread' => $updated->getHasUnseenInThread(),
-		]);
+				// Re-fetch: only the server knows whether another message in
+				// this thread remains unseen.
+				$updated = $this->mailManager->getMessage($effectiveUserId, $id);
+				return [
+					'hasUnseenInThread' => $updated->getHasUnseenInThread(),
+				];
+			},
+		);
+	}
+
+	/**
+	 * Set the same explicit flag target on many cached messages.
+	 *
+	 * Messages are grouped by account and mailbox so one IMAP STORE handles
+	 * all UIDs in a group. This replaces the browser's previous N serialized
+	 * HTTP requests without changing the optimistic UI contract.
+	 *
+	 * @NoAdminRequired
+	 *
+	 * @param int[] $ids
+	 * @param array<string, bool> $flags
+	 */
+	#[TrapError]
+	public function setFlagsBatch(array $ids, array $flags, ?string $operationId = null): JSONResponse {
+		if ($this->userId === null) {
+			return new JSONResponse([], Http::STATUS_UNAUTHORIZED);
+		}
+		$ids = array_values(array_unique(array_map(static fn ($id) => (int)$id, $ids)));
+		if ($ids === [] || count($ids) > 200 || $flags === []) {
+			return new JSONResponse([], Http::STATUS_BAD_REQUEST);
+		}
+
+		return $this->runIdempotentFlagOperation(
+			$operationId,
+			['ids' => $ids, 'flags' => $flags],
+			function () use ($ids, $flags): array {
+				$groups = [];
+				$effectiveUsers = [];
+				foreach ($ids as $id) {
+					try {
+						$effectiveUserId = $this->delegationService->resolveMessageUserId($id, $this->userId);
+						$message = $this->mailManager->getMessage($effectiveUserId, $id);
+						$mailbox = $this->mailManager->getMailbox($effectiveUserId, $message->getMailboxId());
+						$account = $this->accountService->find($effectiveUserId, $mailbox->getAccountId());
+					} catch (DoesNotExistException $e) {
+						throw new ClientException("Message $id does not exist", 0, $e);
+					}
+					$key = $account->getId() . ':' . $mailbox->getId();
+					$groups[$key] ??= [
+						'account' => $account,
+						'mailbox' => $mailbox,
+						'uids' => [],
+					];
+					$groups[$key]['uids'][] = $message->getUid();
+					$effectiveUsers[$id] = $effectiveUserId;
+				}
+
+				$normalizedFlags = [];
+				foreach ($flags as $flag => $value) {
+					$normalizedFlags[$flag] = filter_var($value, FILTER_VALIDATE_BOOLEAN);
+				}
+				foreach ($groups as $group) {
+					$this->mailManager->flagMessages(
+						$group['account'],
+						$group['mailbox']->getName(),
+						$group['uids'],
+						$normalizedFlags,
+					);
+				}
+
+				$response = [];
+				foreach ($ids as $id) {
+					$updated = $this->mailManager->getMessage($effectiveUsers[$id], $id);
+					$response[(string)$id] = [
+						'hasUnseenInThread' => $updated->getHasUnseenInThread(),
+					];
+				}
+				$flagsSummary = implode(', ', array_map(
+					static fn ($flag, $value) => "$flag=" . ($value ? 'true' : 'false'),
+					array_keys($normalizedFlags),
+					array_values($normalizedFlags),
+				));
+				$this->logger->info('User updated flags on a message batch', [
+					'userId' => $this->userId,
+					'messageCount' => count($ids),
+					'flags' => $flagsSummary,
+				]);
+				return ['messages' => $response];
+			},
+		);
+	}
+
+	/**
+	 * @param array<string, mixed> $fingerprint
+	 * @param \Closure(): array $operation
+	 */
+	private function runIdempotentFlagOperation(
+		?string $operationId,
+		array $fingerprint,
+		\Closure $operation,
+	): JSONResponse {
+		ksort($fingerprint['flags']);
+		$result = $this->clientOperationService?->execute(
+			$this->userId,
+			$operationId,
+			hash('sha256', json_encode($fingerprint, JSON_THROW_ON_ERROR)),
+			$operation,
+		) ?? [
+			'state' => 'complete',
+			'response' => $operation(),
+		];
+		if ($result['state'] === 'pending') {
+			$response = new JSONResponse([
+				'message' => 'Operation is still in progress',
+			], Http::STATUS_CONFLICT);
+			$response->addHeader('Retry-After', '1');
+			return $response;
+		}
+		return new JSONResponse($result['response']);
 	}
 
 	/**

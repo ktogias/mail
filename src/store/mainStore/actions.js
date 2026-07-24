@@ -92,6 +92,7 @@ import {
 	moveMessage,
 	removeEnvelopeTag,
 	setEnvelopeFlags,
+	setEnvelopeFlagsBatch,
 	setEnvelopeTag,
 	snoozeMessage,
 	syncEnvelopes as syncEnvelopesExternal,
@@ -105,6 +106,7 @@ import {
 	deleteQuickAction,
 	updateQuickAction,
 } from '../../service/QuickActionsService.js'
+import { WorkClass } from '../../service/RequestCoordinator.js'
 import {
 	getActiveScript,
 	updateActiveScript,
@@ -939,7 +941,6 @@ export async function reconcileNearExpiryLocalChanges(store) {
 			continue
 		}
 		try {
-			// eslint-disable-next-line no-await-in-loop -- deliberately
 			// sequential: low-priority background housekeeping, not
 			// worth its own concurrency budget.
 			const authoritative = await fetchEnvelope(envelope.accountId, id)
@@ -1252,9 +1253,11 @@ export default function mainStoreActions() {
 			logger.debug(`account ${account.id} created`, { account })
 			return account
 		},
-		async syncMailboxesForAccount(account) {
+		async syncMailboxesForAccount(account, workClass) {
 			logger.debug(`Fetching mailboxes for account ${account.id},  …`, { account })
-			account.mailboxes = await fetchAllMailboxes(account.id, true)
+			account.mailboxes = await (workClass === undefined
+				? fetchAllMailboxes(account.id, true)
+				: fetchAllMailboxes(account.id, true, workClass))
 			const mailboxes = sortMailboxes(account.mailboxes || [], account)
 			Vue.set(account, 'mailboxes', [])
 			mailboxes.map(addMailboxToState(this.mailboxes, account))
@@ -1928,7 +1931,14 @@ export default function mainStoreActions() {
 
 			Vue.set(mailbox.envelopeLists, normalizedEnvelopeListId(query), uniq(orderByDateInt(ids)))
 		},
-		async fetchSharedUnifiedContentSearch({ mailbox, query, descriptor, signal, searchUpperBound }) {
+		async fetchSharedUnifiedContentSearch({
+			mailbox,
+			query,
+			descriptor,
+			signal,
+			searchUpperBound,
+			workClass = WorkClass.ACTIVE_CONTENT,
+		}) {
 			const sortOrder = this.getPreference('sort-order', 'newest')
 			const view = this.getPreference('layout-message-view', 'threaded')
 			let pendingForStore = pendingUnifiedContentSearches.get(this)
@@ -1968,6 +1978,9 @@ export default function mainStoreActions() {
 									undefined,
 									pending.controller.signal,
 									true,
+									...(workClass === WorkClass.ACTIVE_CONTENT
+										? []
+										: [undefined, workClass]),
 								),
 							})
 							this.addEnvelopesMutation({
@@ -2092,6 +2105,7 @@ export default function mainStoreActions() {
 			includeCacheBuster = false,
 			signal,
 			searchUpperBound,
+			workClass = WorkClass.ACTIVE_CONTENT,
 		}) {
 			query = stripMalformedUndefinedToken(query)
 			searchUpperBound ??= Math.floor(Date.now() / 1000)
@@ -2108,6 +2122,7 @@ export default function mainStoreActions() {
 							descriptor: sharedSearch,
 							signal,
 							searchUpperBound,
+							workClass,
 						})
 						this.envelopeFetchFinishedMutation({ mailboxId, query })
 						return envelopes
@@ -2140,6 +2155,7 @@ export default function mainStoreActions() {
 							view: this.getPreference('layout-message-view'),
 							signal,
 							searchUpperBound,
+							workClass,
 						}).catch((error) => {
 							if (axios.isCancel(error)) {
 								// The whole unified fetch was superseded --
@@ -2197,6 +2213,7 @@ export default function mainStoreActions() {
 								deepStatusQuery: query,
 								signal,
 								searchUpperBound,
+								workClass,
 							}).catch((error) => {
 								if (axios.isCancel(error)) {
 									// Superseded search -- propagate, see
@@ -2240,6 +2257,9 @@ export default function mainStoreActions() {
 						view,
 						includeCacheBuster ? mailbox.cacheBuster : undefined,
 						signal,
+						...(workClass === WorkClass.ACTIVE_CONTENT
+							? []
+							: [false, undefined, workClass]),
 					),
 				}).then((envelopes) => {
 					this.addEnvelopesMutation({
@@ -2525,6 +2545,7 @@ export default function mainStoreActions() {
 			mailboxId,
 			query,
 			init = false,
+			workClass = WorkClass.VISIBLE_REVALIDATION,
 			// Internal only, never passed by external callers -- true only
 			// for the recursive retry chain that "won" the right to
 			// actually probe this mailbox's lock (see pendingLockWaits
@@ -2590,6 +2611,7 @@ export default function mainStoreActions() {
 						mailboxId: mb.databaseId,
 						query,
 						init,
+						workClass,
 					}))
 				} else if (mailbox.isPriorityInbox) {
 					// "priority" is a virtual id with no real mailbox behind
@@ -2616,6 +2638,7 @@ export default function mainStoreActions() {
 							mailboxId: mb.databaseId,
 							query: oneQuery,
 							init,
+							workClass,
 						}))
 					}))
 				}
@@ -2638,13 +2661,14 @@ export default function mainStoreActions() {
 						mailboxId,
 						query,
 						init,
+						workClass,
 					}))
 				}
 
 				const ids = this.getEnvelopes(mailboxId, query).map((env) => env.databaseId)
 				const lastTimestamp = this.getPreference('sort-order') === 'newest' ? null : this.getEnvelopes(mailboxId, query)[0]?.dateInt
 				logger.debug(`mailbox sync of ${mailboxId} (${query}) has ${ids.length} known IDs. ${lastTimestamp} is the last known message timestamp`, { mailbox })
-				return syncEnvelopesExternal(mailbox.accountId, mailboxId, ids, lastTimestamp, query, init, this.getPreference('sort-order'))
+				return syncEnvelopesExternal(mailbox.accountId, mailboxId, ids, lastTimestamp, query, init, this.getPreference('sort-order'), workClass)
 					.then((syncData) => {
 						logger.debug(`mailbox ${mailboxId} (${query}) synchronized, ${syncData.newMessages.length} new, ${syncData.changedMessages.length} changed and ${syncData.vanishedMessages.length} vanished messages`)
 
@@ -2697,6 +2721,7 @@ export default function mainStoreActions() {
 									mailboxId,
 									query,
 									init,
+									workClass,
 								})
 							},
 							[MalformedSyncResponseError.getName()]: (error) => {
@@ -2709,6 +2734,7 @@ export default function mainStoreActions() {
 									mailboxId,
 									query,
 									init,
+									workClass,
 									malformedResponseRetried: true,
 								})
 							},
@@ -2725,6 +2751,7 @@ export default function mainStoreActions() {
 										mailboxId,
 										query,
 										init,
+										workClass,
 										isLockRetryLeader: true,
 										lockRetryAttempt: lockRetryAttempt + 1,
 									}))
@@ -2741,6 +2768,7 @@ export default function mainStoreActions() {
 									mailboxId,
 									query,
 									init,
+									workClass,
 								}))
 							},
 							default(error) {
@@ -2913,12 +2941,14 @@ export default function mainStoreActions() {
 								await this.fetchEnvelopes({
 									mailboxId: UNIFIED_INBOX_ID,
 									query,
+									workClass: WorkClass.MAINTENANCE,
 								})
 							}
 
 							await this.syncEnvelopes({
 								mailboxId: UNIFIED_INBOX_ID,
 								query,
+								workClass: WorkClass.MAINTENANCE,
 							})
 						}
 					})().catch((error) => {
@@ -3081,12 +3111,14 @@ export default function mainStoreActions() {
 								await this.fetchEnvelopes({
 									mailboxId: mailbox.databaseId,
 									query,
+									workClass: WorkClass.MAINTENANCE,
 								})
 							}
 
 							newMessagesPerQuery.push(await this.syncEnvelopes({
 								mailboxId: mailbox.databaseId,
 								query,
+								workClass: WorkClass.MAINTENANCE,
 							}))
 						}
 
@@ -3476,6 +3508,87 @@ export default function mainStoreActions() {
 				}
 			})
 		},
+		async setEnvelopesSeen({ envelopes, seen }) {
+			this.setInteractionPriorityMutation()
+			return handleHttpAuthErrors(async () => {
+				const targets = envelopes.filter((envelope) => envelope.flags.seen !== seen)
+				if (targets.length === 0) {
+					return
+				}
+				const oldStates = new Map(targets.map((envelope) => [
+					envelope.databaseId,
+					{
+						seen: envelope.flags.seen,
+						hasUnseenInThread: envelope.flags.hasUnseenInThread,
+					},
+				]))
+
+				// Apply every selected row before yielding once. The server then
+				// receives one batch operation, grouped into one IMAP STORE per
+				// physical mailbox.
+				targets.forEach((envelope) => {
+					this.flagEnvelopeMutation({ envelope, flag: 'seen', value: seen })
+					this.setHasUnseenInThreadForThreadMutation(envelope, !seen)
+				})
+
+				try {
+					const response = await setEnvelopeFlagsBatch(
+						targets.map((envelope) => envelope.databaseId),
+						{ seen },
+					)
+					targets.forEach((envelope) => {
+						const authoritative = response?.messages?.[envelope.databaseId]
+						if (authoritative?.hasUnseenInThread !== undefined) {
+							this.setHasUnseenInThreadForThreadMutation(
+								envelope,
+								authoritative.hasUnseenInThread,
+							)
+						}
+					})
+				} catch (error) {
+					logger.error('could not update selected messages seen state', { error })
+					// A response-less failure remains in the IndexedDB outbox.
+					// Keep the optimistic target while recovery replays the
+					// idempotent operation with the same operation id.
+					if (error.mailMutationQueued === true) {
+						return
+					}
+
+					const landed = await Promise.all(targets.map((envelope) => {
+						const oldState = oldStates.get(envelope.databaseId)
+						return reconcileOrRevert({
+							envelope,
+							hasLanded: (authoritative) => authoritative?.flags?.seen === seen,
+							onLanded: (authoritative) => {
+								if (authoritative?.flags?.hasUnseenInThread !== undefined) {
+									this.setHasUnseenInThreadForThreadMutation(
+										envelope,
+										authoritative.flags.hasUnseenInThread,
+									)
+								}
+							},
+							revert: () => {
+								this.flagEnvelopeMutation({
+									envelope,
+									flag: 'seen',
+									value: oldState.seen,
+								})
+								if (oldState.hasUnseenInThread !== undefined) {
+									this.setHasUnseenInThreadForThreadMutation(
+										envelope,
+										oldState.hasUnseenInThread,
+									)
+								}
+							},
+						})
+					}))
+					if (landed.every(Boolean)) {
+						return
+					}
+					throw error
+				}
+			})
+		},
 		async toggleEnvelopeJunk({
 			envelope,
 			removeEnvelope,
@@ -3665,7 +3778,7 @@ export default function mainStoreActions() {
 			// prefetch racing an actual open) reuses it instead of firing
 			// a duplicate request.
 			const promise = handleHttpAuthErrors(async () => {
-				const thread = await fetchThread(id, { signal })
+				const thread = await fetchThread(id, speculative ? { signal, speculative } : { signal })
 				this.addEnvelopeThreadMutation({
 					id,
 					thread,
@@ -3729,7 +3842,7 @@ export default function mainStoreActions() {
 			}
 
 			const promise = handleHttpAuthErrors(async () => {
-				const message = await fetchMessage(id, { signal })
+				const message = await fetchMessage(id, speculative ? { signal, speculative } : { signal })
 				// Only commit if not undefined (not found)
 				if (message) {
 					this.addMessageMutation({
@@ -5518,6 +5631,9 @@ export default function mainStoreActions() {
 		 * corrected hasUnseenInThread value from the server was only ever
 		 * applied to whichever reply had just been toggled -- never to
 		 * the newest sibling every list actually reads from.
+		 *
+		 * @param envelope
+		 * @param value
 		 */
 		setHasUnseenInThreadForThreadMutation(envelope, value) {
 			if (!envelope.threadRootId) {
@@ -5977,6 +6093,12 @@ export default function mainStoreActions() {
 		},
 		setServerBusyMutation(serverBusy) {
 			this.serverBusy = serverBusy
+		},
+		setNetworkStateMutation(networkState) {
+			this.networkState = networkState
+		},
+		setPendingMutationCountMutation(count) {
+			this.pendingMutationCount = count
 		},
 		notificationBurstFiredMutation() {
 			this.unengagedNotificationBursts++

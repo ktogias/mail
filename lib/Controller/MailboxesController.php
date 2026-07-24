@@ -22,6 +22,7 @@ use OCA\Mail\Exception\MailboxNotCachedException;
 use OCA\Mail\Exception\NotImplemented;
 use OCA\Mail\Exception\ServiceException;
 use OCA\Mail\Http\TrapError;
+use OCA\Mail\IMAP\ImapWorkClass;
 use OCA\Mail\Service\AccountService;
 use OCA\Mail\Service\DelegationService;
 use OCA\Mail\Service\Sync\SyncService;
@@ -123,7 +124,10 @@ class MailboxesController extends Controller {
 		}
 		$account = $this->accountService->find($effectiveUserId, $accountId);
 
-		$mailboxes = $this->mailManager->getMailboxes($account, $forceSync);
+		$workClass = $this->syncWorkClass();
+		$mailboxes = $workClass === ImapWorkClass::MAINTENANCE
+			? $this->mailManager->getMailboxes($account, $forceSync)
+			: $this->mailManager->getMailboxes($account, $forceSync, $workClass);
 		// Add the locally-cached message count (the "X" of the "X of Y"
 		// backfill-progress banner -- see Mailbox.vue) to any mailbox still
 		// finishing its initial import. Done here rather than in the pure
@@ -287,7 +291,8 @@ class MailboxesController extends Controller {
 				$lastMessageTimestamp,
 				array_map(static fn ($id) => (int)$id, $ids),
 				$order,
-				$query
+				$query,
+				$this->syncWorkClass(),
 			);
 		} catch (MailboxNotCachedException $e) {
 			return new JSONResponse([], Http::STATUS_PRECONDITION_REQUIRED);
@@ -312,6 +317,20 @@ class MailboxesController extends Controller {
 		$payload = $syncResponse->jsonSerialize();
 		$payload['serverBusy'] = $this->syncService->isServerBusy();
 		return new JSONResponse($payload);
+	}
+
+	/**
+	 * A browser-provided work class can only promote a sync into the bounded
+	 * foreground/explicit tiers. This endpoint can never claim the
+	 * mutation-reserved IMAP slot.
+	 */
+	private function syncWorkClass(): string {
+		$requested = $this->request->getHeader('X-Mail-Request-Class');
+		return match ($requested) {
+			ImapWorkClass::EXPLICIT_HEAVY => ImapWorkClass::EXPLICIT_HEAVY,
+			ImapWorkClass::VISIBLE_REVALIDATION => ImapWorkClass::VISIBLE_REVALIDATION,
+			default => ImapWorkClass::MAINTENANCE,
+		};
 	}
 
 	/**

@@ -182,6 +182,11 @@ export default defineStore('main', {
 			// tick -- never by user-initiated syncs, which should never be
 			// artificially slowed down.
 			serverBusy: false,
+			// Connectivity is based on authenticated Mail requests, not only
+			// navigator.onLine. Pending mutations count the compact,
+			// content-free IndexedDB replay journal.
+			networkState: 'healthy',
+			pendingMutationCount: 0,
 			// How many new-mail notification bursts have fired since the
 			// user last engaged (tab shown, window focused, any input).
 			// Drives the hidden-tab poller's engagement decay: unengaged
