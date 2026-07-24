@@ -65,7 +65,7 @@ class PriorityInboxStatsServiceTest extends TestCase {
 		$mailbox = $this->createMock(Mailbox::class);
 		$mailbox->method('getId')->willReturn($id);
 		$mailbox->method('isInbox')->willReturn($inbox);
-		$mailbox->method('isSpecialUse')->willReturn(false);
+		$mailbox->expects(self::never())->method('isSpecialUse');
 		$mailbox->method('isCached')->willReturn($cached);
 		return $mailbox;
 	}

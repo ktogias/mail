@@ -9,7 +9,6 @@ declare(strict_types=1);
 
 namespace OCA\Mail\Service;
 
-use Horde_Imap_Client;
 use OCA\Mail\Db\MailboxMapper;
 use OCA\Mail\Db\MessageMapper;
 
@@ -48,7 +47,7 @@ class PriorityInboxStatsService {
 		$complete = true;
 		foreach ($accounts as $account) {
 			foreach ($this->mailboxMapper->findAll($account) as $mailbox) {
-				if (!$mailbox->isSpecialUse(Horde_Imap_Client::SPECIALUSE_INBOX) && !$mailbox->isInbox()) {
+				if (!$mailbox->isInbox()) {
 					continue;
 				}
 				$mailboxIds[] = $mailbox->getId();
