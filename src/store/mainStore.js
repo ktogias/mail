@@ -47,6 +47,26 @@ export default defineStore('main', {
 			// beginPendingRemoval()/endPendingRemoval()/
 			// isPendingRemoval().
 			pendingRemovals: {},
+			// Exact Priority Inbox counters come from one local-DB aggregate,
+			// independently of how many rows each visible section has loaded.
+			// Keep the last successful value on transient failures so an
+			// unstable connection does not make the overview flicker away.
+			priorityInboxStats: undefined,
+			priorityInboxStatsLoading: false,
+			priorityInboxStatsError: false,
+			// New messages received while a Priority section was outside the
+			// viewport. Id-keyed objects de-duplicate repeated sync responses;
+			// the section observer clears them only after they become visible.
+			priorityInboxNewMessageIds: {
+				favorite: {},
+				important: {},
+				other: {},
+			},
+			// Contributions hidden during the undo window. The authoritative
+			// DB aggregate still contains them until the deferred move/delete
+			// runs, so every fresh snapshot reapplies these small optimistic
+			// deltas until endPendingRemoval() resolves the outcome.
+			priorityInboxPendingRemovalStats: {},
 			// The mailbox id of the currently open view ('priority',
 			// 'unified' or a real database id as a route-param string),
 			// mirrored from the router by MailboxThread -- the store

@@ -196,6 +196,11 @@ return [
 			'verb' => 'GET'
 		],
 		[
+			'name' => 'priorityInbox#stats',
+			'url' => '/api/priority-inbox/stats',
+			'verb' => 'GET',
+		],
+		[
 			'name' => 'mailboxes#repair',
 			'url' => '/api/mailboxes/{id}/repair',
 			'verb' => 'POST'

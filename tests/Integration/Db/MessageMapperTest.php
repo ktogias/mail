@@ -211,6 +211,62 @@ class MessageMapperTest extends TestCase {
 		$insert->executeStatement();
 	}
 
+	public function testPriorityInboxStatsAreExactForThreadedAndSingletonViews(): void {
+		$rows = [
+			// One conversation: its newest row is read+favorite, while an
+			// older member makes the whole thread unread+important.
+			[1, 1, 'thread-a', 100, false, false, true, false],
+			[2, 1, 'thread-a', 200, true, true, false, false],
+			[3, 1, 'thread-b', 300, false, false, true, false],
+			[4, 1, 'thread-c', 400, true, false, false, false],
+			// Deleted rows do not contribute to either totals or flags.
+			[5, 1, 'thread-deleted', 500, false, true, true, true],
+			// A different mailbox proves the mailbox-id restriction.
+			[6, 2, 'thread-other-mailbox', 600, false, true, true, false],
+		];
+
+		foreach ($rows as [$id, $mailboxId, $threadRoot, $sentAt, $seen, $flagged, $important, $deleted]) {
+			$qb = $this->db->getQueryBuilder();
+			$qb->insert($this->mapper->getTableName())->values([
+				'id' => $qb->createNamedParameter($id, IQueryBuilder::PARAM_INT),
+				'uid' => $qb->createNamedParameter($id, IQueryBuilder::PARAM_INT),
+				'message_id' => $qb->createNamedParameter("<priority-stats-$id@example.test>"),
+				'thread_root_id' => $qb->createNamedParameter($threadRoot),
+				'mailbox_id' => $qb->createNamedParameter($mailboxId, IQueryBuilder::PARAM_INT),
+				'subject' => $qb->createNamedParameter('priority stats'),
+				'sent_at' => $qb->createNamedParameter($sentAt, IQueryBuilder::PARAM_INT),
+				'flag_seen' => $qb->createNamedParameter($seen, IQueryBuilder::PARAM_BOOL),
+				'flag_flagged' => $qb->createNamedParameter($flagged, IQueryBuilder::PARAM_BOOL),
+				'flag_important' => $qb->createNamedParameter($important, IQueryBuilder::PARAM_BOOL),
+				'flag_deleted' => $qb->createNamedParameter($deleted, IQueryBuilder::PARAM_BOOL),
+			])->executeStatement();
+		}
+
+		self::assertSame([
+			'favorite' => ['total' => 1, 'unread' => 1],
+			'important' => ['total' => 1, 'unread' => 1],
+			'other' => ['total' => 1, 'unread' => 0],
+		], $this->mapper->getPriorityInboxStats([1], true, true));
+
+		self::assertSame([
+			'favorite' => ['total' => 1, 'unread' => 0],
+			'important' => ['total' => 2, 'unread' => 2],
+			'other' => ['total' => 1, 'unread' => 0],
+		], $this->mapper->getPriorityInboxStats([1], false, true));
+
+		self::assertSame([
+			'favorite' => ['total' => 0, 'unread' => 0],
+			'important' => ['total' => 2, 'unread' => 2],
+			'other' => ['total' => 1, 'unread' => 0],
+		], $this->mapper->getPriorityInboxStats([1], true, false));
+
+		self::assertSame([
+			'favorite' => ['total' => 0, 'unread' => 0],
+			'important' => ['total' => 0, 'unread' => 0],
+			'other' => ['total' => 0, 'unread' => 0],
+		], $this->mapper->getPriorityInboxStats([], true, true));
+	}
+
 	public function testFindSyncStatesTracksThreadWideFlagsAndTagChangesWithoutHydratingEnvelopes(): void {
 		$mailbox = new Mailbox();
 		$mailbox->setId(1);

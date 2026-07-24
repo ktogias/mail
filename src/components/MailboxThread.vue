@@ -14,9 +14,19 @@
 			<div :class="{ list__wrapper: !showThread || !isMobile }">
 				<div v-if="!showThread || !isMobile" class="sticky-header">
 					<SearchMessages
+						ref="searchMessages"
 						:mailbox="mailbox"
 						:account-id="account.accountId"
 						@search-changed="onUpdateSearchQuery" />
+					<PriorityInboxOverview
+						v-if="mailbox.isPriorityInbox"
+						:stats="priorityInboxStats"
+						:new-counts="priorityInboxNewCounts"
+						:show-favorites="sortFavorites"
+						:unread-only="priorityUnreadOnly"
+						:loading="mainStore.priorityInboxStatsLoading"
+						@select="selectPrioritySection"
+						@toggle-unread="togglePriorityUnreadOnly" />
 				</div>
 				<div ref="pullToRefreshIndicator" class="pull-to-refresh-indicator" aria-hidden="true">
 					<IconLoading v-if="pullToRefreshSpinning" :size="20" />
@@ -107,10 +117,14 @@
 						<div
 							v-if="sortFavorites"
 							v-show="hasFavoriteEnvelopes"
+							ref="prioritySectionFavorite"
 							class="app-content-list-item">
 							<SectionTitle
 								class="section-title"
-								:name="t('mail', 'Favorites')" />
+								:name="t('mail', 'Favorites')"
+								:unread-count="prioritySectionStats('favorite').unread"
+								:total-count="prioritySectionStats('favorite').total"
+								:complete="priorityStatsComplete" />
 							<NcPopover trigger="hover focus">
 								<template #trigger>
 									<ButtonVue
@@ -173,10 +187,13 @@
 							:initial-page-size="followUpMessagesInitialPageSize"
 							:collapsible="true"
 							:bus="bus" />
-						<div v-show="hasImportantEnvelopes" class="app-content-list-item">
+						<div v-show="hasImportantEnvelopes" ref="prioritySectionImportant" class="app-content-list-item">
 							<SectionTitle
 								class="section-title important"
-								:name="t('mail', 'Important')" />
+								:name="t('mail', 'Important')"
+								:unread-count="prioritySectionStats('important').unread"
+								:total-count="prioritySectionStats('important').total"
+								:complete="priorityStatsComplete" />
 							<NcPopover trigger="hover focus">
 								<template #trigger>
 									<ButtonVue
@@ -207,8 +224,12 @@
 							:bus="bus" />
 						<SectionTitle
 							v-show="hasOtherEnvelopes"
+							ref="prioritySectionOther"
 							class="app-content-list-item section-title other"
-							:name="t('mail', 'Other')" />
+							:name="t('mail', 'Other')"
+							:unread-count="prioritySectionStats('other').unread"
+							:total-count="prioritySectionStats('other').total"
+							:complete="priorityStatsComplete" />
 						<Mailbox
 							v-show="hasOtherEnvelopes"
 							class="nameother"
@@ -251,6 +272,7 @@ import IconRefresh from 'vue-material-design-icons/Refresh.vue'
 import EmptyMailboxSection from './EmptyMailboxSection.vue'
 import Mailbox from './Mailbox.vue'
 import NoMessageSelected from './NoMessageSelected.vue'
+import PriorityInboxOverview from './PriorityInboxOverview.vue'
 import SearchMessages from './SearchMessages.vue'
 import SectionTitle from './SectionTitle.vue'
 import Thread from './Thread.vue'
@@ -298,6 +320,7 @@ export default {
 		Mailbox,
 		NoMessageSelected,
 		NcPopover,
+		PriorityInboxOverview,
 		SectionTitle,
 		SearchMessages,
 		Thread,
@@ -342,6 +365,8 @@ export default {
 			hasContent: false,
 			pullToRefreshTeardown: undefined,
 			pullToRefreshSpinning: false,
+			priorityUnreadOnly: false,
+			prioritySectionObserver: undefined,
 		}
 	},
 
@@ -403,6 +428,9 @@ export default {
 		// hidden at once -- the user typed a term and stared at a blank
 		// white list until the results landed.
 		hasImportantEnvelopes() {
+			if (this.prioritySectionStats('important').total > 0) {
+				return true
+			}
 			const query = this.appendToSearch(this.priorityImportantQuery)
 			if (this.mainStore.isFetchingEnvelopes(this.unifiedInbox.databaseId, query)) {
 				return true
@@ -413,6 +441,9 @@ export default {
 		},
 
 		hasOtherEnvelopes() {
+			if (this.prioritySectionStats('other').total > 0) {
+				return true
+			}
 			const query = this.appendToSearch(this.priorityOtherQuery)
 			if (this.mainStore.isFetchingEnvelopes(this.unifiedInbox.databaseId, query)) {
 				return true
@@ -429,6 +460,9 @@ export default {
 		hasFavoriteEnvelopes() {
 			if (!this.sortFavorites) {
 				return false
+			}
+			if (this.mailbox.isPriorityInbox && this.prioritySectionStats('favorite').total > 0) {
+				return true
 			}
 			const mailbox = this.mailbox.isPriorityInbox ? this.unifiedInbox : this.mailbox
 			const query = this.appendToSearch(this.favoriteQuery)
@@ -508,6 +542,26 @@ export default {
 
 		sortOrder() {
 			return this.mainStore.getPreference('sort-order', 'newest')
+		},
+
+		priorityInboxStats() {
+			return this.mainStore.priorityInboxStats
+		},
+
+		priorityStatsComplete() {
+			return this.priorityInboxStats?.complete !== false
+		},
+
+		priorityInboxNewCounts() {
+			return {
+				favorite: Object.keys(this.mainStore.priorityInboxNewMessageIds.favorite).length,
+				important: Object.keys(this.mainStore.priorityInboxNewMessageIds.important).length,
+				other: Object.keys(this.mainStore.priorityInboxNewMessageIds.other).length,
+			}
+		},
+
+		priorityInboxNewCountsSignature() {
+			return Object.values(this.priorityInboxNewCounts).join(':')
 		},
 
 		// The "still importing older messages" banner. Reads straight off the
@@ -594,6 +648,10 @@ export default {
 			setTimeout(this.saveStartMailbox, START_MAILBOX_DEBOUNCE)
 			this.fetchEnvelopes()
 		},
+
+		priorityInboxNewCountsSignature() {
+			this.$nextTick(this.clearVisiblePriorityNewMessages)
+		},
 	},
 
 	created() {
@@ -647,12 +705,17 @@ export default {
 				onRefresh: () => this.onPullToRefresh(),
 			})
 		}
+		if (this.mailbox.isPriorityInbox) {
+			await this.onPriorityMailboxOpened()
+			this.registerPrioritySectionObserver()
+		}
 	},
 
 	beforeDestroy() {
 		clearTimeout(this.startMailboxTimer)
 		this.unregisterLoadMoreSentinel()
 		this.pullToRefreshTeardown?.()
+		this.prioritySectionObserver?.disconnect()
 	},
 
 	methods: {
@@ -686,6 +749,9 @@ export default {
 				workClass: WorkClass.EXPLICIT_HEAVY,
 			})
 			await this.mainStore.syncMailboxesForAccount(this.account, WorkClass.EXPLICIT_HEAVY)
+			if (this.mailbox.isPriorityInbox) {
+				await this.mainStore.refreshPriorityInboxStats(WorkClass.ACTIVE_CONTENT)
+			}
 		},
 
 		getGroupedEnvelopes(envelopes, syncTimestamp) {
@@ -705,7 +771,81 @@ export default {
 		async onPriorityMailboxOpened() {
 			logger.debug('Priority inbox was opened')
 
-			await this.mainStore.checkFollowUpReminders({ query: this.followUpQuery })
+			await Promise.all([
+				this.mainStore.checkFollowUpReminders({ query: this.followUpQuery }),
+				this.mainStore.refreshPriorityInboxStats(WorkClass.ACTIVE_CONTENT).catch(() => {}),
+			])
+		},
+
+		prioritySectionStats(section) {
+			return this.priorityInboxStats?.sections?.[section] ?? { unread: 0, total: 0 }
+		},
+
+		togglePriorityUnreadOnly() {
+			// SearchMessages already owns the canonical quick-filter state,
+			// serialization (`flags:unread`) and interaction with all other
+			// search controls. Reuse that implementation so the sticky
+			// overview and the existing Unread chip can never diverge.
+			this.$refs.searchMessages?.toggleUnread()
+		},
+
+		prioritySectionElement(section) {
+			const refName = {
+				favorite: 'prioritySectionFavorite',
+				important: 'prioritySectionImportant',
+				other: 'prioritySectionOther',
+			}[section]
+			const ref = this.$refs[refName]
+			return ref?.$el ?? ref
+		},
+
+		selectPrioritySection(section) {
+			const target = this.prioritySectionElement(section)
+			target?.scrollIntoView?.({ behavior: 'smooth', block: 'start' })
+			this.mainStore.clearPriorityInboxNewMessagesMutation(section)
+		},
+
+		registerPrioritySectionObserver() {
+			if (typeof IntersectionObserver === 'undefined') {
+				return
+			}
+			this.prioritySectionObserver?.disconnect()
+			const scroller = this.$refs.envelopeList?.$el
+			const root = scroller ? getScrollEventTarget(scroller) : null
+			this.prioritySectionObserver = new IntersectionObserver((entries) => {
+				entries.forEach((entry) => {
+					if (entry.isIntersecting) {
+						this.mainStore.clearPriorityInboxNewMessagesMutation(entry.target.dataset.prioritySection)
+					}
+				})
+			}, { root, threshold: 0.6 })
+			;['favorite', 'important', 'other'].forEach((section) => {
+				const element = this.prioritySectionElement(section)
+				if (!element) {
+					return
+				}
+				element.dataset.prioritySection = section
+				this.prioritySectionObserver.observe(element)
+			})
+		},
+
+		clearVisiblePriorityNewMessages() {
+			const scroller = this.$refs.envelopeList?.$el
+			if (!scroller) {
+				return
+			}
+			const root = getScrollEventTarget(scroller)
+			const rootRect = root.getBoundingClientRect()
+			;['favorite', 'important', 'other'].forEach((section) => {
+				const element = this.prioritySectionElement(section)
+				if (!element) {
+					return
+				}
+				const rect = element.getBoundingClientRect()
+				if (rect.bottom > rootRect.top && rect.top < rootRect.bottom) {
+					this.mainStore.clearPriorityInboxNewMessagesMutation(section)
+				}
+			})
 		},
 
 		deleteMessage(id) {
@@ -831,7 +971,16 @@ export default {
 		},
 
 		onUpdateSearchQuery(query) {
-			this.searchQuery = query
+			this.priorityUnreadOnly = /(?:^|\s)flags:[^\s]*\bunread\b/.test(query ?? '')
+			const tokens = (query ?? '').split(/\s+/).filter(Boolean)
+			// `not:starred` is structural Priority Inbox partitioning, not a
+			// user search control, so SearchMessages correctly knows nothing
+			// about it. Re-attach it to every canonical search query while the
+			// separate-Favorites preference is active.
+			if (this.mailbox.isPriorityInbox && this.sortFavorites && !tokens.includes('not:starred')) {
+				tokens.push('not:starred')
+			}
+			this.searchQuery = tokens.join(' ') || undefined
 		},
 
 		dismissBackfillBanner() {

@@ -101,6 +101,7 @@ import {
 } from '../../service/MessageService.js'
 import { showNewMessagesNotification } from '../../service/NotificationService.js'
 import { savePreference } from '../../service/PreferenceService.js'
+import { fetchPriorityInboxStats } from '../../service/PriorityInboxService.js'
 import {
 	createQuickAction,
 	deleteQuickAction,
@@ -151,6 +152,7 @@ import useOutboxStore from '../outboxStore.js'
  */
 
 const sliceToPage = slice(0, PAGE_SIZE)
+const pendingPriorityInboxStats = new WeakMap()
 
 const findIndividualMailboxes = curry((getMailboxes, specialRole) => pipe(
 	filter(complement(prop('isUnified'))),
@@ -204,6 +206,45 @@ function prioritySection(envelope, threaded) {
 		return 'favorite'
 	}
 	return important ? 'important' : 'other'
+}
+
+function priorityStatsSection(store, envelope) {
+	const mailbox = store.mailboxes[envelope?.mailboxId]
+	if (!envelope || mailbox?.specialRole !== 'inbox' || mailbox.isUnified || mailbox.isPriorityInbox) {
+		return undefined
+	}
+	const threaded = store.getPreference('layout-message-view', 'threaded') === 'threaded'
+	let section = prioritySection(envelope, threaded)
+	if (section === 'favorite' && store.getPreference('sort-favorites', 'false') !== 'true') {
+		const flags = envelope.flags ?? {}
+		const important = threaded
+			? (flags.hasImportantInThread ?? flags.important === true)
+			: flags.important === true
+		section = important ? 'important' : 'other'
+	}
+	return section
+}
+
+function priorityStatsUnread(store, envelope) {
+	const flags = envelope?.flags ?? {}
+	return store.getPreference('layout-message-view', 'threaded') === 'threaded'
+		? (flags.hasUnseenInThread ?? flags.seen === false)
+		: flags.seen === false
+}
+
+function adjustPriorityInboxStats(store, section, totalDelta = 0, unreadDelta = 0) {
+	const counters = store.priorityInboxStats?.sections?.[section]
+	if (!counters) {
+		return
+	}
+	Vue.set(counters, 'total', Math.max(0, (counters.total ?? 0) + totalDelta))
+	Vue.set(counters, 'unread', Math.max(0, (counters.unread ?? 0) + unreadDelta))
+	const priorityMailbox = store.mailboxes[PRIORITY_INBOX_ID]
+	if (priorityMailbox) {
+		const unread = Object.values(store.priorityInboxStats.sections)
+			.reduce((total, sectionCounters) => total + (sectionCounters.unread ?? 0), 0)
+		Vue.set(priorityMailbox, 'unread', unread)
+	}
 }
 
 function capProgressiveResults(envelopes, sortOrder, view, prioritySplit) {
@@ -1280,6 +1321,86 @@ export default function mainStoreActions() {
 	return {
 		updateSyncTimestamp() {
 			this.syncTimestamp = Date.now()
+		},
+		async refreshPriorityInboxStats(workClass = WorkClass.ACTIVE_CONTENT) {
+			const existing = pendingPriorityInboxStats.get(this)
+			if (existing) {
+				return existing
+			}
+
+			this.priorityInboxStatsLoading = true
+			const request = fetchPriorityInboxStats(
+				this.getPreference('layout-message-view', 'threaded'),
+				workClass,
+			)
+				.then((stats) => {
+					this.priorityInboxStats = {
+						...stats,
+						sections: Object.fromEntries(Object.entries(stats.sections ?? {}).map(([section, counters]) => [
+							section,
+							{ ...counters },
+						])),
+					}
+					Object.values(this.priorityInboxPendingRemovalStats).forEach((contribution) => {
+						adjustPriorityInboxStats(
+							this,
+							contribution.section,
+							-1,
+							contribution.unread ? -1 : 0,
+						)
+					})
+					const priorityMailbox = this.mailboxes[PRIORITY_INBOX_ID]
+					if (priorityMailbox) {
+						const unread = Object.values(this.priorityInboxStats.sections ?? {})
+							.reduce((total, section) => total + (section.unread ?? 0), 0)
+						Vue.set(priorityMailbox, 'unread', unread)
+					}
+					this.priorityInboxStatsError = false
+					return stats
+				})
+				.catch((error) => {
+					// Retain the last successful snapshot. Counts that are a
+					// little stale are more useful than an overview that
+					// disappears whenever the user changes networks.
+					this.priorityInboxStatsError = true
+					logger.warn('Could not refresh Priority Inbox counters', { error })
+					throw error
+				})
+				.finally(() => {
+					this.priorityInboxStatsLoading = false
+					pendingPriorityInboxStats.delete(this)
+				})
+			pendingPriorityInboxStats.set(this, request)
+			return request
+		},
+		recordPriorityInboxNewMessagesMutation(messages) {
+			if (this.currentViewMailboxId !== PRIORITY_INBOX_ID) {
+				return
+			}
+
+			const threaded = this.getPreference('layout-message-view', 'threaded') === 'threaded'
+			const sortFavorites = this.getPreference('sort-favorites', 'false') === 'true'
+			messages.forEach((message) => {
+				const mailbox = this.mailboxes[message?.mailboxId]
+				if (!message || mailbox?.specialRole !== 'inbox' || message.flags?.seen !== false) {
+					return
+				}
+				let section = prioritySection(message, threaded)
+				if (!sortFavorites && section === 'favorite') {
+					const flags = message.flags ?? {}
+					const important = threaded
+						? (flags.hasImportantInThread ?? flags.important === true)
+						: flags.important === true
+					section = important ? 'important' : 'other'
+				}
+				Vue.set(this.priorityInboxNewMessageIds[section], message.databaseId, true)
+			})
+		},
+		clearPriorityInboxNewMessagesMutation(section) {
+			if (!Object.hasOwn(this.priorityInboxNewMessageIds, section)) {
+				return
+			}
+			Vue.set(this.priorityInboxNewMessageIds, section, {})
 		},
 		savePreference({
 			key,
@@ -3270,6 +3391,7 @@ export default function mainStoreActions() {
 								return true
 							})
 						if (unseenMessages.length > 0) {
+							this.recordPriorityInboxNewMessagesMutation(unseenMessages)
 							showNewMessagesNotification(unseenMessages)
 							this.notificationBurstFiredMutation()
 						}
@@ -3286,6 +3408,12 @@ export default function mainStoreActions() {
 
 				const results = await mapWithConcurrencyLimit(mailboxTargets, WATCHED_SYNC_CONCURRENCY, syncOneWatchedMailbox)
 				const newMessages = flatMapDeep(identity, results).filter((m) => m !== undefined)
+				if (!lightweight && this.currentViewMailboxId === PRIORITY_INBOX_ID) {
+					// One cheap, DB-only aggregate after the physical inboxes
+					// have reconciled. It runs below visible rows in the
+					// request coordinator and never delays this sync result.
+					this.refreshPriorityInboxStats(WorkClass.VISIBLE_REVALIDATION).catch(() => {})
+				}
 				if (newMessages.length === 0) {
 					return priorityRefreshPromise
 				}
@@ -5779,6 +5907,10 @@ export default function mainStoreActions() {
 			flag,
 			value,
 		}) {
+			const threaded = this.getPreference('layout-message-view', 'threaded') === 'threaded'
+			const previousSection = priorityStatsSection(this, envelope)
+			const previousUnread = priorityStatsUnread(this, envelope)
+			const previousValue = envelope.flags[flag]
 			const mailbox = this.mailboxes[envelope.mailboxId]
 			if (mailbox && flag === 'seen') {
 				const unread = mailbox.unread ?? 0
@@ -5789,6 +5921,21 @@ export default function mainStoreActions() {
 				}
 			}
 			Vue.set(envelope.flags, flag, value)
+			if (flag === 'seen' && value) {
+				Object.values(this.priorityInboxNewMessageIds)
+					.forEach((ids) => Vue.delete(ids, envelope.databaseId))
+			}
+			if (!threaded && previousValue !== value) {
+				if (flag === 'seen' && previousSection !== undefined) {
+					adjustPriorityInboxStats(this, previousSection, 0, value ? -1 : 1)
+				} else if ((flag === 'flagged' || flag === 'important') && previousSection !== undefined) {
+					const nextSection = priorityStatsSection(this, envelope)
+					if (nextSection !== previousSection) {
+						adjustPriorityInboxStats(this, previousSection, -1, previousUnread ? -1 : 0)
+						adjustPriorityInboxStats(this, nextSection, 1, previousUnread ? 1 : 0)
+					}
+				}
+			}
 			recordRecentLocalChange(envelope.databaseId, flag, value)
 		},
 		/**
@@ -5815,6 +5962,15 @@ export default function mainStoreActions() {
 		 * @param value
 		 */
 		setHasUnseenInThreadForThreadMutation(envelope, value) {
+			const previous = envelope.flags?.hasUnseenInThread ?? envelope.flags?.seen === false
+			const section = priorityStatsSection(this, envelope)
+			if (
+				this.getPreference('layout-message-view', 'threaded') === 'threaded'
+				&& previous !== value
+				&& section !== undefined
+			) {
+				adjustPriorityInboxStats(this, section, 0, value ? 1 : -1)
+			}
 			if (!envelope.threadRootId) {
 				this.flagEnvelopeMutation({ envelope, flag: 'hasUnseenInThread', value })
 				return
@@ -6307,9 +6463,45 @@ export default function mainStoreActions() {
 		// once, not just in the list the click happened in.
 		beginPendingRemoval(ids) {
 			ids.forEach((id) => Vue.set(this.pendingRemovals, id, true))
+			ids.forEach((id) => {
+				Object.values(this.priorityInboxNewMessageIds)
+					.forEach((sectionIds) => Vue.delete(sectionIds, id))
+			})
+			const threaded = this.getPreference('layout-message-view', 'threaded') === 'threaded'
+			ids.forEach((id) => {
+				const envelope = this.envelopes[id]
+				const section = priorityStatsSection(this, envelope)
+				if (section === undefined) {
+					return
+				}
+				const key = threaded
+					? `${envelope.mailboxId}:${envelope.threadRootId ?? envelope.databaseId}`
+					: String(envelope.databaseId)
+				if (this.priorityInboxPendingRemovalStats[key]) {
+					return
+				}
+				const contribution = {
+					section,
+					unread: priorityStatsUnread(this, envelope),
+					ids: [...ids],
+				}
+				Vue.set(this.priorityInboxPendingRemovalStats, key, contribution)
+				adjustPriorityInboxStats(this, section, -1, contribution.unread ? -1 : 0)
+			})
 		},
 		endPendingRemoval(ids) {
 			ids.forEach((id) => Vue.delete(this.pendingRemovals, id))
+			Object.entries(this.priorityInboxPendingRemovalStats).forEach(([key, contribution]) => {
+				if (!contribution.ids.some((id) => ids.includes(id))) {
+					return
+				}
+				// Undo/failure leaves at least one original envelope in the
+				// store; a successful deferred move/delete removed them.
+				if (contribution.ids.some((id) => this.envelopes[id] !== undefined)) {
+					adjustPriorityInboxStats(this, contribution.section, 1, contribution.unread ? 1 : 0)
+				}
+				Vue.delete(this.priorityInboxPendingRemovalStats, key)
+			})
 		},
 		isPendingRemoval(id) {
 			return !!this.pendingRemovals[id]

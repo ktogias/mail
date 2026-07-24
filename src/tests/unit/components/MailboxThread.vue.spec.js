@@ -108,6 +108,23 @@ describe('MailboxThread', () => {
 		})
 	})
 
+	it('shares the existing SearchMessages unread filter and preserves Priority partitioning', () => {
+		store.preferences['sort-favorites'] = 'true'
+		const wrapper = mountThread()
+
+		wrapper.vm.onUpdateSearchQuery('flags:unread match:allof')
+
+		expect(wrapper.vm.priorityUnreadOnly).toBe(true)
+		expect(wrapper.vm.searchQuery).toBe('flags:unread match:allof not:starred')
+		expect(wrapper.vm.appendToSearch(wrapper.vm.favoriteQuery))
+			.toBe('flags:unread match:allof is:starred')
+		expect(wrapper.vm.appendToSearch(priorityImportantQuery))
+			.toBe(`flags:unread match:allof not:starred ${priorityImportantQuery}`)
+
+		wrapper.vm.onUpdateSearchQuery('match:allof')
+		expect(wrapper.vm.priorityUnreadOnly).toBe(false)
+	})
+
 	it("shows the 'Other' section once it actually has envelopes, even if Important is empty", () => {
 		seedEnvelope(priorityOtherQuery, 2)
 		// priorityImportantQuery deliberately left empty

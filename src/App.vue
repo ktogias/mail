@@ -120,6 +120,13 @@ export default {
 		}
 
 		this.startWatchedMailboxSync()
+		if (this.hasMailAccounts) {
+			// Prime the Priority Inbox navigation badge even when another
+			// folder is the start view. This is one local-DB aggregate, not a
+			// mailbox/IMAP fan-out, and shares the same snapshot with the
+			// sticky overview when Priority Inbox is opened later.
+			this.mainStore.refreshPriorityInboxStats(WorkClass.VISIBLE_REVALIDATION).catch(() => {})
+		}
 		await this.mainStore.fetchCurrentUserPrincipal()
 		await this.mainStore.loadCollections()
 		this.mainStore.hasCurrentUserPrincipalAndCollectionsMutation(true)
@@ -380,6 +387,11 @@ export default {
 					await this.mainStore.syncEnvelopes({
 						mailboxId,
 						workClass: WorkClass.VISIBLE_REVALIDATION,
+					})
+				}
+				if (this.hasMailAccounts) {
+					await this.mainStore.refreshPriorityInboxStats(WorkClass.VISIBLE_REVALIDATION).catch((error) => {
+						logger.debug('Priority Inbox counter revalidation failed during connectivity recovery', { error })
 					})
 				}
 				requestCoordinator.setNetworkState('healthy')

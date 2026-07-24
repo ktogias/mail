@@ -13,6 +13,7 @@ import * as DeepSearchService from '../../../service/DeepSearchService.js'
 import * as MailboxService from '../../../service/MailboxService.js'
 import * as MessageService from '../../../service/MessageService.js'
 import * as NotificationService from '../../../service/NotificationService.js'
+import * as PriorityInboxService from '../../../service/PriorityInboxService.js'
 import { WorkClass } from '../../../service/RequestCoordinator.js'
 import * as ThreadService from '../../../service/ThreadService.js'
 import { PAGE_SIZE, UNIFIED_INBOX_ID } from '../../../store/constants.js'
@@ -26,6 +27,7 @@ vi.mock('../../../service/DeepSearchService.js')
 vi.mock('../../../service/MailboxService.js')
 vi.mock('../../../service/MessageService.js')
 vi.mock('../../../service/NotificationService.js')
+vi.mock('../../../service/PriorityInboxService.js')
 vi.mock('../../../service/ThreadService.js')
 vi.mock('../../../util/normalization.js', () => ({
 	__esModule: true,
@@ -72,6 +74,90 @@ describe('Vuex store actions', () => {
 
 	afterEach(() => {
 		vi.clearAllMocks()
+	})
+
+	it('keeps Priority Inbox section and navigation counters on one authoritative snapshot', async () => {
+		const stats = {
+			sections: {
+				favorite: { total: 2, unread: 1 },
+				important: { total: 5, unread: 2 },
+				other: { total: 9, unread: 3 },
+			},
+			complete: true,
+		}
+		store.preferences['layout-message-view'] = 'threaded'
+		PriorityInboxService.fetchPriorityInboxStats.mockResolvedValue(stats)
+
+		await store.refreshPriorityInboxStats()
+
+		expect(PriorityInboxService.fetchPriorityInboxStats)
+			.toHaveBeenCalledWith('threaded', WorkClass.ACTIVE_CONTENT)
+		expect(store.priorityInboxStats).toEqual(stats)
+		expect(store.mailboxes.priority.unread).toBe(6)
+	})
+
+	it('de-duplicates new-mail indicators and classifies them by Priority section', () => {
+		store.currentViewMailboxId = 'priority'
+		store.preferences['layout-message-view'] = 'threaded'
+		store.preferences['sort-favorites'] = 'true'
+		store.mailboxes[11] = { databaseId: 11, specialRole: 'inbox' }
+		const favorite = {
+			databaseId: 101,
+			mailboxId: 11,
+			flags: { seen: false, hasFlaggedInThread: true, hasImportantInThread: true },
+		}
+		const other = {
+			databaseId: 102,
+			mailboxId: 11,
+			flags: { seen: false, hasFlaggedInThread: false, hasImportantInThread: false },
+		}
+
+		store.recordPriorityInboxNewMessagesMutation([favorite, favorite, other])
+
+		expect(Object.keys(store.priorityInboxNewMessageIds.favorite)).toEqual(['101'])
+		expect(Object.keys(store.priorityInboxNewMessageIds.other)).toEqual(['102'])
+		store.clearPriorityInboxNewMessagesMutation('favorite')
+		expect(store.priorityInboxNewMessageIds.favorite).toEqual({})
+	})
+
+	it('updates Priority and sidebar unread counters optimistically for thread reads and undo', () => {
+		store.preferences['layout-message-view'] = 'threaded'
+		store.preferences['sort-favorites'] = 'true'
+		store.mailboxes[11] = { databaseId: 11, specialRole: 'inbox', unread: 1 }
+		store.priorityInboxStats = {
+			sections: {
+				favorite: { total: 0, unread: 0 },
+				important: { total: 1, unread: 1 },
+				other: { total: 0, unread: 0 },
+			},
+			complete: true,
+		}
+		store.mailboxes.priority.unread = 1
+		const envelope = {
+			databaseId: 101,
+			accountId: 13,
+			mailboxId: 11,
+			threadRootId: 'thread-a',
+			flags: {
+				seen: false,
+				hasUnseenInThread: true,
+				hasFlaggedInThread: false,
+				hasImportantInThread: true,
+			},
+		}
+		store.envelopes[101] = envelope
+
+		store.setHasUnseenInThreadForThreadMutation(envelope, false)
+		expect(store.priorityInboxStats.sections.important.unread).toBe(0)
+		expect(store.mailboxes.priority.unread).toBe(0)
+
+		store.setHasUnseenInThreadForThreadMutation(envelope, true)
+		store.beginPendingRemoval([101])
+		expect(store.priorityInboxStats.sections.important).toEqual({ total: 0, unread: 0 })
+
+		// Ending while the envelope still exists is Undo/failure.
+		store.endPendingRemoval([101])
+		expect(store.priorityInboxStats.sections.important).toEqual({ total: 1, unread: 1 })
 	})
 
 	it('creates a mailbox', async () => {
