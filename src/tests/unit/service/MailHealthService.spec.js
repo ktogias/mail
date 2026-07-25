@@ -18,6 +18,7 @@ describe('service/MailHealthService', () => {
 		await expect(probeMailHealth()).resolves.toEqual({ status: 'ok' })
 		expect(axios.get).toHaveBeenCalledWith('/mail-health', {
 			mailPriorityBypass: true,
+			mailConnectivityProbe: true,
 			timeout: 10_000,
 		})
 	})

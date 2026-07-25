@@ -110,6 +110,43 @@ function inferWorkClass(config) {
 	return WorkClass.VISIBLE_REVALIDATION
 }
 
+/**
+ * Decide whether one request failure is evidence that Mail connectivity as a
+ * whole is unhealthy.
+ *
+ * Capacity responses are deliberately excluded: 425/429 mean that the server
+ * is reachable and applying backpressure. Likewise, a background sync timing
+ * out or receiving a 5xx must not freeze unrelated user actions behind a
+ * global recovery transaction. Network failures, the dedicated health probe,
+ * and failures of a direct user request still drive connectivity recovery.
+ *
+ * @param {object} error Axios-style error
+ * @param {boolean} online browser connectivity hint
+ * @return {boolean}
+ */
+export function isConnectivityFailure(error, online = typeof navigator === 'undefined' || navigator.onLine !== false) {
+	if (error?.code === 'ERR_CANCELED') {
+		return false
+	}
+	if (!online) {
+		return true
+	}
+	if (error?.config?.mailConnectivityProbe === true) {
+		return true
+	}
+	if (!error?.response) {
+		return true
+	}
+
+	const status = error.response.status
+	if (status === 425 || status === 429) {
+		return false
+	}
+	const workClass = inferWorkClass(error.config ?? {})
+	return FOREGROUND_CLASSES.has(workClass)
+		&& (status === 408 || status >= 500)
+}
+
 function accountKey(config) {
 	return String(config.mailAccountId
 		?? config.params?.accountId
@@ -390,7 +427,7 @@ export class RequestCoordinator {
 	}
 
 	reportFailure(error) {
-		if (error?.code === 'ERR_CANCELED') {
+		if (!isConnectivityFailure(error)) {
 			return
 		}
 		this.setNetworkState(typeof navigator !== 'undefined' && navigator.onLine === false
@@ -399,10 +436,16 @@ export class RequestCoordinator {
 	}
 
 	snapshot() {
+		const activeUserRequests = this.queue.filter((item) => FOREGROUND_CLASSES.has(item.workClass)).length
+			+ [...FOREGROUND_CLASSES].reduce(
+				(total, workClass) => total + (this.runningByClass.get(workClass) ?? 0),
+				0,
+			)
 		return {
 			networkState: this.networkState,
 			running: this.running,
 			queued: this.queue.length,
+			activeUserRequests,
 			queuedByClass: Object.fromEntries(Object.values(WorkClass).map((workClass) => [
 				workClass,
 				this.queue.filter((item) => item.workClass === workClass).length,
@@ -513,17 +556,7 @@ export function installRequestCoordinator() {
 		},
 		(error) => {
 			release(error.config)
-			const status = error.response?.status
-			if (
-				isMailRequest(error.config)
-				&& (
-					!error.response
-					|| status === 408
-					|| status === 425
-					|| status === 429
-					|| status >= 500
-				)
-			) {
+			if (isMailRequest(error.config)) {
 				requestCoordinator.reportFailure(error)
 			}
 			return Promise.reject(error)

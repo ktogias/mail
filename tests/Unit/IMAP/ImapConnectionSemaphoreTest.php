@@ -130,19 +130,19 @@ class ImapConnectionSemaphoreTest extends TestCase {
 		self::assertSame(300, $cache->ttlFor('account_slot_1'));
 	}
 
-	public function testOrdinaryConnectionsCannotConsumeReservedInteractiveSlot(): void {
+	public function testActiveContentCannotConsumeReservedMutationSlot(): void {
 		$cache = new SemaphoreCache();
-		$firstOrdinary = new ImapConnectionSemaphore($cache, 'account', 3, 1);
-		$secondOrdinary = new ImapConnectionSemaphore($cache, 'account', 3, 1);
-		$thirdOrdinary = new ImapConnectionSemaphore($cache, 'account', 3, 1);
+		$firstContent = new ImapConnectionSemaphore($cache, 'account', 3, 1);
+		$secondContent = new ImapConnectionSemaphore($cache, 'account', 3, 1);
+		$thirdContent = new ImapConnectionSemaphore($cache, 'account', 3, 1);
 		$interactive = new ImapConnectionSemaphore($cache, 'account', 3, 1);
 		$overflow = new ImapConnectionSemaphore($cache, 'account', 3, 1);
 
-		self::assertSame(2, $firstOrdinary->getAvailableLimit(false));
-		self::assertSame(3, $firstOrdinary->getAvailableLimit(true));
-		self::assertTrue($firstOrdinary->acquire());
-		self::assertTrue($secondOrdinary->acquire());
-		self::assertFalse($thirdOrdinary->acquire());
+		self::assertSame(2, $firstContent->getAvailableLimit(false));
+		self::assertSame(3, $firstContent->getAvailableLimit(true));
+		self::assertTrue($firstContent->acquireFor(ImapWorkClass::ACTIVE_CONTENT));
+		self::assertTrue($secondContent->acquireFor(ImapWorkClass::ACTIVE_CONTENT));
+		self::assertFalse($thirdContent->acquireFor(ImapWorkClass::ACTIVE_CONTENT));
 
 		// Same identity and hard limit: the interactive caller gets only the
 		// deliberately reserved third slot, never a fourth connection.
@@ -161,13 +161,13 @@ class ImapConnectionSemaphoreTest extends TestCase {
 	public function testInteractiveConnectionPrefersTheReservedSlot(): void {
 		$cache = new SemaphoreCache();
 		$interactive = new ImapConnectionSemaphore($cache, 'account', 3, 1);
-		$firstOrdinary = new ImapConnectionSemaphore($cache, 'account', 3, 1);
-		$secondOrdinary = new ImapConnectionSemaphore($cache, 'account', 3, 1);
+		$firstContent = new ImapConnectionSemaphore($cache, 'account', 3, 1);
+		$secondContent = new ImapConnectionSemaphore($cache, 'account', 3, 1);
 
 		self::assertTrue($interactive->acquire(true));
 		self::assertTrue($cache->hasKey('account_slot_2'));
-		self::assertTrue($firstOrdinary->acquire());
-		self::assertTrue($secondOrdinary->acquire());
+		self::assertTrue($firstContent->acquireFor(ImapWorkClass::ACTIVE_CONTENT));
+		self::assertTrue($secondContent->acquireFor(ImapWorkClass::ACTIVE_CONTENT));
 	}
 
 	public function testReleasedSlotCanBeAcquiredByAnotherConnection(): void {
@@ -216,10 +216,10 @@ class ImapConnectionSemaphoreTest extends TestCase {
 
 	public function testBoundedWaitAcquiresAnOrdinarySlotAfterRelease(): void {
 		$cache = new SemaphoreCache();
-		$firstOrdinary = new ImapConnectionSemaphore($cache, 'account', 3, 1);
-		$secondOrdinary = new ImapConnectionSemaphore($cache, 'account', 3, 1);
-		self::assertTrue($firstOrdinary->acquire());
-		self::assertTrue($secondOrdinary->acquire());
+		$firstContent = new ImapConnectionSemaphore($cache, 'account', 3, 1);
+		$secondContent = new ImapConnectionSemaphore($cache, 'account', 3, 1);
+		self::assertTrue($firstContent->acquireFor(ImapWorkClass::ACTIVE_CONTENT));
+		self::assertTrue($secondContent->acquireFor(ImapWorkClass::ACTIVE_CONTENT));
 
 		$sleeps = [];
 		$waiting = new ImapConnectionSemaphore(
@@ -227,9 +227,9 @@ class ImapConnectionSemaphoreTest extends TestCase {
 			'account',
 			3,
 			1,
-			sleep: static function (int $microseconds) use (&$sleeps, $firstOrdinary): void {
+			sleep: static function (int $microseconds) use (&$sleeps, $firstContent): void {
 				$sleeps[] = $microseconds;
-				$firstOrdinary->release();
+				$firstContent->release();
 			},
 		);
 
@@ -259,21 +259,37 @@ class ImapConnectionSemaphoreTest extends TestCase {
 		self::assertTrue($cache->hasKey('account_slot_0'));
 	}
 
-	public function testForegroundWaiterStopsBackgroundFromBorrowingSecondCommonSlot(): void {
+	public function testBackgroundCannotBorrowTheActiveContentLane(): void {
 		$cache = new SemaphoreCache();
 		$firstBackground = new ImapConnectionSemaphore($cache, 'account', 3, 1);
 		$secondBackground = new ImapConnectionSemaphore($cache, 'account', 3, 1);
 		self::assertTrue($firstBackground->acquireFor(ImapWorkClass::MAINTENANCE));
-		self::assertTrue($secondBackground->acquireFor(ImapWorkClass::MAINTENANCE));
+		self::assertFalse($secondBackground->acquireFor(ImapWorkClass::MAINTENANCE));
 
 		$foreground = new ImapConnectionSemaphore($cache, 'account', 3, 1);
-		self::assertFalse($foreground->acquireFor(ImapWorkClass::ACTIVE_CONTENT));
-		$secondBackground->release();
-
-		$newBackground = new ImapConnectionSemaphore($cache, 'account', 3, 1);
-		self::assertFalse($newBackground->acquireFor(ImapWorkClass::MAINTENANCE));
 		self::assertTrue($foreground->acquireFor(ImapWorkClass::ACTIVE_CONTENT));
 		self::assertTrue($cache->hasKey('account_slot_1'));
+	}
+
+	public function testActiveContentFallsBackToTheSyncLaneWhenItIsIdle(): void {
+		$cache = new SemaphoreCache();
+		$firstContent = new ImapConnectionSemaphore($cache, 'account', 3, 1);
+		$secondContent = new ImapConnectionSemaphore($cache, 'account', 3, 1);
+
+		self::assertTrue($firstContent->acquireFor(ImapWorkClass::ACTIVE_CONTENT));
+		self::assertTrue($cache->hasKey('account_slot_1'));
+		self::assertTrue($secondContent->acquireFor(ImapWorkClass::ACTIVE_CONTENT));
+		self::assertTrue($cache->hasKey('account_slot_0'));
+	}
+
+	public function testVisibleRevalidationUsesOnlyTheSyncLane(): void {
+		$cache = new SemaphoreCache();
+		$sync = new ImapConnectionSemaphore($cache, 'account', 3, 1);
+		$revalidation = new ImapConnectionSemaphore($cache, 'account', 3, 1);
+
+		self::assertTrue($sync->acquireFor(ImapWorkClass::MAINTENANCE));
+		self::assertFalse($revalidation->acquireFor(ImapWorkClass::VISIBLE_REVALIDATION));
+		self::assertFalse($cache->hasKey('account_slot_1'));
 	}
 
 	public function testQuickMutationStillPrefersTheReservedSlot(): void {

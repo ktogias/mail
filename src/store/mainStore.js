@@ -23,6 +23,10 @@ export default defineStore('main', {
 			// ...) takes priority over the background watched-mailbox
 			// poller. See setInteractionPriorityMutation().
 			interactionPriorityUntil: 0,
+			// Queued + running direct-user requests reported by the shared
+			// request coordinator. Unlike the short trailing timestamp above,
+			// this keeps background sync paused for the request's full lifetime.
+			activeUserRequestCount: 0,
 			// In-flight fetchEnvelopes() calls per mailbox+query list
 			// key -- lets the UI show a loading state for an envelope
 			// list that is still empty because its fetch hasn't

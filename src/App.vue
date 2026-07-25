@@ -86,8 +86,9 @@ export default {
 	async mounted() {
 		initAfterAppCreation()
 		this.connectivityRecoveryAttempt = 0
-		this.unsubscribeRequestCoordinator = requestCoordinator.subscribe(({ networkState }) => {
+		this.unsubscribeRequestCoordinator = requestCoordinator.subscribe(({ networkState, activeUserRequests }) => {
 			this.mainStore.setNetworkStateMutation(networkState)
+			this.mainStore.setActiveUserRequestCountMutation(activeUserRequests)
 			this.renderNetworkStatus()
 			if (
 				networkState === 'degraded'
@@ -297,6 +298,10 @@ export default {
 					})
 				this.watchedMailboxSyncTimeout = setTimeout(tick, nextTickDelay())
 			}
+			const rescheduleTickNormally = () => {
+				clearTimeout(this.watchedMailboxSyncTimeout)
+				this.watchedMailboxSyncTimeout = setTimeout(tick, nextTickDelay())
+			}
 			this.watchedMailboxSyncTimeout = setTimeout(tick, nextTickDelay())
 
 			// Engagement + activation wiring. Throttled: lastActivity only
@@ -310,7 +315,12 @@ export default {
 					const wasIdle = (now - this.lastActivity) > IDLE_AFTER_MS
 					this.lastActivity = now
 					this.mainStore.resetNotificationEngagementMutation()
-					if (wasIdle) {
+					if (
+						wasIdle
+						&& this.networkState === 'healthy'
+						&& this.connectivityRecoveryPromise === undefined
+						&& Date.now() - (this.lastLongResumeAt ?? 0) >= 10_000
+					) {
 						// Coming back after a long pause: reconcile now
 						// rather than waiting out a slow-tier delay drawn
 						// while we were away.
@@ -324,6 +334,9 @@ export default {
 				if (document.visibilityState === 'visible') {
 					const returnedAfterLongAbsence = this.hiddenAt !== undefined
 						&& Date.now() - this.hiddenAt >= 60_000
+					if (returnedAfterLongAbsence) {
+						this.lastLongResumeAt = Date.now()
+					}
 					this.hiddenAt = undefined
 					this.lastActivity = Date.now()
 					this.mainStore.resetNotificationEngagementMutation()
@@ -332,7 +345,11 @@ export default {
 						// thread must be consistent the moment the user looks.
 						this.rescheduleTickNow(tick)
 					} else {
-						this.recoverConnectivity().finally(() => this.rescheduleTickNow(tick))
+						// A long-thawed tab gets one ordered active-view
+						// recovery. Do not immediately follow it with a full
+						// watched-mailbox fan-out; the normal jittered timer
+						// will reconcile background mailboxes afterwards.
+						this.recoverConnectivity().finally(rescheduleTickNormally)
 					}
 				} else {
 					this.hiddenAt = Date.now()
@@ -344,14 +361,23 @@ export default {
 				this.mainStore.resetNotificationEngagementMutation()
 				const returnedAfterLongAbsence = this.hiddenAt !== undefined
 					&& Date.now() - this.hiddenAt >= 60_000
-				if (this.networkState === 'healthy' && !returnedAfterLongAbsence) {
+				const followsLongResume = Date.now() - (this.lastLongResumeAt ?? 0) < 10_000
+				if (returnedAfterLongAbsence) {
+					this.lastLongResumeAt = Date.now()
+				}
+				if (followsLongResume) {
+					// Firefox Android commonly emits focus immediately after
+					// visibilitychange. The visibility handler already owns
+					// this resume transaction; only preserve the normal timer.
+					rescheduleTickNormally()
+				} else if (this.networkState === 'healthy' && !returnedAfterLongAbsence) {
 					this.rescheduleTickNow(tick)
 				} else {
 					// Firefox Android may deliver focus and visibilitychange
 					// back-to-back after thawing a tab. Do not let focus start
 					// the background sync burst in parallel with the ordered
 					// health/outbox/visible-view recovery transaction.
-					this.recoverConnectivity().finally(() => this.rescheduleTickNow(tick))
+					this.recoverConnectivity().finally(rescheduleTickNormally)
 				}
 			}
 			this.onWindowBlur = () => {
@@ -386,6 +412,13 @@ export default {
 			requestCoordinator.setNetworkState('recovering')
 			this.connectivityRecoveryPromise = (async () => {
 				await probeMailHealth()
+				// The authenticated, IMAP-free probe is the connectivity
+				// authority. Re-open foreground traffic immediately; the
+				// bounded reconciliation below may still encounter mailbox
+				// capacity backpressure, which is not a network outage.
+				requestCoordinator.setNetworkState('healthy')
+				this.connectivityRecoveryAttempt = 0
+
 				await runCrossTabExclusive(
 					'mutation-outbox',
 					() => replayQueuedMutations(),
@@ -397,6 +430,8 @@ export default {
 					await this.mainStore.syncEnvelopes({
 						mailboxId,
 						workClass: WorkClass.VISIBLE_REVALIDATION,
+					}).catch((error) => {
+						logger.debug('Active view revalidation deferred after connectivity recovery', { error })
 					})
 				}
 				if (this.hasMailAccounts) {
@@ -404,8 +439,6 @@ export default {
 						logger.debug('Priority Inbox counter revalidation failed during connectivity recovery', { error })
 					})
 				}
-				requestCoordinator.setNetworkState('healthy')
-				this.connectivityRecoveryAttempt = 0
 				broadcastMailEvent({
 					type: 'connectivity-recovered',
 					at: Date.now(),

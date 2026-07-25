@@ -167,8 +167,9 @@ describe('App', () => {
 			expect(store.unengagedNotificationBursts).toBe(0)
 		})
 
-		it('probes and replays before syncing after a long hidden interval', async () => {
+		it('recovers the active view without an immediate full tick after a long hidden interval', async () => {
 			vi.useFakeTimers()
+			const random = vi.spyOn(Math, 'random').mockReturnValue(0)
 			store.syncWatchedMailboxes = vi.fn().mockResolvedValue()
 			view.vm.recoverConnectivity = vi.fn().mockResolvedValue()
 			view.vm.startWatchedMailboxSync()
@@ -180,11 +181,15 @@ describe('App', () => {
 			vi.advanceTimersByTime(1)
 
 			expect(view.vm.recoverConnectivity).toHaveBeenCalledTimes(1)
+			expect(store.syncWatchedMailboxes).not.toHaveBeenCalled()
+			vi.advanceTimersByTime(20_000)
 			expect(store.syncWatchedMailboxes).toHaveBeenCalledTimes(1)
+			random.mockRestore()
 		})
 
-		it('does not start the watched sync burst ahead of recovery on focus', async () => {
+		it('returns to the normal cadence instead of bursting after focus recovery', async () => {
 			vi.useFakeTimers()
+			const random = vi.spyOn(Math, 'random').mockReturnValue(0)
 			store.syncWatchedMailboxes = vi.fn().mockResolvedValue()
 			let finishRecovery
 			view.vm.recoverConnectivity = vi.fn().mockReturnValue(new Promise((resolve) => {
@@ -202,7 +207,10 @@ describe('App', () => {
 			finishRecovery()
 			await Promise.resolve()
 			vi.advanceTimersByTime(1)
+			expect(store.syncWatchedMailboxes).not.toHaveBeenCalled()
+			vi.advanceTimersByTime(20_000)
 			expect(store.syncWatchedMailboxes).toHaveBeenCalledTimes(1)
+			random.mockRestore()
 		})
 	})
 

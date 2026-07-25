@@ -41,12 +41,12 @@ final class ImapWorkClass {
 		return in_array($workClass, [
 			self::ACTIVE_CONTENT,
 			self::EXPLICIT_HEAVY,
-			self::VISIBLE_REVALIDATION,
 		], true);
 	}
 
 	public static function isBackground(string $workClass): bool {
 		return in_array($workClass, [
+			self::VISIBLE_REVALIDATION,
 			self::SPECULATIVE,
 			self::MAINTENANCE,
 		], true);

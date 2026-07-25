@@ -28,7 +28,6 @@ use function usleep;
  */
 final class ImapConnectionSemaphore {
 	private const SLOT_TTL_SECONDS = 5 * 60;
-	private const FOREGROUND_WAITER_TTL_SECONDS = 2;
 
 	private string $owner;
 	private ?string $slotKey = null;
@@ -68,14 +67,14 @@ final class ImapConnectionSemaphore {
 	 *
 	 * With the production default of three connections and one reserved slot:
 	 * - quick mutations may use 2, 1 or 0 and prefer slot 2;
-	 * - foreground reads/explicit refreshes may use 1 or 0;
-	 * - background work normally borrows 1 but falls back to slot 0 while a
-	 *   foreground waiter is present.
+	 * - active content may use 1 or 0 and prefers slot 1;
+	 * - sync/revalidation work may use slot 0 only.
 	 *
-	 * The short distributed waiter marker is deliberately a lease, not a
-	 * counter. A killed request therefore cannot permanently suppress
-	 * background work, while all PHP workers and browser tabs still see the
-	 * same priority signal.
+	 * This hard partition is intentional. A killed PHP worker can retain its
+	 * five-minute slot lease, so a soft "foreground waiter" signal cannot
+	 * recover capacity already borrowed by a sync. Keeping one ordinary slot
+	 * out of the sync lane guarantees that a stale or genuinely long-running
+	 * sync cannot starve the message body the user is actively opening.
 	 */
 	public function acquireFor(string $workClass, int $waitMilliseconds = 0): bool {
 		if ($this->slotKey !== null) {
@@ -91,14 +90,6 @@ final class ImapConnectionSemaphore {
 		$workClass = ImapWorkClass::normalize($workClass);
 		$remainingWaitMilliseconds = max(0, $waitMilliseconds);
 		do {
-			if (ImapWorkClass::isForeground($workClass)) {
-				$this->cache->set(
-					$this->foregroundWaiterKey(),
-					$this->owner,
-					self::FOREGROUND_WAITER_TTL_SECONDS,
-				);
-			}
-
 			foreach ($this->getCandidateSlots($workClass) as $slot) {
 				$key = $this->identity . '_slot_' . $slot;
 				if ($this->cache->add($key, $this->owner, self::SLOT_TTL_SECONDS)) {
@@ -124,21 +115,18 @@ final class ImapConnectionSemaphore {
 		}
 
 		$ordinaryLimit = $this->getAvailableLimit(false);
-		if (ImapWorkClass::isForeground($workClass)) {
+		if ($workClass === ImapWorkClass::ACTIVE_CONTENT) {
 			return array_reverse(range(0, max($ordinaryLimit - 1, 0)));
 		}
 
-		if (ImapWorkClass::isBackground($workClass)
-			&& $ordinaryLimit > 1
-			&& $this->cache->get($this->foregroundWaiterKey()) !== null) {
-			return [0];
-		}
-
-		return range(0, max($ordinaryLimit - 1, 0));
-	}
-
-	private function foregroundWaiterKey(): string {
-		return $this->identity . '_foreground_waiter';
+		// If an interactive mutation slot exists and there is more than one
+		// ordinary slot, keep the highest ordinary slot exclusively available
+		// to active content. Explicit refresh, visible revalidation and all
+		// background work share only the remaining sync lane.
+		$syncLimit = $this->reservedSlots > 0 && $ordinaryLimit > 1
+			? $ordinaryLimit - 1
+			: $ordinaryLimit;
+		return range(0, max($syncLimit - 1, 0));
 	}
 
 	public function release(): void {

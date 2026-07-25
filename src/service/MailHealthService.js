@@ -12,6 +12,7 @@ export async function probeMailHealth() {
 		// trying to establish. This endpoint is authenticated, DB/IMAP-free,
 		// separately routed, and bounded by the timeout below.
 		mailPriorityBypass: true,
+		mailConnectivityProbe: true,
 		timeout: 10_000,
 	})
 	return data

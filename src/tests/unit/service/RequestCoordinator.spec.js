@@ -5,6 +5,7 @@
 
 import {
 	coordinateMailRequest,
+	isConnectivityFailure,
 	isMailRequest,
 	releaseCrossTabLeadership,
 	RequestCoordinator,
@@ -17,6 +18,66 @@ describe('RequestCoordinator', () => {
 		expect(isMailRequest(undefined)).toBe(false)
 		expect(isMailRequest({})).toBe(false)
 		expect(isMailRequest({ url: '/apps/mail/api/messages' })).toBe(true)
+	})
+
+	it('treats capacity backpressure as reachable, not a connectivity failure', () => {
+		for (const status of [425, 429]) {
+			expect(isConnectivityFailure({
+				config: {
+					url: '/apps/mail/api/messages/123/body',
+					mailWorkClass: WorkClass.ACTIVE_CONTENT,
+				},
+				response: { status },
+			})).toBe(false)
+		}
+	})
+
+	it('does not let a background sync failure degrade global connectivity', () => {
+		expect(isConnectivityFailure({
+			config: {
+				url: '/apps/mail/api/mailboxes/11/sync',
+				mailWorkClass: WorkClass.MAINTENANCE,
+			},
+			response: { status: 502 },
+		})).toBe(false)
+	})
+
+	it('still recovers connectivity after network and foreground failures', () => {
+		expect(isConnectivityFailure({
+			config: {
+				url: '/apps/mail/api/messages/123/body',
+				mailWorkClass: WorkClass.ACTIVE_CONTENT,
+			},
+		})).toBe(true)
+		expect(isConnectivityFailure({
+			config: {
+				url: '/apps/mail/api/messages/123/body',
+				mailWorkClass: WorkClass.ACTIVE_CONTENT,
+			},
+			response: { status: 503 },
+		})).toBe(true)
+	})
+
+	it('reports foreground pressure for the complete queued and running lifetime', async () => {
+		const coordinator = new RequestCoordinator()
+		const release = await coordinator.acquire({
+			workClass: WorkClass.ACTIVE_CONTENT,
+			accountId: 'account-1',
+		})
+		expect(coordinator.snapshot().activeUserRequests).toBe(1)
+
+		const queued = coordinator.acquire({
+			workClass: WorkClass.ACTIVE_CONTENT,
+			accountId: 'account-1',
+		})
+		await Promise.resolve()
+		expect(coordinator.snapshot().activeUserRequests).toBe(2)
+
+		release()
+		const releaseQueued = await queued
+		expect(coordinator.snapshot().activeUserRequests).toBe(1)
+		releaseQueued()
+		expect(coordinator.snapshot().activeUserRequests).toBe(0)
 	})
 
 	it('keeps background work single-file and starts a quick mutation ahead of it', async () => {

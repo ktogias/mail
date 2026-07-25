@@ -3030,21 +3030,12 @@ export default function mainStoreActions() {
 		},
 		/**
 		 * @param {object} options
-		 * @param {boolean} options.lightweight Sync only ONE representative
-		 *                                      query bucket per watched
-		 *                                      mailbox and skip the
-		 *                                      priority-inbox refresh. Used
-		 *                                      by hidden tabs (see
-		 *                                      App.vue): enough for a full,
-		 *                                      timely new-mail notification
-		 *                                      (the sync response carries
-		 *                                      sender/subject/preview), at a
-		 *                                      fraction of a full tick's
-		 *                                      request volume -- the rest of
-		 *                                      the UI state is reconciled by
-		 *                                      the immediate full tick that
-		 *                                      fires when the tab becomes
-		 *                                      visible again.
+		 * @param {boolean} options.lightweight Skip the Priority Inbox
+		 *                                      section refresh. Every tick
+		 *                                      uses one canonical sync per
+		 *                                      physical mailbox; hidden tabs
+		 *                                      additionally avoid the
+		 *                                      section fan-out.
 		 */
 		async syncWatchedMailboxes({ lightweight = false } = {}) {
 			// Skip superfluous requests if using passwordless authentication. They will fail anyway.
@@ -3243,107 +3234,22 @@ export default function mainStoreActions() {
 					}
 					watchedMailboxSyncsInFlight.add(mailbox.databaseId)
 
-					// Sync every query bucket already loaded for this mailbox
-					// (e.g. '' for the plain view, 'not:starred' when the user
-					// has "sort favorites separately" enabled), not just the
-					// unfiltered default -- new messages synced under a query
-					// nobody's envelopeLists key matches the currently
-					// displayed one are added to the store but never rendered.
-					// Falls back to the unfiltered default for a mailbox with
-					// no envelopeLists yet (never opened this session).
+					// One canonical physical-mailbox sync per tick. Query
+					// buckets accumulate for the lifetime of a tab (searches,
+					// starred splits, all three Priority sections); replaying
+					// every historical bucket turned one five-inbox tick into
+					// 40-60 requests after a long session. The unfiltered
+					// response already carries new/changed/vanished rows and
+					// reclassifyFlagBucketsMutation updates loaded structural
+					// lists from those envelopes. The currently visible query
+					// still has its own component/view revalidation, while
+					// Priority Inbox owns its explicit section refresh below.
 					//
-					// Sequential, not Promise.all: syncEnvelopes() has its own
-					// internal retry-on-lock loop (every 1.5s) that keeps
-					// awaiting until the mailbox unlocks. A sync lock is
-					// mailbox-wide, not per-query -- firing every bucket's
-					// sync concurrently means every bucket independently
-					// re-triggers its own 1.5s retry chain against the same
-					// lock, multiplying request volume by the bucket count
-					// for as long as the mailbox stays locked (confirmed
-					// live: a genuinely long lock on the slow Gmail account
-					// produced a sustained ~1 request/second storm with two
-					// buckets loaded). Going sequential means only one
-					// bucket's sync (and its retry chain, if any) is ever
-					// in flight for a given mailbox at a time; the rest
-					// simply wait their turn, and once the lock clears they
-					// resolve immediately since nothing else needed re-sent.
-					const queries = Object.keys(mailbox.envelopeLists)
-					let queriesToSync = queries.length > 0 ? queries : [undefined]
-
-					// Wave 1b bucket coalescing: is:starred/not:starred and
-					// is:pi-important/is:pi-other are pure predicates over a
-					// flag every envelope already carries (flags.flagged /
-					// flags.important) -- when the unfiltered '' bucket is
-					// ALSO loaded for this mailbox, its own sync response
-					// already reports every changed flag for every known
-					// message (an unfiltered query has no flag restriction,
-					// so nothing is excluded from "changed"), and
-					// reclassifyFlagBucketsMutation (see addEnvelopesMutation/
-					// updateEnvelopeMutation) keeps every OTHER loaded
-					// flag-predicate bucket correct from that same response.
-					// Syncing them separately -- up to 5 buckets, each its
-					// own request -- was pure duplication of that same
-					// question against the same server-side state. Only
-					// collapses when '' is present: without it, there is no
-					// single sync whose response is guaranteed to cover
-					// every known id's current flags, so the old one-sync-
-					// per-bucket behaviour is left untouched (no regression,
-					// just no coalescing) for that less common case.
-					const coalescedQueries = new Set(['is:starred', 'not:starred', priorityImportantQuery, priorityOtherQuery])
-					if (queriesToSync.includes('')) {
-						queriesToSync = queriesToSync.filter((query) => !coalescedQueries.has(query))
-					}
-
-					// is:pi-important/is:pi-other (bare, or compound with
-					// not:starred from "sort favorites separately", see
-					// appendToSearch()) end up loaded on THIS real mailbox's
-					// own envelopeLists as a side effect of
-					// maybeStartPriorityInboxRefresh()'s own fan-out
-					// (fetchEnvelopes()'s isUnified branch writes to each
-					// constituent real mailbox via replace:true), not
-					// because this mailbox's own view ever asked for it --
-					// unlike is:starred/not:starred, which a REAL folder's
-					// own "Favorites" section can legitimately load too
-					// (same appendToSearch() output, no way to tell the two
-					// origins apart from the query string alone -- see the
-					// "does NOT coalesce" test above, which deliberately
-					// keeps that case syncing independently). is:pi-
-					// important/is:pi-other have no such second origin:
-					// this app's importance/other classification only ever
-					// exists inside Priority Inbox. maybeStartPriorityInboxRefresh()
-					// already owns keeping these two in sync, uniformly,
-					// across every inbox-specialRole real mailbox -- having
-					// this completely separate, uncoordinated loop ALSO
-					// sync the exact same bucket independently every tick
-					// means two callers race to read "known ids" from the
-					// same envelopeLists array and each apply their own,
-					// separately-timed response to it. Confirmed live: the
-					// same message reported as "new" by BOTH syncs, over
-					// and over, tick after tick, for a thread whose star
-					// lives on an older message -- visibly redrawing the
-					// Priority Inbox and re-fetching its thread data with
-					// no new mail and no user interaction at all. Excluded
-					// unconditionally (not just when '' is also loaded,
-					// unlike the coalescing above): maybeStartPriorityInboxRefresh()
-					// reaches every inbox-specialRole mailbox regardless of
-					// what else happens to be loaded on this one specifically.
-					const importanceOnlyTokens = new Set([priorityImportantQuery, priorityOtherQuery])
-					queriesToSync = queriesToSync.filter((query) => {
-						if (typeof query !== 'string') {
-							return true
-						}
-						return !query.split(' ').some((token) => importanceOnlyTokens.has(token))
-					})
-
-					if (lightweight) {
-						// One representative bucket is enough to pull new
-						// messages into the store and fire the notification:
-						// prefer the unfiltered bucket when it's loaded,
-						// otherwise whichever bucket happens to be first.
-						// The remaining buckets read the same store and are
-						// reconciled by the full tick on tab activation.
-						queriesToSync = queries.includes('') ? [''] : [queriesToSync[0]]
-					}
+					// If the canonical bucket has never been loaded, fetch it
+					// once before establishing its sync state. Subsequent
+					// ticks are exactly one request for this physical mailbox,
+					// independent of how many old searches remain in memory.
+					const queriesToSync = [Object.hasOwn(mailbox.envelopeLists, '') ? '' : undefined]
 
 					try {
 						const newMessagesPerQuery = []
@@ -6435,6 +6341,18 @@ export default function mainStoreActions() {
 		setPendingMutationCountMutation(count) {
 			this.pendingMutationCount = count
 		},
+		setActiveUserRequestCountMutation(count) {
+			const normalizedCount = Math.max(0, count)
+			if (this.activeUserRequestCount > 0 && normalizedCount === 0) {
+				// Keep the existing short trailing grace period after the
+				// last direct request settles. The lifetime counter prevents
+				// the old 4s timeout from expiring mid-request; this handoff
+				// prevents background reconciliation from landing in the
+				// same paint/mutation turn as its completion.
+				this.interactionPriorityUntil = Date.now() + INTERACTION_PRIORITY_WINDOW_MS
+			}
+			this.activeUserRequestCount = normalizedCount
+		},
 		notificationBurstFiredMutation() {
 			this.unengagedNotificationBursts++
 		},
@@ -6447,12 +6365,15 @@ export default function mainStoreActions() {
 		// INTERACTION_PRIORITY_WINDOW_MS above) -- called at the start of
 		// every direct user action (opening a message, switching folders,
 		// starring/deleting/flagging, ...) so the background
-		// watched-mailbox poller steps out of the way while it runs.
+		// watched-mailbox poller steps out of the way while it runs. The
+		// request coordinator's activeUserRequestCount extends this for the
+		// complete request lifetime and re-arms it as a trailing grace period.
 		setInteractionPriorityMutation() {
 			this.interactionPriorityUntil = Date.now() + INTERACTION_PRIORITY_WINDOW_MS
 		},
 		isInteractionPriorityActive() {
-			return Date.now() < this.interactionPriorityUntil
+			return this.activeUserRequestCount > 0
+				|| Date.now() < this.interactionPriorityUntil
 		},
 		// Shared, store-level undo-hide bookkeeping -- see
 		// pendingRemovals' own comment in mainStore.js for why this

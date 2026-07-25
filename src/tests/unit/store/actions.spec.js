@@ -3125,20 +3125,11 @@ describe('Vuex store actions', () => {
 			expect(NotificationService.showNewMessagesNotification).toHaveBeenCalledWith([newMessage])
 		})
 
-		it('syncs every already-loaded query bucket of a mailbox, not just the default', async () => {
-			// Reproduces a real bug: when "sort favorites separately" is on, the
-			// visible list reads from envelopeLists['not:starred'], but syncWatchedMailboxes()
-			// used to only ever sync the unfiltered '' bucket -- new mail landed in
-			// the store under the wrong key and never appeared in the open view,
-			// even though the mailbox's unread counter updated correctly (a separate
-			// mechanism). This asserts every existing bucket gets its own sync call.
-			//
-			// 'not:starred' specifically is deliberately NOT used here anymore:
-			// wave 1b coalesces it away when '' is also loaded (see the
-			// dedicated coalescing describe block below), so it no longer
-			// gets its own call -- that's the intended new behavior, not a
-			// regression of this one. 'subject:foo' isn't coalescable and
-			// still exercises the original per-bucket guarantee.
+		it('uses one canonical sync regardless of how many historical query buckets are loaded', async () => {
+			// Search/query buckets remain in memory for the lifetime of a tab.
+			// Replaying all of them made background request volume grow with
+			// session age. The open query has its own view revalidation; this
+			// poller asks the physical mailbox the canonical question once.
 			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
 
 			const account13 = {
@@ -3166,17 +3157,13 @@ describe('Vuex store actions', () => {
 			await store.syncWatchedMailboxes()
 
 			expect(store.fetchEnvelopes).not.toHaveBeenCalled()
-			expect(store.syncEnvelopes).toHaveBeenCalledTimes(2)
+			expect(store.syncEnvelopes).toHaveBeenCalledTimes(1)
 			expect(store.syncEnvelopes).toHaveBeenCalledWith({
 				mailboxId: 11,
 				query: '',
 				workClass: 'maintenance',
 			})
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({
-				mailboxId: 11,
-				query: 'subject:foo',
-				workClass: 'maintenance',
-			})
+			expect(store.syncEnvelopes).not.toHaveBeenCalledWith(expect.objectContaining({ query: 'subject:foo' }))
 		})
 
 		it('wave 1b: coalesces is:starred/not:starred/is:pi-important/is:pi-other into the unfiltered sync when it is also loaded', async () => {
@@ -3204,7 +3191,7 @@ describe('Vuex store actions', () => {
 			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 911, query: '', workClass: 'maintenance' })
 		})
 
-		it('wave 1b: does NOT coalesce when the unfiltered bucket is not loaded (no regression for that case)', async () => {
+		it('establishes one canonical bucket when only filtered buckets were loaded', async () => {
 			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
 
 			const account14 = { id: 914 }
@@ -3215,9 +3202,8 @@ describe('Vuex store actions', () => {
 			})
 
 			// '' itself was never loaded -- e.g. "sort favorites separately"
-			// hides the plain view entirely. Nothing here is guaranteed to
-			// cover every known id's current flags, so each bucket keeps
-			// syncing on its own, same as before wave 1b.
+			// hides the plain view entirely. Establish the canonical list once
+			// instead of polling both historical filters forever.
 			store.mailboxes[921].envelopeLists['is:starred'] = []
 			store.mailboxes[921].envelopeLists['not:starred'] = []
 
@@ -3226,12 +3212,16 @@ describe('Vuex store actions', () => {
 
 			await store.syncWatchedMailboxes()
 
-			expect(store.syncEnvelopes).toHaveBeenCalledTimes(2)
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 921, query: 'is:starred', workClass: 'maintenance' })
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 921, query: 'not:starred', workClass: 'maintenance' })
+			expect(store.fetchEnvelopes).toHaveBeenCalledWith({
+				mailboxId: 921,
+				query: undefined,
+				workClass: 'maintenance',
+			})
+			expect(store.syncEnvelopes).toHaveBeenCalledTimes(1)
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 921, query: undefined, workClass: 'maintenance' })
 		})
 
-		it('never independently syncs is:pi-important/is:pi-other on a real mailbox -- maybeStartPriorityInboxRefresh() already owns them', async () => {
+		it('never independently syncs filtered Priority buckets on a real mailbox', async () => {
 			// Regression: these two buckets end up loaded on a real
 			// mailbox's own envelopeLists purely as a side effect of
 			// maybeStartPriorityInboxRefresh()'s own fan-out (bare or
@@ -3265,14 +3255,15 @@ describe('Vuex store actions', () => {
 			await store.syncWatchedMailboxes()
 
 			expect(store.syncEnvelopes).toHaveBeenCalledTimes(1)
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 922, query: 'is:starred', workClass: 'maintenance' })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 922, query: undefined, workClass: 'maintenance' })
+			expect(store.syncEnvelopes).not.toHaveBeenCalledWith(expect.objectContaining({ query: 'is:starred' }))
 		})
 
 		it('lightweight tick: syncs only the unfiltered bucket and skips the priority refresh', async () => {
 			// Hidden tabs poll in lightweight mode (see App.vue): one
 			// representative bucket per watched mailbox is enough for a
-			// complete, timely new-mail notification; the full UI state is
-			// reconciled by the immediate full tick on tab activation.
+			// complete, timely new-mail notification; active-view recovery
+			// and the next normally scheduled visible tick reconcile the UI.
 			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
 
 			const account13 = {
@@ -3609,16 +3600,10 @@ describe('Vuex store actions', () => {
 			expect(callOrder).toContain(915)
 		})
 
-		it('syncs a mailbox\'s query buckets sequentially, not concurrently', async () => {
-			// syncEnvelopes() has its own internal retry-on-lock loop that keeps
-			// awaiting until the mailbox unlocks (every 1.5s, see its own
-			// implementation). A sync lock is mailbox-wide, not per-query, so
-			// firing every bucket's sync at once would make every bucket
-			// independently re-trigger its own retry chain against the same
-			// lock -- multiplying request volume by the bucket count for as
-			// long as the mailbox stays locked. Confirmed this actually happens
-			// live: a genuinely long-held lock on a slow account produced a
-			// sustained ~1 request/second storm with two buckets loaded.
+		it('does not queue historical query buckets behind a slow canonical sync', async () => {
+			// A slow mailbox used to retain an entire per-query sequence behind
+			// it. Once it recovered, every stale search bucket fired in turn.
+			// The canonical model has no delayed burst to drain.
 			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
 
 			const account13 = {
@@ -3635,30 +3620,15 @@ describe('Vuex store actions', () => {
 				},
 			})
 
-			// Deliberately NOT 'not:starred'/is:pi-*: those are coalesced
-			// away when '' is also loaded (see wave 1b, "bucket
-			// coalescing" below) precisely so they DON'T fire their own
-			// separate sync -- this test wants two buckets that genuinely
-			// still sync independently, to exercise the sequential-not-
-			// concurrent behavior itself.
 			store.mailboxes[11].envelopeLists[''] = []
 			store.mailboxes[11].envelopeLists['subject:foo'] = []
 
 			store.fetchEnvelopes = vi.fn(async () => {})
 
-			let firstCallInFlight = false
-			let secondCallStartedWhileFirstWasInFlight = false
 			let resolveFirstCall
-			store.syncEnvelopes = vi.fn(async () => {
-				if (!firstCallInFlight) {
-					firstCallInFlight = true
-					return new Promise((resolve) => {
-						resolveFirstCall = () => resolve([])
-					})
-				}
-				secondCallStartedWhileFirstWasInFlight = true
-				return []
-			})
+			store.syncEnvelopes = vi.fn(() => new Promise((resolve) => {
+				resolveFirstCall = () => resolve([])
+			}))
 
 			const syncPromise = store.syncWatchedMailboxes()
 
@@ -3666,14 +3636,12 @@ describe('Vuex store actions', () => {
 			await Promise.resolve()
 			await Promise.resolve()
 			expect(store.syncEnvelopes).toHaveBeenCalledTimes(1)
-			expect(secondCallStartedWhileFirstWasInFlight).toBe(false)
 
 			resolveFirstCall()
 			await syncPromise
 
-			// The second bucket's sync only fires once the first one resolves --
-			// by this point that's expected and correct, unlike above.
-			expect(store.syncEnvelopes).toHaveBeenCalledTimes(2)
+			expect(store.syncEnvelopes).toHaveBeenCalledTimes(1)
+			expect(store.syncEnvelopes).not.toHaveBeenCalledWith(expect.objectContaining({ query: 'subject:foo' }))
 		})
 
 		it('also syncs non-inbox mailboxes flagged syncInBackground', async () => {
@@ -4606,6 +4574,22 @@ describe('Vuex store actions', () => {
 
 			expect(timestampSpy).toHaveBeenCalledOnce()
 			expect(MessageService.syncEnvelopes).not.toHaveBeenCalled()
+		})
+
+		it('keeps interaction priority active for the full coordinated request lifetime', () => {
+			vi.useFakeTimers()
+			try {
+				store.setActiveUserRequestCountMutation(1)
+				vi.advanceTimersByTime(30_000)
+				expect(store.isInteractionPriorityActive()).toBe(true)
+
+				store.setActiveUserRequestCountMutation(0)
+				expect(store.isInteractionPriorityActive()).toBe(true)
+				vi.advanceTimersByTime(4_001)
+				expect(store.isInteractionPriorityActive()).toBe(false)
+			} finally {
+				vi.useRealTimers()
+			}
 		})
 
 		it('syncWatchedMailboxes limits how many mailboxes sync concurrently', async () => {
