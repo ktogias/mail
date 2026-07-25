@@ -91,6 +91,12 @@ export default defineStore('main', {
 			// component ref, so mirror it just like currentViewMailboxId and
 			// refresh the exact compound lists currently rendered.
 			currentPriorityInboxSearchQuery: undefined,
+			// Incremented after an authoritative refresh replaces the
+			// currently-rendered Priority section heads. The view uses this
+			// to reset query-local pagination exhaustion and re-arm its
+			// IntersectionObserver sentinel: neither mailbox/query/sort
+			// changes when a same-query refresh publishes a new first page.
+			priorityInboxViewRevision: 0,
 			// The envelope id of the currently open thread/message (the
 			// route's own :threadId, mirrored the same way
 			// currentViewMailboxId is -- see Thread.vue's own route

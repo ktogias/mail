@@ -197,6 +197,22 @@ describe('MailboxThread', () => {
 
 			expect(emitSpy).toHaveBeenCalledWith('load-more')
 		})
+
+		it('re-arms pagination after an authoritative same-query Priority refresh', async () => {
+			const rearmSpy = vi.spyOn(LoadMoreSentinelMixin.methods, 'rearmLoadMoreSentinel')
+			const wrapper = mountThread()
+			const emitSpy = vi.spyOn(wrapper.vm.bus, 'emit')
+
+			store.markPriorityInboxViewRefreshedMutation()
+			await wrapper.vm.$nextTick()
+			await wrapper.vm.$nextTick()
+
+			expect(emitSpy).toHaveBeenCalledWith('priority-inbox-view-replaced')
+			expect(rearmSpy).toHaveBeenCalledWith(
+				wrapper.vm.$refs.loadMoreSentinel,
+				wrapper.vm.onScroll,
+			)
+		})
 	})
 
 	describe('pull-to-refresh (owned here, not per Mailbox section)', () => {

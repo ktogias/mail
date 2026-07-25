@@ -564,6 +564,10 @@ export default {
 			return Object.values(this.priorityInboxNewCounts).join(':')
 		},
 
+		priorityInboxViewRevision() {
+			return this.mainStore.priorityInboxViewRevision
+		},
+
 		// The "still importing older messages" banner. Reads straight off the
 		// mailbox metadata (Mailbox::jsonSerialize's isCached/total, plus the
 		// controller-added `cached` for incomplete mailboxes) -- NOT the sync
@@ -654,6 +658,19 @@ export default {
 
 		priorityInboxNewCountsSignature() {
 			this.$nextTick(this.clearVisiblePriorityNewMessages)
+		},
+
+		priorityInboxViewRevision() {
+			if (!this.mailbox.isPriorityInbox) {
+				return
+			}
+			// Child Mailbox instances own their query-local endReached flag;
+			// the parent owns the one sentinel after all Priority sections.
+			// Reset both halves after a same-query authoritative replacement.
+			this.bus.emit('priority-inbox-view-replaced')
+			this.$nextTick(() => {
+				this.rearmLoadMoreSentinel(this.$refs.loadMoreSentinel, this.onScroll)
+			})
 		},
 	},
 

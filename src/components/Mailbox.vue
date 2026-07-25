@@ -193,6 +193,7 @@ export default {
 			loadMailboxInterval: undefined,
 			expanded: false,
 			endReached: false,
+			loadMoreRequested: false,
 			syncedMailboxes: new Set(),
 			skipListTransition: false,
 			// Aborts the previous loadEnvelopes() when a newer one starts
@@ -358,6 +359,7 @@ export default {
 
 	created() {
 		this.bus.on('load-more', this.onScroll)
+		this.bus.on('priority-inbox-view-replaced', this.onPriorityInboxViewReplaced)
 		this.bus.on('delete', this.onDelete)
 		this.bus.on('archive', this.onArchive)
 		this.bus.on('shortcut', this.handleShortcut)
@@ -438,6 +440,7 @@ export default {
 
 	destroyed() {
 		this.bus.off('load-more', this.onScroll)
+		this.bus.off('priority-inbox-view-replaced', this.onPriorityInboxViewReplaced)
 		this.bus.off('delete', this.onDelete)
 		this.bus.off('archive', this.onArchive)
 		this.bus.off('shortcut', this.handleShortcut)
@@ -563,7 +566,15 @@ export default {
 			// but was never actually consulted before firing again; endReached
 			// was only ever read by the MANUAL button's visibility
 			// (showLoadMore), never by this, the scroll-triggered path.
-			if (this.loadingMore || this.endReached) {
+			if (this.loadingMore) {
+				// Re-arming the sentinel after a list refresh can intersect
+				// while the previous page request is still settling. Keep one
+				// trailing request instead of losing that only observer event.
+				this.loadMoreRequested = true
+				logger.debug('loadMore() already in flight, queueing one trailing attempt')
+				return
+			}
+			if (this.endReached) {
 				logger.debug('loadMore() already in flight or the list is exhausted, ignoring')
 				return
 			}
@@ -584,7 +595,21 @@ export default {
 				logger.error('could not fetch next envelope page', { error })
 			} finally {
 				this.loadingMore = false
+				if (this.loadMoreRequested) {
+					this.loadMoreRequested = false
+					this.loadMore()
+				}
 			}
+		},
+
+		onPriorityInboxViewReplaced() {
+			if (!this.isPriorityInbox) {
+				return
+			}
+			// The same query now has a new authoritative head. A previous
+			// empty pagination result is no longer sufficient evidence that
+			// this refreshed result set has no older page.
+			this.endReached = false
 		},
 
 		// The inverse of loadMore()'s expand step: shrink the section back

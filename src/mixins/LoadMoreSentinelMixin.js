@@ -25,6 +25,16 @@ export default {
 			this.loadMoreSentinelObserver = observeLoadMoreSentinel(sentinelEl, callback, distance)
 		},
 
+		// A same-query authoritative refresh can replace or shrink the list
+		// while the sentinel remains inside the trigger margin. An existing
+		// IntersectionObserver only reports boundary crossings, so it would
+		// stay silent forever. Re-observing establishes a new initial
+		// intersection record and lets pagination continue immediately.
+		rearmLoadMoreSentinel(sentinelEl, callback, distance = 300) {
+			this.unregisterLoadMoreSentinel()
+			this.registerLoadMoreSentinel(sentinelEl, callback, distance)
+		},
+
 		// Call from the host component's own beforeDestroy(). NOT
 		// beforeUnmount(): see nextcloud-mail-vue2-unmount-hook-names
 		// memory / commit 45144e3fd -- Vue 2.7's Options API never calls

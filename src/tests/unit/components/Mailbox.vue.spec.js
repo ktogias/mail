@@ -454,6 +454,24 @@ describe('Mailbox', () => {
 
 				expect(view.vm.endReached).toBe(false)
 			})
+
+			it('resets after the same Priority query receives an authoritative replacement', () => {
+				const view = mountMailbox({ isPriorityInbox: true })
+				view.vm.endReached = true
+
+				view.vm.onPriorityInboxViewReplaced()
+
+				expect(view.vm.endReached).toBe(false)
+			})
+
+			it('does not reset a non-Priority list for a Priority replacement event', () => {
+				const view = mountMailbox()
+				view.vm.endReached = true
+
+				view.vm.onPriorityInboxViewReplaced()
+
+				expect(view.vm.endReached).toBe(true)
+			})
 		})
 	})
 

@@ -177,6 +177,35 @@ function compareEnvelopeCursors(left, right, sortOrder) {
 	return (left.databaseId - right.databaseId) * direction
 }
 
+/**
+ * Replace an authoritative first page without throwing away an already
+ * fetched older tail. Rows at/above the fresh page boundary are replaced
+ * exactly; rows strictly beyond it remain usable for instant scrolling.
+ *
+ * A short fresh page is authoritative exhaustion for that physical source,
+ * so no tail is retained. The next real pagination call will reconcile
+ * anything older than a full first page.
+ *
+ * @param {object[]} freshHead authoritative first page
+ * @param {object[]} knownList previously loaded list
+ * @param {string} sortOrder active envelope sort order
+ * @return {object[]}
+ */
+function mergeFreshEnvelopeHeadWithKnownTail(freshHead, knownList, sortOrder) {
+	const orderedFresh = combineEnvelopeLists(sortOrder)([freshHead])
+	if (orderedFresh.length < PAGE_SIZE) {
+		return orderedFresh
+	}
+
+	const boundary = last(orderedFresh)
+	const freshIds = new Set(orderedFresh.map((envelope) => envelope.databaseId))
+	const knownTail = knownList.filter((envelope) => (
+		!freshIds.has(envelope.databaseId)
+		&& compareEnvelopeCursors(envelope, boundary, sortOrder) > 0
+	))
+	return combineEnvelopeLists(sortOrder)([orderedFresh, knownTail])
+}
+
 const SEARCH_RECENT_WINDOW_SECONDS = 30 * 24 * 60 * 60
 const SEARCH_EXTENDED_WINDOW_SECONDS = 180 * 24 * 60 * 60
 
@@ -1377,6 +1406,7 @@ export default function mainStoreActions() {
 					query,
 					workClass,
 				})))
+				this.markPriorityInboxViewRefreshedMutation()
 				await this.refreshPriorityInboxStats(workClass)
 				return sectionQueries
 			}
@@ -1436,9 +1466,14 @@ export default function mainStoreActions() {
 					}
 				})
 				Object.entries(sectionQueries).forEach(([section, query]) => {
+					const refreshedList = mergeFreshEnvelopeHeadWithKnownTail(
+						bySection[section],
+						this.getEnvelopes(mailbox.databaseId, query),
+						sortOrder,
+					)
 					this.addEnvelopesMutation({
 						query,
-						envelopes: bySection[section],
+						envelopes: refreshedList,
 						addToUnifiedMailboxes: false,
 						replace: true,
 						replaceMailboxId: mailbox.databaseId,
@@ -1446,42 +1481,36 @@ export default function mainStoreActions() {
 				})
 			})
 
-			const failedMailboxIds = new Set(results
-				.filter((result) => result.error !== undefined)
-				.map((result) => result.mailbox.databaseId))
-			const freshBySection = Object.fromEntries(Object.keys(sectionQueries).map((section) => [section, []]))
-			successful.flatMap((result) => result.envelopes).forEach((envelope) => {
-				const section = priorityStatsSection(this, envelope)
-				if (section in freshBySection) {
-					freshBySection[section].push(envelope)
-				}
-			})
-
-			Object.entries(sectionQueries).forEach(([section, query]) => {
-				// Preserve rows from a source whose fresh read failed; one
-				// unavailable account must not blank successful accounts or
-				// erase its last-known-good rows.
-				const retained = this.getEnvelopes(UNIFIED_INBOX_ID, query)
-					.filter((envelope) => failedMailboxIds.has(envelope.mailboxId))
-				const exactPage = sliceToPage(combineEnvelopeLists(sortOrder)([
-					freshBySection[section],
-					retained,
-				]))
+			Object.values(sectionQueries).forEach((query) => {
+				// Rebuild the exact global head from each source's refreshed
+				// page plus its known older tail. Failed sources were left
+				// untouched above, so one unavailable account neither blanks
+				// the successful accounts nor erases its last-known-good rows.
+				const sourceLists = targetMailboxes
+					.map((mailbox) => this.getEnvelopes(mailbox.databaseId, query))
+				const combinedSourceLists = combineEnvelopeLists(sortOrder)(sourceLists)
+				const exactPage = sliceToPage(combinedSourceLists)
+				const refreshedVisibleList = mergeFreshEnvelopeHeadWithKnownTail(
+					exactPage,
+					this.getEnvelopes(UNIFIED_INBOX_ID, query),
+					sortOrder,
+				)
 				this.replaceKnownEnvelopeListMutation({
 					mailboxId: UNIFIED_INBOX_ID,
 					query,
-					envelopes: exactPage,
+					envelopes: refreshedVisibleList,
 				})
 				this.replaceKnownEnvelopeListMutation({
 					mailboxId: PRIORITY_INBOX_ID,
 					query,
-					envelopes: exactPage,
+					envelopes: refreshedVisibleList,
 				})
 			})
 
 			this.recordPriorityInboxNewMessagesMutation(successful
 				.flatMap((result) => result.envelopes)
 				.filter((envelope) => !previousVisibleIds.has(envelope.databaseId)))
+			this.markPriorityInboxViewRefreshedMutation()
 			await this.refreshPriorityInboxStats(workClass)
 			return sectionQueries
 		},
@@ -2102,6 +2131,9 @@ export default function mainStoreActions() {
 		},
 		setCurrentPriorityInboxSearchQueryMutation(query) {
 			this.currentPriorityInboxSearchQuery = query
+		},
+		markPriorityInboxViewRefreshedMutation() {
+			this.priorityInboxViewRevision++
 		},
 		// See currentOpenThreadId in mainStore.js's state() -- mirrored
 		// from Thread.vue's own route watcher, the same way

@@ -16,7 +16,7 @@ import * as NotificationService from '../../../service/NotificationService.js'
 import * as PriorityInboxService from '../../../service/PriorityInboxService.js'
 import { WorkClass } from '../../../service/RequestCoordinator.js'
 import * as ThreadService from '../../../service/ThreadService.js'
-import { PAGE_SIZE, UNIFIED_INBOX_ID } from '../../../store/constants.js'
+import { PAGE_SIZE, PRIORITY_INBOX_ID, UNIFIED_INBOX_ID } from '../../../store/constants.js'
 import useMainStore from '../../../store/mainStore.js'
 import { computeLockRetryDelayMs, mapWithConcurrencyLimit, reconcileNearExpiryLocalChanges, resetPendingDeleteRefillsForTests, resetRecentLocalChangesForTests, resetSharedNetworkLimiterForTests } from '../../../store/mainStore/actions.js'
 import { normalizedEnvelopeListId } from '../../../util/normalization.js'
@@ -159,6 +159,66 @@ describe('Vuex store actions', () => {
 		expect(Object.keys(store.priorityInboxNewMessageIds.other)).toEqual(['101'])
 		expect(PriorityInboxService.fetchPriorityInboxStats)
 			.toHaveBeenCalledWith('threaded', WorkClass.VISIBLE_REVALIDATION)
+		expect(store.priorityInboxViewRevision).toBe(1)
+	})
+
+	it('refreshes a Priority head without discarding an already loaded older tail', async () => {
+		normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+		const account = { id: 13 }
+		store.addAccountMutation(account)
+		store.addMailboxMutation({
+			account,
+			mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+		})
+		store.preferences['layout-message-view'] = 'threaded'
+		store.preferences['sort-order'] = 'newest'
+		store.preferences['sort-favorites'] = 'false'
+		const query = 'is:pi-other'
+		const known = Array.from({ length: 25 }, (_, index) => {
+			const id = 125 - index
+			return {
+				databaseId: id,
+				mailboxId: 11,
+				dateInt: id,
+				threadRootId: `thread-${id}`,
+				flags: {
+					seen: true,
+					hasUnseenInThread: false,
+					hasFlaggedInThread: false,
+					hasImportantInThread: false,
+				},
+				tags: [],
+			}
+		})
+		store.addEnvelopesMutation({
+			query,
+			envelopes: known,
+			addToUnifiedMailboxes: false,
+			replace: true,
+			replaceMailboxId: 11,
+		})
+		store.replaceKnownEnvelopeListMutation({
+			mailboxId: UNIFIED_INBOX_ID,
+			query,
+			envelopes: known,
+		})
+		store.replaceKnownEnvelopeListMutation({
+			mailboxId: PRIORITY_INBOX_ID,
+			query,
+			envelopes: known,
+		})
+		MessageService.fetchEnvelopes.mockResolvedValue(known.slice(0, PAGE_SIZE))
+		PriorityInboxService.fetchPriorityInboxStats.mockResolvedValue({
+			sections: {},
+			complete: true,
+		})
+
+		await store.refreshPriorityInboxView()
+
+		expect(store.getEnvelopes(UNIFIED_INBOX_ID, query).map((envelope) => envelope.databaseId))
+			.toEqual(known.map((envelope) => envelope.databaseId))
+		expect(store.getEnvelopes(PRIORITY_INBOX_ID, query).map((envelope) => envelope.databaseId))
+			.toEqual(known.map((envelope) => envelope.databaseId))
 	})
 
 	it('uses one canonical source sync before an explicit Priority view refresh', async () => {
