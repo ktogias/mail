@@ -4,6 +4,7 @@
  */
 
 import {
+	coordinateMailRequest,
 	isMailRequest,
 	releaseCrossTabLeadership,
 	RequestCoordinator,
@@ -94,6 +95,74 @@ describe('RequestCoordinator', () => {
 			accountId: 'account-1',
 		})
 		releaseMutation()
+	})
+
+	it('reuses one permit when @nextcloud/axios retries a CSRF failure', async () => {
+		const coordinator = new RequestCoordinator()
+		const originalConfig = {
+			url: '/apps/mail/api/messages/123/body',
+			headers: {},
+		}
+		await coordinateMailRequest(originalConfig, coordinator)
+		expect(coordinator.snapshot().running).toBe(1)
+
+		// onCsrfTokenError() clones the entire config, including unknown
+		// fields, before submitting it through request interceptors again.
+		const retryConfig = {
+			...originalConfig,
+			headers: {
+				...originalConfig.headers,
+				requesttoken: 'fresh-token',
+			},
+			_nextcloudCsrfTokenReloaded: true,
+		}
+		await coordinateMailRequest(retryConfig, coordinator)
+
+		expect(coordinator.snapshot().running).toBe(1)
+		expect(retryConfig.mailCoordinatorRelease)
+			.toBe(originalConfig.mailCoordinatorRelease)
+
+		retryConfig.mailCoordinatorRelease()
+		expect(coordinator.snapshot().running).toBe(0)
+	})
+
+	it('cancels an active background permit when a tab is hidden', async () => {
+		const coordinator = new RequestCoordinator()
+		const cancel = vi.fn()
+		const release = await coordinator.acquire({
+			workClass: WorkClass.VISIBLE_REVALIDATION,
+			accountId: 'account-1',
+			cancel,
+		})
+
+		expect(coordinator.cancelRunning(
+			new Set([WorkClass.VISIBLE_REVALIDATION]),
+			'Tab hidden',
+		)).toBe(1)
+		expect(cancel).toHaveBeenCalledWith('Tab hidden')
+		expect(coordinator.snapshot().running).toBe(0)
+
+		// A later Axios cancellation response may try to release it again.
+		release()
+		expect(coordinator.snapshot().running).toBe(0)
+	})
+
+	it('expires a permit orphaned while the mobile tab was frozen', async () => {
+		const coordinator = new RequestCoordinator()
+		const cancel = vi.fn()
+		await coordinator.acquire({
+			workClass: WorkClass.ACTIVE_CONTENT,
+			accountId: 'account-1',
+			cancel,
+		})
+		const active = [...coordinator.active.values()][0]
+
+		expect(coordinator.cancelStaleRunning(
+			150_000,
+			active.startedAt + 150_001,
+		)).toBe(1)
+		expect(cancel).toHaveBeenCalled()
+		expect(coordinator.snapshot().running).toBe(0)
 	})
 
 	it('keeps one periodic leader across staggered tab ticks and fails over after expiry', async () => {

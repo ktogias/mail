@@ -342,7 +342,17 @@ export default {
 			this.onWindowFocus = () => {
 				this.lastActivity = Date.now()
 				this.mainStore.resetNotificationEngagementMutation()
-				this.rescheduleTickNow(tick)
+				const returnedAfterLongAbsence = this.hiddenAt !== undefined
+					&& Date.now() - this.hiddenAt >= 60_000
+				if (this.networkState === 'healthy' && !returnedAfterLongAbsence) {
+					this.rescheduleTickNow(tick)
+				} else {
+					// Firefox Android may deliver focus and visibilitychange
+					// back-to-back after thawing a tab. Do not let focus start
+					// the background sync burst in parallel with the ordered
+					// health/outbox/visible-view recovery transaction.
+					this.recoverConnectivity().finally(() => this.rescheduleTickNow(tick))
+				}
 			}
 			this.onWindowBlur = () => {
 				releaseCrossTabLeadership('watched-mailboxes')

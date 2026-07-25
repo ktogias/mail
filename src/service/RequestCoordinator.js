@@ -40,11 +40,17 @@ const LOW_PRIORITY_CLASSES = new Set([
 	WorkClass.SPECULATIVE,
 	WorkClass.MAINTENANCE,
 ])
+const HIDDEN_CANCEL_CLASSES = new Set([
+	WorkClass.VISIBLE_REVALIDATION,
+	WorkClass.SPECULATIVE,
+	WorkClass.MAINTENANCE,
+])
 const GLOBAL_CONCURRENCY = 4
 const PER_ACCOUNT_CONCURRENCY = 3
 const AGING_INTERVAL_MS = 30_000
 const FAIRNESS_AFTER_FOREGROUND_STARTS = 8
 const FAIRNESS_MIN_WAIT_MS = 30_000
+const MAX_PERMIT_HOLD_MS = 150_000
 
 function cancellationError(message) {
 	const error = new Error(message)
@@ -114,6 +120,7 @@ function accountKey(config) {
 export class RequestCoordinator {
 	constructor() {
 		this.queue = []
+		this.active = new Map()
 		this.running = 0
 		this.runningByClass = new Map()
 		this.runningByAccount = new Map()
@@ -125,7 +132,11 @@ export class RequestCoordinator {
 		this.nextId = 1
 	}
 
-	acquire({ workClass, accountId, signal }) {
+	acquire({ workClass, accountId, signal, cancel, onRelease }) {
+		// Mobile browsers may freeze a tab after the server has completed a
+		// request but before Axios can run its response interceptor. Never let
+		// such an orphaned browser-side permit block every future request.
+		this.cancelStaleRunning()
 		if (this.networkState === 'offline') {
 			return Promise.reject(cancellationError('Mail request skipped while offline'))
 		}
@@ -151,6 +162,8 @@ export class RequestCoordinator {
 				workClass,
 				accountId,
 				signal,
+				cancel,
+				onRelease,
 				queuedAt: Date.now(),
 				resolve,
 				reject,
@@ -222,6 +235,15 @@ export class RequestCoordinator {
 	}
 
 	canStart(item) {
+		if (this.networkState === 'offline') {
+			return false
+		}
+		if (
+			this.networkState !== 'healthy'
+			&& LOW_PRIORITY_CLASSES.has(item.workClass)
+		) {
+			return false
+		}
 		if (this.running >= GLOBAL_CONCURRENCY) {
 			return false
 		}
@@ -268,17 +290,25 @@ export class RequestCoordinator {
 			}
 
 			let released = false
-			startedItem.resolve(() => {
+			const release = () => {
 				if (released) {
 					return
 				}
 				released = true
+				this.active.delete(startedItem.id)
 				this.running--
 				this.decrement(this.runningByClass, startedItem.workClass)
 				this.decrement(this.runningByAccount, startedItem.accountId)
+				startedItem.onRelease?.()
 				this.drain()
 				this.emit()
+			}
+			this.active.set(startedItem.id, {
+				...startedItem,
+				startedAt: Date.now(),
+				release,
 			})
+			startedItem.resolve(release)
 			item = this.nextRunnableItem()
 		}
 	}
@@ -302,6 +332,30 @@ export class RequestCoordinator {
 		this.emit()
 	}
 
+	cancelRunning(workClasses, reason) {
+		const cancelled = [...this.active.values()]
+			.filter((item) => workClasses.has(item.workClass))
+		cancelled.forEach((item) => {
+			item.cancel?.(reason)
+			item.release()
+		})
+		return cancelled.length
+	}
+
+	cancelStaleRunning(
+		maxAge = MAX_PERMIT_HOLD_MS,
+		now = Date.now(),
+		reason = 'Stale mail request cancelled after its coordinator permit expired',
+	) {
+		const stale = [...this.active.values()]
+			.filter((item) => now - item.startedAt >= maxAge)
+		stale.forEach((item) => {
+			item.cancel?.(reason)
+			item.release()
+		})
+		return stale.length
+	}
+
 	setNetworkState(networkState) {
 		if (networkState === this.networkState) {
 			return
@@ -309,12 +363,12 @@ export class RequestCoordinator {
 		this.networkState = networkState
 		if (networkState === 'offline') {
 			this.cancelQueued(
-				new Set([
-					WorkClass.VISIBLE_REVALIDATION,
-					WorkClass.SPECULATIVE,
-					WorkClass.MAINTENANCE,
-				]),
+				HIDDEN_CANCEL_CLASSES,
 				'Mail request cancelled because the browser is offline',
+			)
+			this.cancelRunning(
+				HIDDEN_CANCEL_CLASSES,
+				'Background mail request cancelled because the browser is offline',
 			)
 		} else if (networkState !== 'healthy') {
 			this.cancelQueued(
@@ -322,6 +376,7 @@ export class RequestCoordinator {
 				'Background mail request cancelled while connectivity is recovering',
 			)
 		}
+		this.drain()
 		this.emit()
 	}
 
@@ -371,33 +426,78 @@ export const requestCoordinator = new RequestCoordinator()
 
 let installed = false
 
+function createLifecycleAbort(config) {
+	const controller = new AbortController()
+	const originalSignal = config.signal
+	const forwardOriginalAbort = () => controller.abort(originalSignal.reason)
+	if (originalSignal?.aborted) {
+		forwardOriginalAbort()
+	} else {
+		originalSignal?.addEventListener('abort', forwardOriginalAbort, { once: true })
+	}
+	config.signal = controller.signal
+
+	return {
+		cancel(reason) {
+			if (!controller.signal.aborted) {
+				controller.abort(cancellationError(reason))
+			}
+		},
+		cleanup() {
+			originalSignal?.removeEventListener('abort', forwardOriginalAbort)
+		},
+	}
+}
+
+export async function coordinateMailRequest(config, coordinator = requestCoordinator) {
+	if (!isMailRequest(config) || config.mailPriorityBypass === true) {
+		return config
+	}
+
+	// @nextcloud/axios transparently retries a 412 CSRF response by cloning
+	// the original config and submitting it through the request interceptors
+	// again. The clone deliberately retains unknown config fields. Reacquiring
+	// here would hold the first permit while the retry waits for a second one,
+	// then overwrite the only reference to the first release function. That
+	// permanently leaks capacity and can deadlock tab-resume recovery.
+	if (typeof config.mailCoordinatorRelease === 'function') {
+		return config
+	}
+
+	const workClass = inferWorkClass(config)
+	const lifecycleAbort = createLifecycleAbort(config)
+	let release
+	try {
+		release = await coordinator.acquire({
+			workClass,
+			accountId: accountKey(config),
+			signal: config.signal,
+			cancel: lifecycleAbort.cancel,
+			onRelease: lifecycleAbort.cleanup,
+		})
+	} catch (error) {
+		lifecycleAbort.cleanup()
+		throw error
+	}
+	config.mailCoordinatorRelease = release
+	config.headers = config.headers ?? {}
+	if (typeof config.headers.set === 'function') {
+		config.headers.set('X-Mail-Request-Class', workClass)
+		config.headers.set('Priority', HTTP_PRIORITY[workClass])
+	} else {
+		config.headers['X-Mail-Request-Class'] = workClass
+		config.headers.Priority = HTTP_PRIORITY[workClass]
+	}
+	return config
+}
+
 export function installRequestCoordinator() {
 	if (installed) {
 		return
 	}
 	installed = true
 
-	axios.interceptors.request.use(async (config) => {
-		if (!isMailRequest(config) || config.mailPriorityBypass === true) {
-			return config
-		}
-		const workClass = inferWorkClass(config)
-		const release = await requestCoordinator.acquire({
-			workClass,
-			accountId: accountKey(config),
-			signal: config.signal,
-		})
-		config.mailCoordinatorRelease = release
-		config.headers = config.headers ?? {}
-		if (typeof config.headers.set === 'function') {
-			config.headers.set('X-Mail-Request-Class', workClass)
-			config.headers.set('Priority', HTTP_PRIORITY[workClass])
-		} else {
-			config.headers['X-Mail-Request-Class'] = workClass
-			config.headers.Priority = HTTP_PRIORITY[workClass]
-		}
-		return config
-	})
+	axios.interceptors.request.use((config) => coordinateMailRequest(config))
 
 	const release = (config) => {
 		config?.mailCoordinatorRelease?.()
@@ -438,9 +538,15 @@ export function installRequestCoordinator() {
 		document.addEventListener('visibilitychange', () => {
 			if (document.visibilityState === 'hidden') {
 				requestCoordinator.cancelQueued(
-					new Set([WorkClass.SPECULATIVE]),
-					'Speculative mail request cancelled while the tab is hidden',
+					HIDDEN_CANCEL_CLASSES,
+					'Background mail request cancelled while the tab is hidden',
 				)
+				requestCoordinator.cancelRunning(
+					HIDDEN_CANCEL_CLASSES,
+					'Background mail request cancelled while the tab is hidden',
+				)
+			} else {
+				requestCoordinator.cancelStaleRunning()
 			}
 		})
 	}

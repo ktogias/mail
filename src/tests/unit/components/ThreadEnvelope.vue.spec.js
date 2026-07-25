@@ -32,6 +32,65 @@ describe('ThreadEnvelope', () => {
 		expect(t).toHaveBeenCalledWith('mail', 'The mail server is temporarily busy. Please try again.')
 	})
 
+	it('retries one cancelled queued body request instead of exposing its internal error', async () => {
+		vi.useFakeTimers()
+		window.HTMLElement.prototype.scrollIntoView = vi.fn()
+		const store = useMainStore()
+		const cancellation = Object.assign(new Error('Mail request aborted while queued'), {
+			name: 'CanceledError',
+			code: 'ERR_CANCELED',
+		})
+		store.getAccount = vi.fn().mockReturnValue({ name: 'Test', emailAddress: 'test@test.com' })
+		store.fetchMessage = vi.fn()
+			.mockRejectedValueOnce(cancellation)
+			.mockResolvedValue({
+				databaseId: 999,
+				hasHtmlBody: false,
+				attachments: [],
+				dkimValid: true,
+				itineraries: [],
+			})
+
+		const view = shallowMount(ThreadEnvelope, {
+			propsData: {
+				envelope: {
+					accountId: 123,
+					databaseId: 999,
+					from: [{ email: 'info@test.com' }],
+					to: [],
+					cc: [],
+					flags: { seen: true, flagged: false, $junk: false },
+					subject: '',
+					dateInt: 1692200926180,
+				},
+				threadSubject: '',
+				threadIndex: 0,
+				expanded: true,
+			},
+			computed: {
+				mailbox() {
+					return { myAcls: undefined, specialRole: '' }
+				},
+				archiveMailbox() {
+					return { myAcls: undefined }
+				},
+			},
+			localVue,
+		})
+
+		await vi.advanceTimersByTimeAsync(0)
+		expect(view.vm.error).toBeUndefined()
+		expect(store.fetchMessage).toHaveBeenCalledTimes(1)
+
+		await vi.advanceTimersByTimeAsync(500)
+		expect(store.fetchMessage).toHaveBeenCalledTimes(2)
+		expect(view.vm.message).toEqual(expect.objectContaining({ databaseId: 999 }))
+		expect(view.vm.error).toBeUndefined()
+
+		view.destroy()
+		vi.useRealTimers()
+	})
+
 	it('allows toggling seen flag without ACLs', () => {
 		const view = shallowMount(ThreadEnvelope, {
 			propsData: {

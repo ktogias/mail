@@ -182,6 +182,28 @@ describe('App', () => {
 			expect(view.vm.recoverConnectivity).toHaveBeenCalledTimes(1)
 			expect(store.syncWatchedMailboxes).toHaveBeenCalledTimes(1)
 		})
+
+		it('does not start the watched sync burst ahead of recovery on focus', async () => {
+			vi.useFakeTimers()
+			store.syncWatchedMailboxes = vi.fn().mockResolvedValue()
+			let finishRecovery
+			view.vm.recoverConnectivity = vi.fn().mockReturnValue(new Promise((resolve) => {
+				finishRecovery = resolve
+			}))
+			view.vm.startWatchedMailboxSync()
+			view.vm.hiddenAt = Date.now() - 60_001
+
+			view.vm.onWindowFocus()
+			vi.advanceTimersByTime(1)
+
+			expect(view.vm.recoverConnectivity).toHaveBeenCalledTimes(1)
+			expect(store.syncWatchedMailboxes).not.toHaveBeenCalled()
+
+			finishRecovery()
+			await Promise.resolve()
+			vi.advanceTimersByTime(1)
+			expect(store.syncWatchedMailboxes).toHaveBeenCalledTimes(1)
+		})
 	})
 
 	it('doubles the tick period when the server reports itself busy', async () => {

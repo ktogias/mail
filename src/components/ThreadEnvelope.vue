@@ -459,6 +459,12 @@ const Loading = Object.seal({
 	Skeleton: 2,
 })
 const SUPPLEMENTARY_FETCH_DELAY_MS = 250
+const CANCELLED_MESSAGE_RETRY_DELAY_MS = 500
+
+function isRequestCancellation(error) {
+	return axios.isCancel(error)
+		|| ['AbortError', 'CanceledError', 'TimeoutError'].includes(error?.name)
+}
 
 export default {
 	name: 'ThreadEnvelope',
@@ -574,6 +580,8 @@ export default {
 			supplementaryFetchHandle: undefined,
 			supplementaryFetchController: undefined,
 			showMailFilterFromEnvelope: false,
+			messageFetchRetryCount: 0,
+			messageFetchRetryTimeout: undefined,
 		}
 	},
 
@@ -799,6 +807,9 @@ export default {
 				this.$nextTick(() => this.handleThreadScrolling())
 			} else {
 				this.cancelSupplementaryFetches()
+				clearTimeout(this.messageFetchRetryTimeout)
+				this.messageFetchRetryTimeout = undefined
+				this.messageFetchRetryCount = 0
 				this.message = undefined
 				this.loading = Loading.Done
 				this.showRecipients = false
@@ -886,6 +897,7 @@ export default {
 			clearTimeout(this.seenTimer)
 		}
 		this.cancelSupplementaryFetches()
+		clearTimeout(this.messageFetchRetryTimeout)
 		window.removeEventListener('resize', this.redrawMenuBar)
 		this.unregisterViewportPrefetch()
 	},
@@ -954,6 +966,7 @@ export default {
 
 			try {
 				this.message = await this.mainStore.fetchMessage(this.envelope.databaseId)
+				this.messageFetchRetryCount = 0
 				logger.debug(`message ${this.envelope.databaseId} fetched`, { message: this.message })
 
 				if (loadingTimeout) {
@@ -971,7 +984,34 @@ export default {
 					this.handleThreadScrolling()
 				})
 			} catch (error) {
-				this.error = error
+				if (
+					isRequestCancellation(error)
+					&& this.expanded
+					&& this.messageFetchRetryCount < 1
+				) {
+					// A real open can deduplicate into a speculative request
+					// that was queued when a frozen mobile tab resumed. If its
+					// signal expires before the coordinator can run it, do not
+					// render the internal cancellation string as message
+					// content. The coordinator recovery fixes should make this
+					// one bounded retry start immediately.
+					this.messageFetchRetryCount++
+					this.loading = Loading.Skeleton
+					logger.debug('Retrying an expanded message after its queued request was cancelled', {
+						messageId: this.envelope.databaseId,
+						error,
+					})
+					this.messageFetchRetryTimeout = setTimeout(() => {
+						this.messageFetchRetryTimeout = undefined
+						if (this.expanded && !this._isDestroyed) {
+							this.fetchMessage()
+						}
+					}, CANCELLED_MESSAGE_RETRY_DELAY_MS)
+					return
+				}
+				this.error = isRequestCancellation(error)
+					? { isTransient: true }
+					: error
 				this.loading = Loading.Done
 				logger.error('Could not fetch message', { error })
 			}
