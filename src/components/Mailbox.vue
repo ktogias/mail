@@ -166,17 +166,19 @@ export default {
 			default: false,
 		},
 
-		// Test-only escape hatch: mounted()'s own auto-load/sync (below)
-		// must always run for every real instance, in production -- that
-		// used to be gated on the app-wide hasFetchedInitialEnvelopes
-		// flag, which is now scoped to prefetchOtherMailboxes() alone
-		// (see mounted()'s own comment for why). A lot of this file's own
-		// tests rely on mounting the component and then driving
-		// loadEnvelopes()/initializeCache() by hand, in full control of
-		// exactly when and how many times each mock resolves -- this
-		// prop lets them opt out of the automatic mount-time call
-		// without resurrecting the app-wide flag's original bug.
+		// Composite views may let their parent populate several structural
+		// sections with one exact snapshot. Tests also use this to drive
+		// loadEnvelopes()/initializeCache() explicitly.
 		skipInitialLoad: {
+			type: Boolean,
+			required: false,
+			default: false,
+		},
+
+		// Load the cached database view, but leave remote synchronization to
+		// a parent coordinator. Priority Inbox uses this for Follow-up so its
+		// Sent source does not compete with initial message content requests.
+		skipInitialSync: {
 			type: Boolean,
 			required: false,
 			default: false,
@@ -397,30 +399,15 @@ export default {
 			await wait(300)
 		}
 
-		// loadEnvelopes()/sync() must run for THIS instance every single
-		// time it mounts, unconditionally -- they fetch/refresh THIS
-		// instance's own mailbox+query, which no other instance's mount
-		// ever does on its behalf. This used to be skipped outright
-		// whenever hasFetchedInitialEnvelopes was already true, on the
-		// mistaken assumption that "some Mailbox already did its initial
-		// load this session" meant THIS one's data was covered too.
-		// Priority Inbox alone mounts up to 4 sibling Mailbox instances
-		// at once (Favorites/Follow-up/Important/Other, each its own
-		// mailbox+query combination), and any account with "sort
-		// favorites separately" enabled mounts 2 in the plain mailbox
-		// view the same way -- confirmed live (and by a regression test
-		// mounting two simultaneous instances) that whichever section's
-		// chain happened to settle first flipped this flag before a
-		// slower sibling's own mounted() got there, permanently skipping
-		// that sibling's OWN initial fetch for the rest of the page's
-		// life: an entire Priority Inbox section (confirmed to be
-		// "Other") silently never loaded after a hard refresh, with
-		// nothing in the console to explain it -- exactly the
-		// intermittent, reload-triggered "whole section just isn't
-		// there" symptom this was reported as.
+		// By default every standalone Mailbox instance owns its cached load
+		// and remote sync. A parent-owned composite section can opt out of
+		// the remote phase without reviving the old global
+		// hasFetchedInitialEnvelopes gate that skipped unrelated instances.
 		await this.loadEnvelopes()
-		logger.debug(`syncing folder ${this.mailbox.databaseId} (${this.searchQuery}) after mount`)
-		await this.sync(false)
+		if (!this.skipInitialSync) {
+			logger.debug(`syncing folder ${this.mailbox.databaseId} (${this.searchQuery}) after mount`)
+			await this.sync(false)
+		}
 
 		// prefetchOtherMailboxes(), unlike the two calls above, speculatively
 		// warms the cache for every OTHER subscribed mailbox in this same

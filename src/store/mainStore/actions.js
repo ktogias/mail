@@ -450,6 +450,12 @@ const pendingThreadFetches = new Map()
 // in-flight request.
 const pendingUnifiedSyncs = new Map()
 
+// Canonical syncs of a real mailbox (no structural query, non-init) are also
+// single-flight. Watched sync, a composite-view refresh and legacy callers can
+// otherwise hit the same physical INBOX concurrently. Keep this per Pinia
+// store, and never collapse distinct structural searches.
+const pendingCanonicalPhysicalSyncs = new WeakMap()
+
 // Concurrent Priority/Unified section components searching the same content
 // share one physical request wave. Kept per Pinia store (rather than one
 // process-wide Map) so test stores and independently-mounted app instances
@@ -643,6 +649,32 @@ function envelopeMatchesSharedSearchSection(envelope, flagTokens, threaded) {
 const RECENT_FLAG_CHANGE_GRACE_MS = 120 * 1000
 let recentLocalChanges = new Map()
 
+// Exact Priority Inbox refreshes publish a complete server-materialized
+// section snapshot. A snapshot that started before, or while, a direct
+// star/important mutation was still landing may therefore describe the
+// pre-click section even though reclassifyFlagBucketsMutation() has already
+// moved the row optimistically. Track a tiny app-wide generation plus the
+// number of unresolved section-changing mutations so refreshPriorityInboxView()
+// can retain the newer local section for just those overlapping snapshots.
+//
+// This is deliberately separate from recentLocalChanges' 120s scalar-field
+// grace window. Section membership is thread-wide and a successful later
+// snapshot may legitimately disagree because another member of the thread
+// still carries the flag; retaining it for the full scalar grace window would
+// hide that authoritative correction. A generation/in-flight overlap test
+// rejects only snapshots that can actually predate the user's action.
+let prioritySectionMutationRevision = 0
+let prioritySectionMutationsInFlight = 0
+
+function beginPrioritySectionMutation() {
+	prioritySectionMutationRevision++
+	prioritySectionMutationsInFlight++
+}
+
+function endPrioritySectionMutation() {
+	prioritySectionMutationsInFlight = Math.max(0, prioritySectionMutationsInFlight - 1)
+}
+
 // Test-only: module-level, deliberately (must be shared across every
 // store instance and survive whichever component happened to trigger
 // the original change, not per Pinia-instance state) -- so, like
@@ -655,6 +687,8 @@ let recentLocalChanges = new Map()
 // other, with no relation between the two tests at all.
 export function resetRecentLocalChangesForTests() {
 	recentLocalChanges = new Map()
+	prioritySectionMutationRevision = 0
+	prioritySectionMutationsInFlight = 0
 }
 
 // IMPORTANT_TAG_LABEL (imported above) is the IMAP keyword backing the
@@ -1382,6 +1416,11 @@ export default function mainStoreActions() {
 			workClass = WorkClass.ACTIVE_CONTENT,
 			syncSources = false,
 		} = {}) {
+			// Capture before any await. If a section-changing click is already
+			// unresolved, or starts while the requests below are in flight,
+			// their DB snapshot can still contain the pre-click classification.
+			const sectionMutationRevisionAtStart = prioritySectionMutationRevision
+			const sectionMutationWasInFlightAtStart = prioritySectionMutationsInFlight > 0
 			const sortFavorites = this.getPreference('sort-favorites', 'false') === 'true'
 			const sectionQueries = priorityInboxSectionQueries(searchQuery, sortFavorites)
 			const baseQuery = priorityInboxBaseQuery(searchQuery)
@@ -1450,6 +1489,9 @@ export default function mainStoreActions() {
 				throw results[0].error
 			}
 
+			const preserveNewerLocalSections = sectionMutationWasInFlightAtStart
+				|| prioritySectionMutationsInFlight > 0
+				|| prioritySectionMutationRevision !== sectionMutationRevisionAtStart
 			const previousVisibleIds = new Set(Object.values(sectionQueries)
 				.flatMap((query) => this.getEnvelopes(UNIFIED_INBOX_ID, query))
 				.map((envelope) => envelope.databaseId))
@@ -1459,8 +1501,23 @@ export default function mainStoreActions() {
 			// list ids below are published.
 			successful.forEach(({ mailbox, envelopes }) => {
 				const bySection = Object.fromEntries(Object.keys(sectionQueries).map((section) => [section, []]))
+				const localSectionByThread = new Map()
+				if (preserveNewerLocalSections) {
+					Object.entries(sectionQueries).forEach(([section, query]) => {
+						this.getEnvelopes(mailbox.databaseId, query).forEach((known) => {
+							const threadKey = known.threadRootId ?? `id:${known.databaseId}`
+							localSectionByThread.set(threadKey, section)
+						})
+					})
+				}
 				envelopes.forEach((envelope) => {
-					const section = priorityStatsSection(this, envelope)
+					const threadKey = envelope.threadRootId ?? `id:${envelope.databaseId}`
+					// A user-initiated reclassification is the newest state
+					// whenever this exact snapshot overlapped its mutation.
+					// New threads (no local section) still use the server's
+					// classification and are never held back.
+					const section = localSectionByThread.get(threadKey)
+						?? priorityStatsSection(this, envelope)
 					if (section in bySection) {
 						bySection[section].push(envelope)
 					}
@@ -3000,24 +3057,61 @@ export default function mainStoreActions() {
 			// load), retrying forever would just add to the load that
 			// may have caused it in the first place.
 			malformedResponseRetried = false,
+			// Internal only: true for the canonical physical single-flight
+			// leader and its recursive retries. Without carrying this marker,
+			// a retry would discover and await its own still-pending promise.
+			physicalSyncLeader = false,
 		}) {
 			query = stripMalformedUndefinedToken(query)
 
-			// Dedup only ever applies to the virtual-mailbox (unified/
-			// priority-inbox) fan-out entry point below, never to a real
-			// mailbox's own sync -- the retry chains further down
-			// (SyncIncompleteError/MalformedSyncResponseError/
-			// MailboxLockedError) recursively call syncEnvelopes() on
-			// THEMSELVES for a real mailboxId, and deduping those too
-			// would have a retry await its own still-pending promise.
-			// See pendingUnifiedSyncs above for why this needs to exist
-			// at all.
+			// Virtual mailbox fan-outs remain keyed by mailbox+query because
+			// their structural buckets are distinct requests.
 			const mailboxForFanOut = this.getMailbox(mailboxId)
 			const dedupKey = (mailboxForFanOut?.isUnified || mailboxForFanOut?.isPriorityInbox)
 				? `${mailboxId}:${query ?? ''}`
 				: null
 			if (dedupKey !== null && pendingUnifiedSyncs.has(dedupKey)) {
 				return pendingUnifiedSyncs.get(dedupKey)
+			}
+
+			// A canonical physical sync has no search predicate. Coalesce only
+			// that exact case: Important/Favorites/Other queries must retain
+			// their own server state and therefore never share this entry.
+			const isCanonicalPhysicalSync = mailboxForFanOut
+				&& !mailboxForFanOut.isUnified
+				&& !mailboxForFanOut.isPriorityInbox
+				&& !init
+				&& (query === undefined || query === '')
+			if (isCanonicalPhysicalSync && !physicalSyncLeader) {
+				let pendingForStore = pendingCanonicalPhysicalSyncs.get(this)
+				if (!pendingForStore) {
+					pendingForStore = new Map()
+					pendingCanonicalPhysicalSyncs.set(this, pendingForStore)
+				}
+
+				const physicalKey = String(mailboxId)
+				const existing = pendingForStore.get(physicalKey)
+				if (existing) {
+					return existing
+				}
+
+				const leader = this.syncEnvelopes({
+					mailboxId,
+					query,
+					init,
+					workClass,
+					isLockRetryLeader,
+					lockRetryAttempt,
+					malformedResponseRetried,
+					physicalSyncLeader: true,
+				})
+				const tracked = leader.finally(() => {
+					if (pendingForStore.get(physicalKey) === tracked) {
+						pendingForStore.delete(physicalKey)
+					}
+				})
+				pendingForStore.set(physicalKey, tracked)
+				return tracked
 			}
 
 			const promise = handleHttpAuthErrors(async () => {
@@ -3098,6 +3192,7 @@ export default function mainStoreActions() {
 						query,
 						init,
 						workClass,
+						physicalSyncLeader,
 					}))
 				}
 
@@ -3162,6 +3257,7 @@ export default function mainStoreActions() {
 									query,
 									init,
 									workClass,
+									physicalSyncLeader,
 								})
 							},
 							[MalformedSyncResponseError.getName()]: (error) => {
@@ -3176,6 +3272,7 @@ export default function mainStoreActions() {
 									init,
 									workClass,
 									malformedResponseRetried: true,
+									physicalSyncLeader,
 								})
 							},
 							[MailboxLockedError.getName()]: (error) => {
@@ -3194,6 +3291,7 @@ export default function mainStoreActions() {
 										workClass,
 										isLockRetryLeader: true,
 										lockRetryAttempt: lockRetryAttempt + 1,
+										physicalSyncLeader,
 									}))
 									if (!isLockRetryLeader) {
 										const tracked = retry.finally(() => pendingLockWaits.delete(mailboxId))
@@ -3209,6 +3307,7 @@ export default function mainStoreActions() {
 									query,
 									init,
 									workClass,
+									physicalSyncLeader,
 								}))
 							},
 							default(error) {
@@ -3539,57 +3638,62 @@ export default function mainStoreActions() {
 		toggleEnvelopeFlagged(envelope) {
 			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
-				// Change immediately and switch back on error
-				const oldState = envelope.flags.flagged
-				// Same shape as setEnvelopeImportant()'s own optimistic
-				// reclassify: bucket membership (Favorites in/out, the
-				// not:starred side of a compound Priority section) must
-				// move in the same instant as the star itself, not one or
-				// two round trips later. userInitiated lets the removal
-				// side apply immediately too -- see
-				// threadStillMatchesFlagPredicate().
-				const reclassify = () => {
-					const mailbox = this.mailboxes[envelope.mailboxId]
-					if (mailbox) {
-						this.reclassifyFlagBucketsMutation({ envelope, sourceMailbox: mailbox, userInitiated: true })
-					}
-				}
-				this.flagEnvelopeMutation({
-					envelope,
-					flag: 'flagged',
-					value: !oldState,
-				})
-				reclassify()
-
+				beginPrioritySectionMutation()
 				try {
-					await setEnvelopeFlags(envelope.databaseId, {
-						flagged: !oldState,
-					})
-					// Fire-and-forget: gives fast, correct confirmation for
-					// any already-loaded Favorites-style bucket this toggle
-					// could affect, without making the user wait on it --
-					// see refreshFlagPredicateBucketsForEnvelope()'s own doc.
-					this.refreshFlagPredicateBucketsForEnvelope(envelope)
-				} catch (error) {
-					logger.error('Could not toggle message flagged state', { error })
-
-					const landed = await reconcileOrRevert({
-						envelope,
-						hasLanded: (authoritative) => authoritative?.flags?.flagged === !oldState,
-						revert: () => {
-							this.flagEnvelopeMutation({ envelope, flag: 'flagged', value: oldState })
-							// The optimistic membership change above must
-							// roll back with the flag, through the same
-							// mutation, so the lists land back exactly
-							// where they were.
-							reclassify()
-						},
-					})
-					if (landed) {
-						return
+					// Change immediately and switch back on error
+					const oldState = envelope.flags.flagged
+					// Same shape as setEnvelopeImportant()'s own optimistic
+					// reclassify: bucket membership (Favorites in/out, the
+					// not:starred side of a compound Priority section) must
+					// move in the same instant as the star itself, not one or
+					// two round trips later. userInitiated lets the removal
+					// side apply immediately too -- see
+					// threadStillMatchesFlagPredicate().
+					const reclassify = () => {
+						const mailbox = this.mailboxes[envelope.mailboxId]
+						if (mailbox) {
+							this.reclassifyFlagBucketsMutation({ envelope, sourceMailbox: mailbox, userInitiated: true })
+						}
 					}
+					this.flagEnvelopeMutation({
+						envelope,
+						flag: 'flagged',
+						value: !oldState,
+					})
+					reclassify()
 
-					throw error
+					try {
+						await setEnvelopeFlags(envelope.databaseId, {
+							flagged: !oldState,
+						})
+						// Fire-and-forget: gives fast, correct confirmation for
+						// any already-loaded Favorites-style bucket this toggle
+						// could affect, without making the user wait on it --
+						// see refreshFlagPredicateBucketsForEnvelope()'s own doc.
+						this.refreshFlagPredicateBucketsForEnvelope(envelope)
+					} catch (error) {
+						logger.error('Could not toggle message flagged state', { error })
+
+						const landed = await reconcileOrRevert({
+							envelope,
+							hasLanded: (authoritative) => authoritative?.flags?.flagged === !oldState,
+							revert: () => {
+								this.flagEnvelopeMutation({ envelope, flag: 'flagged', value: oldState })
+								// The optimistic membership change above must
+								// roll back with the flag, through the same
+								// mutation, so the lists land back exactly
+								// where they were.
+								reclassify()
+							},
+						})
+						if (landed) {
+							return
+						}
+
+						throw error
+					}
+				} finally {
+					endPrioritySectionMutation()
 				}
 			})
 		},
@@ -3608,17 +3712,17 @@ export default function mainStoreActions() {
 		},
 		/**
 		 * Sets a message's importance to an explicit boolean value,
-		 * updating BOTH flag_important (via setEnvelopeFlags()) and the
-		 * important tag (via setEnvelopeTag()/removeEnvelopeTag(), which
-		 * is what actually drives the visible badge -- see Envelope.vue's
-		 * isImportant()) TOGETHER, in the one user action -- mirroring
+		 * updating BOTH flag_important (via setEnvelopeFlags(), which drives
+		 * the badge and Priority sections) and the interoperable important
+		 * tag (via setEnvelopeTag()/removeEnvelopeTag()) TOGETHER, in the one
+		 * user action -- mirroring
 		 * what NewMessagesClassifier already does server-side (
 		 * flagMessage() + tagMessage() in the same request).
 		 *
 		 * Genuinely optimistic end to end, not just for the flag: earlier
 		 * versions of this function set flags.important immediately but
-		 * left the tag (and therefore the badge) to update only once the
-		 * tag network call resolved -- one round trip -- and Priority
+		 * left the tag to update only once the tag network call resolved --
+		 * one round trip -- and Priority
 		 * Inbox list membership to update only via the separate,
 		 * fire-and-forget refreshFlagPredicateBucketsForEnvelope() resync
 		 * below, a *second* round trip. Click -> round trip -> badge ->
@@ -3656,118 +3760,125 @@ export default function mainStoreActions() {
 			if ((envelope.flags.important === true) === important) {
 				return
 			}
-
-			// The same physical email can be loaded as several folder
-			// copies -- on Gmail, the INBOX copy and the [Gmail]/Important
-			// copy share one Message-ID, each a separate envelope with its
-			// own, independently-synced flags. Importance is a per-message
-			// attribute the server clears on every copy, so apply the
-			// optimistic flip to the loaded siblings too. Without this a
-			// still-stale Important-folder copy keeps the whole thread
-			// matching is:pi-important (an existential, thread-wide match),
-			// so a just-unmarked message lingers in the Priority Inbox's
-			// Important section -- showing the "conversation has an important
-			// message" outline badge -- until that folder's own next sync,
-			// tens of seconds later. Each copy's own bucket sync remains the
-			// authoritative backstop if the server ever disagrees.
-			const importanceCopies = [envelope]
-			if (envelope.messageId && envelope.threadRootId) {
-				for (const member of this.getEnvelopesByThreadRootId(envelope.accountId, envelope.threadRootId)) {
-					if (member.databaseId !== envelope.databaseId && member.messageId === envelope.messageId) {
-						importanceCopies.push(member)
-					}
-				}
-			}
-			const importanceOldStates = new Map(importanceCopies.map((copy) => [copy.databaseId, copy.flags.important]))
-			importanceCopies.forEach((copy) => this.flagEnvelopeMutation({
-				envelope: copy,
-				flag: 'important',
-				value: important,
-			}))
-
-			const importantTag = this.getImportantTag
-			const applyTagMutation = (targetImportant) => {
-				importanceCopies.forEach((copy) => {
-					if (targetImportant) {
-						this.addEnvelopeTagMutation({ envelope: copy, tagId: importantTag.id })
-					} else {
-						this.removeEnvelopeTagMutation({ envelope: copy, tagId: importantTag.id })
-					}
-				})
-			}
-			const reclassify = () => {
-				importanceCopies.forEach((copy) => {
-					const mailbox = this.mailboxes[copy.mailboxId]
-					if (mailbox) {
-						// userInitiated: the removal side (out of Important
-						// when unmarking, out of Other when marking) applies
-						// immediately too -- see threadStillMatchesFlagPredicate().
-						this.reclassifyFlagBucketsMutation({ envelope: copy, sourceMailbox: mailbox, userInitiated: true })
-					}
-				})
-			}
-
-			const optimisticTagMutationApplied = !!importantTag
-			if (optimisticTagMutationApplied) {
-				applyTagMutation(important)
-				reclassify()
-			}
+			beginPrioritySectionMutation()
 
 			try {
-				const [, tag] = await Promise.all([
-					setEnvelopeFlags(envelope.databaseId, {
-						[IMPORTANT_TAG_LABEL]: important,
-					}),
-					important
-						? setEnvelopeTag(envelope.databaseId, IMPORTANT_TAG_LABEL)
-						: removeEnvelopeTag(envelope.databaseId, IMPORTANT_TAG_LABEL),
-				])
-				if (!this.getTag(tag.id)) {
-					this.addTagMutation({ tag })
-				}
-				if (!optimisticTagMutationApplied) {
-					// Cold-start fallback: the tag wasn't known locally
-					// yet when this call started, so apply it now that
-					// the server confirmed its id.
-					if (important) {
-						this.addEnvelopeTagMutation({ envelope, tagId: tag.id })
-					} else {
-						this.removeEnvelopeTagMutation({ envelope, tagId: tag.id })
-					}
-					reclassify()
-				}
-				this.refreshFlagPredicateBucketsForEnvelope(envelope)
-			} catch (error) {
-				logger.error('Could not toggle message importance', { error })
-
-				const landed = await reconcileOrRevert({
-					envelope,
-					hasLanded: (authoritative) => authoritative?.flags?.important === important,
-					revert: () => {
-						importanceCopies.forEach((copy) => this.flagEnvelopeMutation({
-							envelope: copy,
-							flag: 'important',
-							value: importanceOldStates.get(copy.databaseId),
-						}))
-						if (optimisticTagMutationApplied) {
-							// Undo via the same mutation, not a raw snapshot
-							// restore -- re-records a fresh
-							// recentLocalChanges 'tags' entry holding the
-							// correct (reverted) value, same as
-							// flagEnvelopeMutation()'s own revert above, so
-							// a legitimate later sync isn't fought by a
-							// stale entry still holding the attempted-but-
-							// failed value.
-							applyTagMutation(!important)
-							reclassify()
+				// The same physical email can be loaded as several folder
+				// copies -- on Gmail, the INBOX copy and the [Gmail]/Important
+				// copy share one Message-ID, each a separate envelope with its
+				// own, independently-synced flags. Importance is a per-message
+				// attribute the server clears on every copy, so apply the
+				// optimistic flip to the loaded siblings too. Without this a
+				// still-stale Important-folder copy keeps the whole thread
+				// matching is:pi-important (an existential, thread-wide match),
+				// so a just-unmarked message lingers in the Priority Inbox's
+				// Important section -- showing the "conversation has an important
+				// message" outline badge -- until that folder's own next sync,
+				// tens of seconds later. Each copy's own bucket sync remains the
+				// authoritative backstop if the server ever disagrees.
+				const importanceCopies = [envelope]
+				if (envelope.messageId && envelope.threadRootId) {
+					for (const member of this.getEnvelopesByThreadRootId(envelope.accountId, envelope.threadRootId)) {
+						if (member.databaseId !== envelope.databaseId && member.messageId === envelope.messageId) {
+							importanceCopies.push(member)
 						}
-					},
-				})
-				if (landed) {
-					return
+					}
+				}
+				const importanceOldStates = new Map(importanceCopies.map((copy) => [copy.databaseId, copy.flags.important]))
+				importanceCopies.forEach((copy) => this.flagEnvelopeMutation({
+					envelope: copy,
+					flag: 'important',
+					value: important,
+				}))
+
+				const importantTag = this.getImportantTag
+				const applyTagMutation = (targetImportant) => {
+					importanceCopies.forEach((copy) => {
+						if (targetImportant) {
+							this.addEnvelopeTagMutation({ envelope: copy, tagId: importantTag.id })
+						} else {
+							this.removeEnvelopeTagMutation({ envelope: copy, tagId: importantTag.id })
+						}
+					})
+				}
+				const reclassify = () => {
+					importanceCopies.forEach((copy) => {
+						const mailbox = this.mailboxes[copy.mailboxId]
+						if (mailbox) {
+							// userInitiated: the removal side (out of Important
+							// when unmarking, out of Other when marking) applies
+							// immediately too -- see threadStillMatchesFlagPredicate().
+							this.reclassifyFlagBucketsMutation({ envelope: copy, sourceMailbox: mailbox, userInitiated: true })
+						}
+					})
 				}
 
-				throw error
+				const optimisticTagMutationApplied = !!importantTag
+				if (optimisticTagMutationApplied) {
+					applyTagMutation(important)
+				}
+				// Membership is driven by the already-optimistic per-copy flag,
+				// not by whether this session happened to know the tag id.
+				// A genuinely cold session must move the row immediately too.
+				reclassify()
+
+				try {
+					const [, tag] = await Promise.all([
+						setEnvelopeFlags(envelope.databaseId, {
+							[IMPORTANT_TAG_LABEL]: important,
+						}),
+						important
+							? setEnvelopeTag(envelope.databaseId, IMPORTANT_TAG_LABEL)
+							: removeEnvelopeTag(envelope.databaseId, IMPORTANT_TAG_LABEL),
+					])
+					if (!this.getTag(tag.id)) {
+						this.addTagMutation({ tag })
+					}
+					if (!optimisticTagMutationApplied) {
+						// Cold-start fallback: the tag wasn't known locally
+						// yet when this call started, so apply it now that
+						// the server confirmed its id.
+						if (important) {
+							this.addEnvelopeTagMutation({ envelope, tagId: tag.id })
+						} else {
+							this.removeEnvelopeTagMutation({ envelope, tagId: tag.id })
+						}
+					}
+					this.refreshFlagPredicateBucketsForEnvelope(envelope)
+				} catch (error) {
+					logger.error('Could not toggle message importance', { error })
+
+					const landed = await reconcileOrRevert({
+						envelope,
+						hasLanded: (authoritative) => authoritative?.flags?.important === important,
+						revert: () => {
+							importanceCopies.forEach((copy) => this.flagEnvelopeMutation({
+								envelope: copy,
+								flag: 'important',
+								value: importanceOldStates.get(copy.databaseId),
+							}))
+							if (optimisticTagMutationApplied) {
+								// Undo via the same mutation, not a raw snapshot
+								// restore -- re-records a fresh
+								// recentLocalChanges 'tags' entry holding the
+								// correct (reverted) value, same as
+								// flagEnvelopeMutation()'s own revert above, so
+								// a legitimate later sync isn't fought by a
+								// stale entry still holding the attempted-but-
+								// failed value.
+								applyTagMutation(!important)
+							}
+							reclassify()
+						},
+					})
+					if (landed) {
+						return
+					}
+
+					throw error
+				}
+			} finally {
+				endPrioritySectionMutation()
 			}
 		},
 		async toggleEnvelopeSeen({
@@ -3789,6 +3900,16 @@ export default function mainStoreActions() {
 				// live regression that motivated this guard produced a later
 				// seen=false write from an automatic read path under load.
 				if (oldState === newState) {
+					if (newState && oldHasUnseenInThread !== undefined) {
+						const knownMailboxThread = envelope.threadRootId
+							? this.getEnvelopesByThreadRootId(envelope.accountId, envelope.threadRootId)
+									.filter((member) => member.mailboxId === envelope.mailboxId)
+							: [envelope]
+						this.setHasUnseenInThreadForThreadMutation(
+							envelope,
+							knownMailboxThread.some((member) => member.flags.seen === false),
+						)
+					}
 					return
 				}
 				this.flagEnvelopeMutation({
@@ -3801,20 +3922,26 @@ export default function mainStoreActions() {
 					// unseen message now (this one) -- no need to wait for
 					// the server to know that much.
 					this.setHasUnseenInThreadForThreadMutation(envelope, true)
-				} else if (
-					optimisticHasUnseenInThread !== undefined
-					&& oldHasUnseenInThread !== undefined
-				) {
+				} else if (oldHasUnseenInThread !== undefined) {
 					// Bulk list actions target every selected row at once.
 					// The row's bold/read styling is driven by this thread
 					// aggregate, not its own `seen` flag, so leaving the
 					// aggregate untouched made the otherwise-optimistic
 					// changes appear one by one only as the deliberately
 					// serialized IMAP writes returned. Let that explicit
-					// caller supply its optimistic aggregate too; the
-					// response below remains authoritative and can correct
-					// it when another message in the thread is still unread.
-					this.setHasUnseenInThreadForThreadMutation(envelope, optimisticHasUnseenInThread)
+					// caller supply its optimistic aggregate too. Automatic
+					// mark-on-open has the complete locally-loaded thread, so
+					// derive the same value from its known mailbox siblings
+					// instead of leaving the row bold until the request
+					// returns. The response below remains authoritative and
+					// corrects this if a not-yet-known sibling is still unread.
+					const knownMailboxThread = envelope.threadRootId
+						? this.getEnvelopesByThreadRootId(envelope.accountId, envelope.threadRootId)
+								.filter((member) => member.mailboxId === envelope.mailboxId)
+						: [envelope]
+					const locallyHasUnseen = optimisticHasUnseenInThread
+						?? knownMailboxThread.some((member) => member.flags.seen === false)
+					this.setHasUnseenInThreadForThreadMutation(envelope, locallyHasUnseen)
 				}
 
 				try {
@@ -4026,51 +4153,56 @@ export default function mainStoreActions() {
 		}) {
 			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
-				// Change immediately and switch back on error
-				const oldState = envelope.flags.flagged
-				// Move Priority Inbox section membership (into/out of
-				// Favorites, and the not:starred side of the Other/Important
-				// compound sections) in the SAME instant as the star --
-				// exactly like the single-row toggleEnvelopeFlagged() already
-				// does. This bulk-selection path used to skip the reclassify
-				// entirely, so a starred message only left the Other section
-				// on the next routine sync, tens of seconds later (reported
-				// live). userInitiated applies the removal side immediately
-				// too -- see threadStillMatchesFlagPredicate().
-				const reclassify = () => {
-					const mailbox = this.mailboxes[envelope.mailboxId]
-					if (mailbox) {
-						this.reclassifyFlagBucketsMutation({ envelope, sourceMailbox: mailbox, userInitiated: true })
-					}
-				}
-				this.flagEnvelopeMutation({
-					envelope,
-					flag: 'flagged',
-					value: favFlag,
-				})
-				reclassify()
-
+				beginPrioritySectionMutation()
 				try {
-					await setEnvelopeFlags(envelope.databaseId, {
-						flagged: favFlag,
-					})
-					// Fast, correct confirmation for any already-loaded
-					// Favorites-style bucket, without blocking on it -- same
-					// backstop toggleEnvelopeFlagged() uses.
-					this.refreshFlagPredicateBucketsForEnvelope(envelope)
-				} catch (error) {
-					logger.error('could not favorite/unfavorite message ' + envelope.uid, { error })
-
-					// Revert change AND its optimistic membership move, through
-					// the same mutation, so the lists land back where they were.
+					// Change immediately and switch back on error
+					const oldState = envelope.flags.flagged
+					// Move Priority Inbox section membership (into/out of
+					// Favorites, and the not:starred side of the Other/Important
+					// compound sections) in the SAME instant as the star --
+					// exactly like the single-row toggleEnvelopeFlagged() already
+					// does. This bulk-selection path used to skip the reclassify
+					// entirely, so a starred message only left the Other section
+					// on the next routine sync, tens of seconds later (reported
+					// live). userInitiated applies the removal side immediately
+					// too -- see threadStillMatchesFlagPredicate().
+					const reclassify = () => {
+						const mailbox = this.mailboxes[envelope.mailboxId]
+						if (mailbox) {
+							this.reclassifyFlagBucketsMutation({ envelope, sourceMailbox: mailbox, userInitiated: true })
+						}
+					}
 					this.flagEnvelopeMutation({
 						envelope,
 						flag: 'flagged',
-						value: oldState,
+						value: favFlag,
 					})
 					reclassify()
 
-					throw error
+					try {
+						await setEnvelopeFlags(envelope.databaseId, {
+							flagged: favFlag,
+						})
+						// Fast, correct confirmation for any already-loaded
+						// Favorites-style bucket, without blocking on it -- same
+						// backstop toggleEnvelopeFlagged() uses.
+						this.refreshFlagPredicateBucketsForEnvelope(envelope)
+					} catch (error) {
+						logger.error('could not favorite/unfavorite message ' + envelope.uid, { error })
+
+						// Revert change AND its optimistic membership move, through
+						// the same mutation, so the lists land back where they were.
+						this.flagEnvelopeMutation({
+							envelope,
+							flag: 'flagged',
+							value: oldState,
+						})
+						reclassify()
+
+						throw error
+					}
+				} finally {
+					endPrioritySectionMutation()
 				}
 			})
 		},
@@ -6043,24 +6175,26 @@ export default function mainStoreActions() {
 			recordRecentLocalChange(envelope.databaseId, flag, value)
 		},
 		/**
-		 * hasUnseenInThread is a thread-WIDE property (see Envelope.vue's
-		 * own isThreadUnread computed and Message::jsonSerialize()
-		 * server-side, which is where this value actually comes from) --
-		 * not a per-message one. Setting it only on the specific envelope
-		 * that was just toggled leaves every OTHER locally-known envelope
-		 * sharing the same thread with a stale value -- most importantly
-		 * whichever one a given list actually renders as that thread's
-		 * representative row, which is very often NOT the one just
-		 * toggled (e.g. Thread.vue auto-expanding and marking an older,
-		 * still-unread reply, while every list shows the thread's newest
-		 * message). Confirmed live: opening a thread correctly marked its
-		 * oldest unread reply as read on the server (and correctly moved
-		 * on to the next-oldest unread reply on the following open,
-		 * eventually reaching a fully-read thread), but the thread kept
-		 * showing as unread in every list throughout, because the
-		 * corrected hasUnseenInThread value from the server was only ever
-		 * applied to whichever reply had just been toggled -- never to
-		 * the newest sibling every list actually reads from.
+		 * hasUnseenInThread is a thread-wide, MAILBOX-SCOPED property (see
+		 * Envelope.vue's own isThreadUnread computed and MessageMapper's
+		 * mailboxId:threadRootId aggregate) -- not a per-message one.
+		 * Setting it only on the specific envelope that was just toggled
+		 * leaves every OTHER locally-known envelope sharing the same
+		 * mailbox thread with a stale value -- most importantly whichever
+		 * one a given list actually renders as that thread's representative
+		 * row, which is very often NOT the one just toggled (e.g.
+		 * Thread.vue auto-expanding and marking an older, still-unread
+		 * reply, while every list shows the thread's newest message).
+		 * Confirmed live: opening a thread correctly marked its oldest
+		 * unread reply as read on the server (and correctly moved on to the
+		 * next-oldest unread reply on the following open, eventually
+		 * reaching a fully-read thread), but the thread kept showing as
+		 * unread in every list throughout, because the corrected
+		 * hasUnseenInThread value from the server was only ever applied to
+		 * whichever reply had just been toggled -- never to the newest
+		 * sibling every list actually reads from. A same-thread copy in
+		 * another folder is deliberately excluded: the server computes a
+		 * separate aggregate for that mailbox.
 		 *
 		 * @param envelope
 		 * @param value
@@ -6080,6 +6214,7 @@ export default function mainStoreActions() {
 				return
 			}
 			this.getEnvelopesByThreadRootId(envelope.accountId, envelope.threadRootId)
+				.filter((sibling) => sibling.mailboxId === envelope.mailboxId)
 				.forEach((sibling) => {
 					this.flagEnvelopeMutation({ envelope: sibling, flag: 'hasUnseenInThread', value })
 				})

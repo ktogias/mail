@@ -9,7 +9,7 @@ import MailboxThread from '../../../components/MailboxThread.vue'
 import LoadMoreSentinelMixin from '../../../mixins/LoadMoreSentinelMixin.js'
 import Nextcloud from '../../../mixins/Nextcloud.js'
 import { WorkClass } from '../../../service/RequestCoordinator.js'
-import { PRIORITY_INBOX_ID, UNIFIED_INBOX_ID } from '../../../store/constants.js'
+import { FOLLOW_UP_MAILBOX_ID, PRIORITY_INBOX_ID, UNIFIED_INBOX_ID } from '../../../store/constants.js'
 import useMainStore from '../../../store/mainStore.js'
 import { priorityImportantQuery, priorityOtherQuery } from '../../../util/priorityInbox.js'
 
@@ -150,6 +150,42 @@ describe('MailboxThread', () => {
 		expect(otherMailbox.isVisible()).toBe(true)
 	})
 
+	it('makes the parent the single owner of the initial structural Priority snapshot', async () => {
+		store.refreshPriorityInboxView = vi.fn().mockResolvedValue({})
+		store.checkFollowUpReminders = vi.fn().mockResolvedValue()
+
+		const wrapper = mountThread()
+
+		await vi.waitFor(() => {
+			expect(store.refreshPriorityInboxView).toHaveBeenCalledWith({
+				searchQuery: wrapper.vm.searchQuery,
+				workClass: WorkClass.ACTIVE_CONTENT,
+				syncSources: false,
+			})
+		})
+		expect(store.refreshPriorityInboxView).toHaveBeenCalledTimes(1)
+		expect(wrapper.find('.nameimportant').props('skipInitialLoad')).toBe(true)
+		expect(wrapper.find('.nameother').props('skipInitialLoad')).toBe(true)
+
+		wrapper.destroy()
+	})
+
+	it('loads cached Follow-up rows on mount without starting a competing Sent sync wave', async () => {
+		store.tags = { 77: { id: 77, imapLabel: '$follow_up', displayName: 'Follow up' } }
+		store.refreshPriorityInboxView = vi.fn().mockResolvedValue({})
+		store.checkFollowUpReminders = vi.fn().mockResolvedValue()
+
+		const wrapper = mountThread()
+		const followUp = wrapper.findAllComponents({ name: 'Mailbox' }).wrappers
+			.find((component) => component.props('mailbox')?.databaseId === FOLLOW_UP_MAILBOX_ID)
+
+		expect(followUp).toBeDefined()
+		expect(followUp.props('skipInitialLoad')).toBe(false)
+		expect(followUp.props('skipInitialSync')).toBe(true)
+
+		wrapper.destroy()
+	})
+
 	describe('load-more sentinel (replaces the old v-infinite-scroll directive)', () => {
 		// See util/loadMoreSentinelObserver.js: a scroll-position-math
 		// directive on the whole list was replaced with an
@@ -282,6 +318,43 @@ describe('MailboxThread', () => {
 
 			expect(wrapper.vm.pullToRefreshSpinning).toBe(false)
 		})
+
+		it('refreshes Follow-up once after the canonical Priority source wave', async () => {
+			store.tags = { 77: { id: 77, imapLabel: '$follow_up', displayName: 'Follow up' } }
+			const wrapper = mountThread()
+			store.refreshPriorityInboxView = vi.fn().mockResolvedValue({})
+			store.syncEnvelopes = vi.fn().mockResolvedValue([])
+			store.syncMailboxesForAccount = vi.fn().mockResolvedValue()
+
+			await wrapper.vm.refreshCurrentView()
+
+			expect(store.refreshPriorityInboxView).toHaveBeenCalledWith({
+				searchQuery: wrapper.vm.searchQuery,
+				workClass: WorkClass.EXPLICIT_HEAVY,
+				syncSources: true,
+			})
+			expect(store.syncEnvelopes).toHaveBeenCalledTimes(1)
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({
+				mailboxId: FOLLOW_UP_MAILBOX_ID,
+				query: wrapper.vm.appendToSearch(wrapper.vm.followUpQuery),
+				workClass: WorkClass.EXPLICIT_HEAVY,
+			})
+
+			wrapper.destroy()
+		})
+	})
+
+	it('handles the refresh shortcut once in the Priority parent instead of broadcasting it to every section', () => {
+		const wrapper = mountThread()
+		const emitSpy = vi.spyOn(wrapper.vm.bus, 'emit')
+		wrapper.vm.refreshCurrentView = vi.fn().mockResolvedValue()
+
+		wrapper.vm.onShortcut({ srcKey: 'refresh' })
+
+		expect(wrapper.vm.refreshCurrentView).toHaveBeenCalledTimes(1)
+		expect(emitSpy).not.toHaveBeenCalledWith('shortcut', expect.anything())
+
+		wrapper.destroy()
 	})
 
 	it("applies the sort-favorites 'not:starred' filter before any child Mailbox mounts", () => {

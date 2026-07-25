@@ -24,10 +24,11 @@ export default function mainStore() {
 		getFollowUpTag: (state) => {
 			return Object.values(state.tags).find((tag) => tag.imapLabel === FOLLOW_UP_TAG_LABEL)
 		},
-		// setEnvelopeImportant() resolves this locally, synchronously, to
-		// make the important tag toggle optimistic (see its own comment)
-		// -- only known once at least one important-tagged message has
-		// been loaded this session.
+		// setEnvelopeImportant() resolves this locally, synchronously, to keep
+		// the interoperable important tag aligned with the already-optimistic
+		// flag that drives the badge and Priority sections (see its comment).
+		// It is only known once at least one important-tagged message has been
+		// loaded this session.
 		getImportantTag: (state) => {
 			return Object.values(state.tags).find((tag) => tag.imapLabel === IMPORTANT_TAG_LABEL)
 		},

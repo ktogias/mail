@@ -307,6 +307,32 @@ describe('Mailbox', () => {
 		}
 	})
 
+	it('can load the parent-owned cached section without starting its own initial sync', async () => {
+		store.fetchEnvelopes = vi.fn().mockResolvedValue([])
+		store.syncEnvelopes = vi.fn().mockResolvedValue({})
+		store.getRecursiveMailboxIterator = vi.fn().mockReturnValue([])
+
+		const wrapper = shallowMount(Mailbox, {
+			propsData: {
+				account,
+				mailbox,
+				bus: { on: vi.fn(), off: vi.fn() },
+				skipInitialSync: true,
+			},
+			mocks: { $route: { params: {} } },
+			store,
+			localVue,
+		})
+
+		await vi.waitFor(() => {
+			expect(store.fetchEnvelopes).toHaveBeenCalledTimes(1)
+			expect(store.hasFetchedInitialEnvelopes).toBe(true)
+		})
+		expect(store.syncEnvelopes).not.toHaveBeenCalled()
+
+		wrapper.destroy()
+	})
+
 	it('a second simultaneously-mounted Mailbox instance still fetches its own data after the first one finishes first', async () => {
 		// Regression: hasFetchedInitialEnvelopes used to gate the WHOLE
 		// mounted() body, app-wide, not just prefetchOtherMailboxes()

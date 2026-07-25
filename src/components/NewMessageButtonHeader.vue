@@ -88,10 +88,17 @@ export default {
 			this.refreshing = true
 			this.mainStore.setInteractionPriorityMutation()
 			try {
-				await this.mainStore.syncEnvelopes({
-					mailboxId: this.currentMailbox.databaseId,
-					workClass: WorkClass.EXPLICIT_HEAVY,
-				})
+				if (this.currentMailbox.isPriorityInbox) {
+					await this.mainStore.refreshPriorityInboxView({
+						workClass: WorkClass.EXPLICIT_HEAVY,
+						syncSources: true,
+					})
+				} else {
+					await this.mainStore.syncEnvelopes({
+						mailboxId: this.currentMailbox.databaseId,
+						workClass: WorkClass.EXPLICIT_HEAVY,
+					})
+				}
 				await this.mainStore.syncMailboxesForAccount(this.account, WorkClass.EXPLICIT_HEAVY)
 				logger.debug('Current folder is sync\'ing ')
 			} catch (error) {

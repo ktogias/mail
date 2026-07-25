@@ -8,6 +8,7 @@ import { curry, range, reverse } from 'ramda'
 import Vue from 'vue'
 import MailboxLockedError from '../../../errors/MailboxLockedError.js'
 import MalformedSyncResponseError from '../../../errors/MalformedSyncResponseError.js'
+import SyncIncompleteError from '../../../errors/SyncIncompleteError.js'
 import * as AccountService from '../../../service/AccountService.js'
 import * as DeepSearchService from '../../../service/DeepSearchService.js'
 import * as MailboxService from '../../../service/MailboxService.js'
@@ -219,6 +220,189 @@ describe('Vuex store actions', () => {
 			.toEqual(known.map((envelope) => envelope.databaseId))
 		expect(store.getEnvelopes(PRIORITY_INBOX_ID, query).map((envelope) => envelope.databaseId))
 			.toEqual(known.map((envelope) => envelope.databaseId))
+	})
+
+	describe('exact Priority refresh versus overlapping optimistic section changes', () => {
+		const favoriteQuery = 'is:starred'
+		const importantQuery = 'not:starred is:pi-important'
+		const otherQuery = 'not:starred is:pi-other'
+		const importantTag = {
+			id: 909,
+			imapLabel: '$label1',
+			displayName: 'Important',
+			color: '#ff7a66',
+		}
+
+		beforeEach(() => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			const account = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: {
+					id: 'INBOX',
+					name: 'INBOX',
+					databaseId: 11,
+					accountId: 13,
+					specialRole: 'inbox',
+				},
+			})
+			store.preferences['layout-message-view'] = 'threaded'
+			store.preferences['sort-order'] = 'newest'
+			store.preferences['sort-favorites'] = 'true'
+			store.tags[importantTag.id] = importantTag
+			PriorityInboxService.fetchPriorityInboxStats.mockResolvedValue({
+				sections: {},
+				complete: true,
+			})
+		})
+
+		function seedPriorityEnvelope(flags, section) {
+			const envelope = {
+				databaseId: 101,
+				accountId: 13,
+				mailboxId: 11,
+				dateInt: 101,
+				threadRootId: 'thread-101',
+				flags,
+				tags: flags.important ? [importantTag.id] : [],
+			}
+			store.envelopes[envelope.databaseId] = envelope
+			const sectionQueries = {
+				favorite: favoriteQuery,
+				important: importantQuery,
+				other: otherQuery,
+			}
+			for (const mailboxId of [11, UNIFIED_INBOX_ID, PRIORITY_INBOX_ID]) {
+				for (const [name, query] of Object.entries(sectionQueries)) {
+					store.mailboxes[mailboxId].envelopeLists[query] = name === section
+						? [envelope.databaseId]
+						: []
+				}
+			}
+			return envelope
+		}
+
+		function listedIds(mailboxId, query) {
+			return store.getEnvelopes(mailboxId, query).map((envelope) => envelope.databaseId)
+		}
+
+		it('does not put an optimistically unimportant thread back into Important from a stale snapshot', async () => {
+			const envelope = seedPriorityEnvelope({
+				seen: true,
+				flagged: false,
+				important: true,
+				hasUnseenInThread: false,
+				hasFlaggedInThread: false,
+				hasImportantInThread: true,
+			}, 'important')
+			MessageService.setEnvelopeFlags.mockReturnValue(new Promise(() => {}))
+			MessageService.removeEnvelopeTag.mockReturnValue(new Promise(() => {}))
+
+			store.setEnvelopeImportant(envelope, false)
+			await Promise.resolve()
+
+			expect(listedIds(11, importantQuery)).toEqual([])
+			expect(listedIds(11, otherQuery)).toEqual([101])
+
+			MessageService.fetchEnvelopes.mockResolvedValue([{
+				...envelope,
+				flags: {
+					...envelope.flags,
+					important: true,
+					hasImportantInThread: true,
+				},
+				tags: [importantTag.id],
+			}])
+
+			await store.refreshPriorityInboxView()
+
+			expect(listedIds(11, importantQuery)).toEqual([])
+			expect(listedIds(11, otherQuery)).toEqual([101])
+			expect(listedIds(UNIFIED_INBOX_ID, importantQuery)).toEqual([])
+			expect(listedIds(UNIFIED_INBOX_ID, otherQuery)).toEqual([101])
+			expect(store.envelopes[101].flags.important).toBe(false)
+		})
+
+		it('accepts a later authoritative section correction after the mutation has completed', async () => {
+			const envelope = seedPriorityEnvelope({
+				seen: true,
+				flagged: false,
+				important: true,
+				hasUnseenInThread: false,
+				hasFlaggedInThread: false,
+				hasImportantInThread: true,
+			}, 'important')
+			MessageService.setEnvelopeFlags.mockResolvedValue({})
+			MessageService.removeEnvelopeTag.mockResolvedValue(importantTag)
+			store.refreshFlagPredicateBucketsForEnvelope = vi.fn()
+
+			await store.setEnvelopeImportant(envelope, false)
+			expect(listedIds(11, otherQuery)).toEqual([101])
+
+			// The target itself is now unimportant, but another server-known
+			// member of the thread remains important. A refresh that starts
+			// after the mutation completed is authoritative and must move the
+			// thread back despite the earlier optimistic prediction.
+			MessageService.fetchEnvelopes.mockResolvedValue([{
+				...envelope,
+				flags: {
+					...envelope.flags,
+					important: false,
+					hasImportantInThread: true,
+				},
+				tags: [],
+			}])
+
+			await store.refreshPriorityInboxView()
+
+			expect(listedIds(11, importantQuery)).toEqual([101])
+			expect(listedIds(11, otherQuery)).toEqual([])
+			expect(listedIds(UNIFIED_INBOX_ID, importantQuery)).toEqual([101])
+			expect(listedIds(UNIFIED_INBOX_ID, otherQuery)).toEqual([])
+		})
+
+		it('does not undo a star when the refresh started before the click', async () => {
+			const envelope = seedPriorityEnvelope({
+				seen: true,
+				flagged: false,
+				important: false,
+				hasUnseenInThread: false,
+				hasFlaggedInThread: false,
+				hasImportantInThread: false,
+			}, 'other')
+			let resolveFetch
+			MessageService.fetchEnvelopes.mockReturnValue(new Promise((resolve) => {
+				resolveFetch = resolve
+			}))
+			MessageService.setEnvelopeFlags.mockReturnValue(new Promise(() => {}))
+
+			const refresh = store.refreshPriorityInboxView()
+			await vi.waitFor(() => {
+				expect(MessageService.fetchEnvelopes).toHaveBeenCalledTimes(1)
+			})
+
+			store.toggleEnvelopeFlagged(envelope)
+			await Promise.resolve()
+			expect(listedIds(11, favoriteQuery)).toEqual([101])
+			expect(listedIds(11, otherQuery)).toEqual([])
+
+			resolveFetch([{
+				...envelope,
+				flags: {
+					...envelope.flags,
+					flagged: false,
+					hasFlaggedInThread: false,
+				},
+			}])
+			await refresh
+
+			expect(listedIds(11, favoriteQuery)).toEqual([101])
+			expect(listedIds(11, otherQuery)).toEqual([])
+			expect(listedIds(UNIFIED_INBOX_ID, favoriteQuery)).toEqual([101])
+			expect(listedIds(UNIFIED_INBOX_ID, otherQuery)).toEqual([])
+			expect(store.envelopes[101].flags.flagged).toBe(true)
+		})
 	})
 
 	it('uses one canonical source sync before an explicit Priority view refresh', async () => {
@@ -4268,14 +4452,10 @@ describe('Vuex store actions', () => {
 			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(10)
 		})
 
-		it('never dedupes a REAL mailbox\'s own sync -- only the virtual-mailbox fan-out entry point', async () => {
-			// Two concurrent callers syncing the SAME real mailbox+query
-			// are NOT collapsed into one: that mailbox's own
-			// MailboxLockedException/pendingLockWaits coordination
-			// already handles concurrent real-mailbox syncs, and
-			// deduping here too would risk a retry chain awaiting its
-			// own still-pending promise (see pendingUnifiedSyncs' own
-			// comment).
+		it('does not collapse distinct structural syncs for a real mailbox', async () => {
+			// Structural buckets have independently materialized list state.
+			// Only the canonical unfiltered physical sync is single-flight;
+			// two explicit structural syncs remain distinct.
 			MessageService.syncEnvelopes.mockResolvedValue({
 				newMessages: [],
 				changedMessages: [],
@@ -4287,6 +4467,46 @@ describe('Vuex store actions', () => {
 			const second = store.syncEnvelopes({ mailboxId: 100, query: 'not:starred' })
 
 			await Promise.all([first, second])
+
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(2)
+		})
+
+		it('shares one canonical physical sync between concurrent view and watched-refresh callers', async () => {
+			let resolveSync
+			MessageService.syncEnvelopes.mockReturnValue(new Promise((resolve) => {
+				resolveSync = resolve
+			}))
+
+			const viewRefresh = store.syncEnvelopes({ mailboxId: 100 })
+			const watchedRefresh = store.syncEnvelopes({ mailboxId: 100, query: '' })
+
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(1)
+
+			resolveSync({
+				newMessages: [],
+				changedMessages: [],
+				vanishedMessages: [],
+				stats: { unread: 0 },
+			})
+			await Promise.all([viewRefresh, watchedRefresh])
+
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(1)
+		})
+
+		it('keeps an incomplete canonical leader retry inside the shared chain without self-awaiting', async () => {
+			MessageService.syncEnvelopes
+				.mockRejectedValueOnce(new SyncIncompleteError('more changes remain'))
+				.mockResolvedValueOnce({
+					newMessages: [],
+					changedMessages: [],
+					vanishedMessages: [],
+					stats: { unread: 0 },
+				})
+
+			const leader = store.syncEnvelopes({ mailboxId: 100 })
+			const follower = store.syncEnvelopes({ mailboxId: 100, query: '' })
+
+			await Promise.all([leader, follower])
 
 			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(2)
 		})
@@ -6471,6 +6691,50 @@ describe('Vuex store actions', () => {
 	})
 
 	describe('toggleEnvelopeSeen thread-wide unread correction', () => {
+		it('clears the last known unread aggregate immediately when a message is opened', () => {
+			const envelope = {
+				databaseId: 36,
+				accountId: 13,
+				mailboxId: 11,
+				threadRootId: 'thread-opened',
+				flags: { seen: false, hasUnseenInThread: true },
+			}
+			store.envelopes[envelope.databaseId] = envelope
+			MessageService.setEnvelopeFlags.mockReturnValue(new Promise(() => {}))
+
+			store.toggleEnvelopeSeen({ envelope, seen: true })
+
+			expect(envelope.flags).toMatchObject({
+				seen: true,
+				hasUnseenInThread: false,
+			})
+		})
+
+		it('keeps the aggregate unread when another known mailbox sibling is still unread', () => {
+			const opened = {
+				databaseId: 36,
+				accountId: 13,
+				mailboxId: 11,
+				threadRootId: 'thread-opened',
+				flags: { seen: false, hasUnseenInThread: true },
+			}
+			const otherUnread = {
+				databaseId: 37,
+				accountId: 13,
+				mailboxId: 11,
+				threadRootId: 'thread-opened',
+				flags: { seen: false, hasUnseenInThread: true },
+			}
+			store.envelopes[opened.databaseId] = opened
+			store.envelopes[otherUnread.databaseId] = otherUnread
+			MessageService.setEnvelopeFlags.mockReturnValue(new Promise(() => {}))
+
+			store.toggleEnvelopeSeen({ envelope: opened, seen: true })
+
+			expect(opened.flags.hasUnseenInThread).toBe(true)
+			expect(otherUnread.flags.hasUnseenInThread).toBe(true)
+		})
+
 		it('updates a selected batch synchronously and sends one request', async () => {
 			const first = {
 				databaseId: 38,
@@ -6577,6 +6841,22 @@ describe('Vuex store actions', () => {
 			expect(envelope.flags.seen).toBe(true)
 		})
 
+		it('repairs a stale unread aggregate on an idempotent second open without another request', async () => {
+			const envelope = {
+				databaseId: 42,
+				accountId: 13,
+				mailboxId: 11,
+				threadRootId: 'thread-opened',
+				flags: { seen: true, hasUnseenInThread: true },
+			}
+			store.envelopes[envelope.databaseId] = envelope
+
+			await store.toggleEnvelopeSeen({ envelope, seen: true })
+
+			expect(MessageService.setEnvelopeFlags).not.toHaveBeenCalled()
+			expect(envelope.flags.hasUnseenInThread).toBe(false)
+		})
+
 		it('marks the thread unread immediately when marking a message unread, without waiting for the server', async () => {
 			const envelope = {
 				databaseId: 42,
@@ -6672,7 +6952,7 @@ describe('Vuex store actions', () => {
 			expect(envelope.flags.hasUnseenInThread).toBe(false)
 		})
 
-		it('leaves hasUnseenInThread untouched if the server response omits it', async () => {
+		it('keeps the locally-derived hasUnseenInThread if the server response omits it', async () => {
 			const envelope = {
 				databaseId: 42,
 				mailboxId: 11,
@@ -6682,7 +6962,7 @@ describe('Vuex store actions', () => {
 
 			await store.toggleEnvelopeSeen({ envelope, seen: true })
 
-			expect(envelope.flags.hasUnseenInThread).toBe(true)
+			expect(envelope.flags.hasUnseenInThread).toBe(false)
 		})
 
 		// Reported live: opening a thread correctly marked its oldest
@@ -6733,6 +7013,31 @@ describe('Vuex store actions', () => {
 			expect(olderReply.flags.hasUnseenInThread).toBe(false)
 			expect(representative.flags.hasUnseenInThread).toBe(false)
 			expect(unrelated.flags.hasUnseenInThread).toBe(true)
+		})
+
+		it('does not propagate a mailbox-scoped unread aggregate to a copy in another folder', async () => {
+			const inboxCopy = {
+				databaseId: 100,
+				accountId: 13,
+				mailboxId: 11,
+				threadRootId: 'thread-abc',
+				flags: { seen: false, hasUnseenInThread: true },
+			}
+			const archiveCopy = {
+				databaseId: 101,
+				accountId: 13,
+				mailboxId: 12,
+				threadRootId: 'thread-abc',
+				flags: { seen: false, hasUnseenInThread: true },
+			}
+			store.envelopes[inboxCopy.databaseId] = inboxCopy
+			store.envelopes[archiveCopy.databaseId] = archiveCopy
+			MessageService.setEnvelopeFlags.mockResolvedValue({ hasUnseenInThread: false })
+
+			await store.toggleEnvelopeSeen({ envelope: inboxCopy, seen: true })
+
+			expect(inboxCopy.flags.hasUnseenInThread).toBe(false)
+			expect(archiveCopy.flags.hasUnseenInThread).toBe(true)
 		})
 
 		it('marking a message unread immediately marks every other message in the same thread unread too, optimistically', () => {

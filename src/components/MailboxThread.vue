@@ -148,6 +148,7 @@
 							:account="unifiedAccount"
 							:mailbox="unifiedInbox"
 							:search-query="appendToSearch(favoriteQuery)"
+							skip-initial-load
 							paginate="manual"
 							:is-priority-inbox="true"
 							:initial-page-size="favoriteInitialPageSize"
@@ -182,6 +183,7 @@
 							:account="unifiedAccount"
 							:mailbox="followUpMailbox"
 							:search-query="appendToSearch(followUpQuery)"
+							skip-initial-sync
 							paginate="manual"
 							:is-priority-inbox="true"
 							:initial-page-size="followUpMessagesInitialPageSize"
@@ -217,6 +219,7 @@
 							:account="unifiedAccount"
 							:mailbox="unifiedInbox"
 							:search-query="appendToSearch(priorityImportantQuery)"
+							skip-initial-load
 							paginate="manual"
 							:is-priority-inbox="true"
 							:initial-page-size="importantMessagesInitialPageSize"
@@ -237,6 +240,7 @@
 							:account="unifiedAccount"
 							:mailbox="unifiedInbox"
 							:search-query="appendToSearch(priorityOtherQuery)"
+							skip-initial-load
 							:is-priority-inbox="true"
 							:bus="bus" />
 						<!-- Every section hides itself when its list is
@@ -732,7 +736,7 @@ export default {
 			})
 		}
 		if (this.mailbox.isPriorityInbox) {
-			await this.onPriorityMailboxOpened()
+			await this.onPriorityMailboxOpened({ refreshView: true })
 			this.registerPrioritySectionObserver()
 		}
 	},
@@ -776,6 +780,16 @@ export default {
 					workClass: WorkClass.EXPLICIT_HEAVY,
 					syncSources: true,
 				})
+				// Follow-up is sourced from Sent rather than Inbox, so it is
+				// intentionally outside the exact Priority split above.
+				// Refresh it once here instead of once per child component.
+				if (this.followUpQuery) {
+					await this.mainStore.syncEnvelopes({
+						mailboxId: FOLLOW_UP_MAILBOX_ID,
+						query: this.appendToSearch(this.followUpQuery),
+						workClass: WorkClass.EXPLICIT_HEAVY,
+					})
+				}
 			} else {
 				await this.mainStore.syncEnvelopes({
 					mailboxId: this.mailbox.databaseId,
@@ -896,6 +910,15 @@ export default {
 		},
 
 		onShortcut(e) {
+			// Priority Inbox stacks several Mailbox children. Broadcasting
+			// refresh makes every child start its own sync wave; the parent
+			// owns the exact, awaitable refresh for the composite view.
+			if (this.mailbox.isPriorityInbox && e.srcKey === 'refresh') {
+				void this.refreshCurrentView().catch((error) => {
+					logger.error('Could not refresh Priority Inbox from shortcut', { error })
+				})
+				return
+			}
 			this.bus.emit('shortcut', e)
 		},
 
