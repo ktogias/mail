@@ -1,3 +1,22 @@
+## 5.11.0-dev.0.ktogias.18 (2026-07-26, resource-constrained deployment fork)
+
+### Priority Inbox Startup
+
+* replace per-section initial remote synchronization with one parent-owned, database-first exact Priority snapshot
+* keep Follow-up's cached Sent view immediate while deferring its remote synchronization to one explicit parent refresh
+* route toolbar, pull-to-refresh and keyboard refresh through the same exact Priority refresh path
+* single-flight overlapping canonical physical-mailbox syncs while preserving independent structural search state and retry behavior
+
+### Optimistic State Consistency
+
+* keep read, starred and important state optimistic across list navigation instead of briefly restoring stale server snapshots
+* retain pending optimistic fields during exact Priority view replacement and accept later authoritative correction after completion
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.6 (2026-07-24, resource-constrained deployment fork)
 
 ### Interactive Request Priority
