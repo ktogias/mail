@@ -27,6 +27,7 @@ import {
 	runCrossTabLeader,
 	WorkClass,
 } from './service/RequestCoordinator.js'
+import { PRIORITY_INBOX_ID } from './store/constants.js'
 import useMainStore from './store/mainStore.js'
 
 const WATCHED_MAILBOX_LEASE_MS = 45_000
@@ -426,7 +427,15 @@ export default {
 				)
 
 				const mailboxId = this.mainStore.currentViewMailboxId
-				if (mailboxId !== undefined && this.mainStore.getMailbox(mailboxId)) {
+				const priorityInboxIsActive = mailboxId === PRIORITY_INBOX_ID
+				if (priorityInboxIsActive) {
+					await this.mainStore.refreshPriorityInboxView({
+						workClass: WorkClass.VISIBLE_REVALIDATION,
+						syncSources: true,
+					}).catch((error) => {
+						logger.debug('Exact Priority Inbox revalidation deferred after connectivity recovery', { error })
+					})
+				} else if (mailboxId !== undefined && this.mainStore.getMailbox(mailboxId)) {
 					await this.mainStore.syncEnvelopes({
 						mailboxId,
 						workClass: WorkClass.VISIBLE_REVALIDATION,
@@ -434,7 +443,7 @@ export default {
 						logger.debug('Active view revalidation deferred after connectivity recovery', { error })
 					})
 				}
-				if (this.hasMailAccounts) {
+				if (this.hasMailAccounts && !priorityInboxIsActive) {
 					await this.mainStore.refreshPriorityInboxStats(WorkClass.VISIBLE_REVALIDATION).catch((error) => {
 						logger.debug('Priority Inbox counter revalidation failed during connectivity recovery', { error })
 					})
@@ -489,6 +498,15 @@ export default {
 			this.lastCrossTabRevalidationAt = Date.now()
 			// The other tab already paid for IMAP. This active-view diff rides
 			// the server freshness gate and updates this tab's independent store.
+			if (mailboxId === PRIORITY_INBOX_ID) {
+				this.mainStore.refreshPriorityInboxView({
+					workClass: WorkClass.VISIBLE_REVALIDATION,
+					syncSources: false,
+				}).catch((error) => {
+					logger.debug('Cross-tab exact Priority Inbox revalidation failed', { error })
+				})
+				return
+			}
 			this.mainStore.syncEnvelopes({
 				mailboxId,
 				workClass: WorkClass.VISIBLE_REVALIDATION,

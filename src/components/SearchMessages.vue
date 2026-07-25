@@ -543,7 +543,14 @@ export default {
 		},
 
 		toggleUnread() {
-			if (this.searchFlags.includes('unread')) {
+			this.setUnread(!this.searchFlags.includes('unread'))
+		},
+
+		setUnread(enabled) {
+			if (enabled === this.searchFlags.includes('unread')) {
+				return
+			}
+			if (!enabled) {
 				this.searchFlags = this.searchFlags.filter((flag) => flag !== 'unread')
 			} else {
 				this.searchFlags.push('unread')

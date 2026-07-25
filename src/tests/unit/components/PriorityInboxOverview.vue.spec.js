@@ -51,10 +51,10 @@ describe('PriorityInboxOverview', () => {
 			},
 		})
 
-		const toggle = wrapper.find('.priority-overview__unread-toggle')
-		expect(toggle.attributes('aria-pressed')).toBe('true')
-		await toggle.trigger('click')
-		expect(wrapper.emitted('toggle-unread')).toHaveLength(1)
+		const toggle = wrapper.findComponent({ name: 'NcCheckboxRadioSwitch' })
+		expect(toggle.props('modelValue')).toBe(true)
+		toggle.vm.$emit('update:modelValue', false)
+		expect(wrapper.emitted('set-unread')).toEqual([[false]])
 	})
 
 	it('omits Favorites when the navigation preference disables that section', () => {

@@ -23,12 +23,29 @@ describe('enablePullToRefresh', () => {
 		enablePullToRefresh(container, indicator, { canStart: () => true, onRefresh })
 
 		container.dispatchEvent(touchEvent('touchstart', 100))
-		container.dispatchEvent(touchEvent('touchmove', 100 + PULL_REFRESH_THRESHOLD_PX * 2))
-		container.dispatchEvent(touchEvent('touchend', 100 + PULL_REFRESH_THRESHOLD_PX * 2))
+		container.dispatchEvent(touchEvent('touchmove', 100 + PULL_REFRESH_THRESHOLD_PX))
+		container.dispatchEvent(touchEvent('touchend', 100 + PULL_REFRESH_THRESHOLD_PX))
 
 		expect(onRefresh).toHaveBeenCalledTimes(1)
 		await Promise.resolve()
 		expect(indicator.style.transform).toBe('')
+	})
+
+	it('uses real finger travel for the threshold, not the resistance-scaled visual distance', () => {
+		const container = document.createElement('div')
+		const indicator = document.createElement('div')
+		const onRefresh = vi.fn()
+		enablePullToRefresh(container, indicator, { canStart: () => true, onRefresh })
+
+		container.dispatchEvent(touchEvent('touchstart', 100))
+		container.dispatchEvent(touchEvent('touchmove', 100 + PULL_REFRESH_THRESHOLD_PX - 1))
+		container.dispatchEvent(touchEvent('touchend', 100 + PULL_REFRESH_THRESHOLD_PX - 1))
+		expect(onRefresh).not.toHaveBeenCalled()
+
+		container.dispatchEvent(touchEvent('touchstart', 100))
+		container.dispatchEvent(touchEvent('touchmove', 100 + PULL_REFRESH_THRESHOLD_PX))
+		container.dispatchEvent(touchEvent('touchend', 100 + PULL_REFRESH_THRESHOLD_PX))
+		expect(onRefresh).toHaveBeenCalledTimes(1)
 	})
 
 	it('does not call onRefresh for a drag under the threshold (snaps back)', () => {

@@ -96,6 +96,93 @@ describe('Vuex store actions', () => {
 		expect(store.mailboxes.priority.unread).toBe(6)
 	})
 
+	it('refreshes the exact active Priority compound lists with one priority-split request per source', async () => {
+		normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+		const account = { id: 13 }
+		store.addAccountMutation(account)
+		store.addMailboxMutation({
+			account,
+			mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+		})
+		store.currentViewMailboxId = 'priority'
+		store.preferences['layout-message-view'] = 'threaded'
+		store.preferences['sort-order'] = 'newest'
+		store.preferences['sort-favorites'] = 'true'
+		const searchQuery = 'flags:unread match:allof not:starred'
+		const otherQuery = `${searchQuery} is:pi-other`
+		store.mailboxes[UNIFIED_INBOX_ID].envelopeLists[otherQuery] = []
+
+		const newOther = {
+			databaseId: 101,
+			mailboxId: 11,
+			dateInt: 10,
+			threadRootId: 'thread-101',
+			flags: {
+				seen: false,
+				hasUnseenInThread: true,
+				hasFlaggedInThread: false,
+				hasImportantInThread: false,
+			},
+			tags: [],
+		}
+		MessageService.fetchEnvelopes.mockResolvedValue([newOther])
+		PriorityInboxService.fetchPriorityInboxStats.mockResolvedValue({
+			sections: {
+				favorite: { total: 0, unread: 0 },
+				important: { total: 0, unread: 0 },
+				other: { total: 1, unread: 1 },
+			},
+			complete: true,
+		})
+
+		await store.refreshPriorityInboxView({
+			searchQuery,
+			workClass: WorkClass.VISIBLE_REVALIDATION,
+		})
+
+		expect(MessageService.fetchEnvelopes).toHaveBeenCalledTimes(1)
+		expect(MessageService.fetchEnvelopes.mock.calls[0]).toEqual([
+			13,
+			11,
+			'flags:unread match:allof',
+			undefined,
+			PAGE_SIZE,
+			'newest',
+			'threaded',
+			undefined,
+			undefined,
+			true,
+			undefined,
+			WorkClass.VISIBLE_REVALIDATION,
+		])
+		expect(store.getEnvelopes(UNIFIED_INBOX_ID, otherQuery).map((envelope) => envelope.databaseId)).toEqual([101])
+		expect(Object.keys(store.priorityInboxNewMessageIds.other)).toEqual(['101'])
+		expect(PriorityInboxService.fetchPriorityInboxStats)
+			.toHaveBeenCalledWith('threaded', WorkClass.VISIBLE_REVALIDATION)
+	})
+
+	it('uses one canonical source sync before an explicit Priority view refresh', async () => {
+		store.preferences['sort-order'] = 'newest'
+		store.preferences['layout-message-view'] = 'threaded'
+		store.syncEnvelopes = vi.fn().mockResolvedValue([])
+		MessageService.fetchEnvelopes.mockResolvedValue([])
+		PriorityInboxService.fetchPriorityInboxStats.mockResolvedValue({
+			sections: {},
+			complete: true,
+		})
+
+		await store.refreshPriorityInboxView({
+			syncSources: true,
+			workClass: WorkClass.EXPLICIT_HEAVY,
+		})
+
+		expect(store.syncEnvelopes).toHaveBeenCalledTimes(1)
+		expect(store.syncEnvelopes).toHaveBeenCalledWith({
+			mailboxId: UNIFIED_INBOX_ID,
+			workClass: WorkClass.EXPLICIT_HEAVY,
+		})
+	})
+
 	it('de-duplicates new-mail indicators and classifies them by Priority section', () => {
 		store.currentViewMailboxId = 'priority'
 		store.preferences['layout-message-view'] = 'threaded'

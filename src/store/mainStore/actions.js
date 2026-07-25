@@ -127,6 +127,8 @@ import { normalizedEnvelopeListId } from '../../util/normalization.js'
 import {
 	getPrioritySearchQueries,
 	priorityImportantQuery,
+	priorityInboxBaseQuery,
+	priorityInboxSectionQueries,
 	priorityOtherQuery,
 } from '../../util/priorityInbox.js'
 import { wait } from '../../util/wait.js'
@@ -1322,6 +1324,167 @@ export default function mainStoreActions() {
 		updateSyncTimestamp() {
 			this.syncTimestamp = Date.now()
 		},
+		/**
+		 * Reconcile the exact Priority Inbox section lists currently rendered.
+		 *
+		 * A virtual `syncEnvelopes({ mailboxId: 'priority' })` only knows the
+		 * two bare is:pi-* buckets. The UI commonly reads compound keys
+		 * instead (`not:starred is:pi-other`, or
+		 * `flags:unread ... not:starred is:pi-other`). That mismatch was
+		 * observed live after a long-tab resume: the DB aggregate correctly
+		 * changed Other from 0 to 1 unread, while the visible compound list
+		 * never received a fresh snapshot.
+		 *
+		 * Structural searches use the backend's established prioritySplit
+		 * mode: one local-DB request per physical inbox returns an exact page
+		 * for Favorite, Important and Other, replacing three independent
+		 * section requests. Text searches keep the shared progressive-search
+		 * path, where sibling section requests already coalesce by base query.
+		 *
+		 * @param {object} options
+		 * @param {string|undefined} options.searchQuery
+		 * @param {string} options.workClass
+		 * @param {boolean} options.syncSources First do one canonical IMAP
+		 *                                     sync per physical inbox.
+		 * @return {Promise<object>}
+		 */
+		async refreshPriorityInboxView({
+			searchQuery = this.currentPriorityInboxSearchQuery,
+			workClass = WorkClass.ACTIVE_CONTENT,
+			syncSources = false,
+		} = {}) {
+			const sortFavorites = this.getPreference('sort-favorites', 'false') === 'true'
+			const sectionQueries = priorityInboxSectionQueries(searchQuery, sortFavorites)
+			const baseQuery = priorityInboxBaseQuery(searchQuery)
+
+			if (syncSources) {
+				// A Priority view is fed by every physical INBOX. Sync each
+				// source once, unfiltered; do not repeat the old two-section
+				// virtual fan-out. A contended account must not prevent the
+				// exact DB snapshot below from publishing every source that
+				// is already current.
+				await this.syncEnvelopes({
+					mailboxId: UNIFIED_INBOX_ID,
+					workClass,
+				}).catch((error) => {
+					logger.debug('One or more Priority Inbox source syncs were deferred; publishing the available exact snapshot', { error })
+				})
+			}
+
+			if (hasTextSearchPredicate(baseQuery)) {
+				await Promise.all(Object.values(sectionQueries).map((query) => this.fetchEnvelopes({
+					mailboxId: PRIORITY_INBOX_ID,
+					query,
+					workClass,
+				})))
+				await this.refreshPriorityInboxStats(workClass)
+				return sectionQueries
+			}
+
+			const passwordIsUnavailable = this.getPreference('password-is-unavailable', false)
+			const isDisabled = (account) => passwordIsUnavailable && !!account.provisioningId
+			const targetMailboxes = findIndividualMailboxes(this.getMailboxes, 'inbox')(this.getAccounts)
+				.filter((mailbox) => !isDisabled(this.getAccount(mailbox.accountId)))
+			const sortOrder = this.getPreference('sort-order')
+			const view = this.getPreference('layout-message-view')
+
+			const results = await mapWithConcurrencyLimit(
+				targetMailboxes,
+				ENVELOPE_FETCH_CONCURRENCY,
+				async (mailbox) => {
+					try {
+						const envelopes = await fetchEnvelopes(
+							mailbox.accountId,
+							mailbox.databaseId,
+							baseQuery,
+							undefined,
+							PAGE_SIZE,
+							sortOrder,
+							view,
+							undefined,
+							undefined,
+							true,
+							undefined,
+							workClass,
+						)
+						return { mailbox, envelopes, error: undefined }
+					} catch (error) {
+						logger.warn(`Could not refresh Priority Inbox source mailbox ${mailbox.databaseId}`, { error })
+						return { mailbox, envelopes: [], error }
+					}
+				},
+			)
+
+			const successful = results.filter((result) => result.error === undefined)
+			if (successful.length === 0 && results.length > 0) {
+				throw results[0].error
+			}
+
+			const previousVisibleIds = new Set(Object.values(sectionQueries)
+				.flatMap((query) => this.getEnvelopes(UNIFIED_INBOX_ID, query))
+				.map((envelope) => envelope.databaseId))
+
+			// Store authoritative per-source section pages first. This also
+			// normalizes every envelope into the global map before the virtual
+			// list ids below are published.
+			successful.forEach(({ mailbox, envelopes }) => {
+				const bySection = Object.fromEntries(Object.keys(sectionQueries).map((section) => [section, []]))
+				envelopes.forEach((envelope) => {
+					const section = priorityStatsSection(this, envelope)
+					if (section in bySection) {
+						bySection[section].push(envelope)
+					}
+				})
+				Object.entries(sectionQueries).forEach(([section, query]) => {
+					this.addEnvelopesMutation({
+						query,
+						envelopes: bySection[section],
+						addToUnifiedMailboxes: false,
+						replace: true,
+						replaceMailboxId: mailbox.databaseId,
+					})
+				})
+			})
+
+			const failedMailboxIds = new Set(results
+				.filter((result) => result.error !== undefined)
+				.map((result) => result.mailbox.databaseId))
+			const freshBySection = Object.fromEntries(Object.keys(sectionQueries).map((section) => [section, []]))
+			successful.flatMap((result) => result.envelopes).forEach((envelope) => {
+				const section = priorityStatsSection(this, envelope)
+				if (section in freshBySection) {
+					freshBySection[section].push(envelope)
+				}
+			})
+
+			Object.entries(sectionQueries).forEach(([section, query]) => {
+				// Preserve rows from a source whose fresh read failed; one
+				// unavailable account must not blank successful accounts or
+				// erase its last-known-good rows.
+				const retained = this.getEnvelopes(UNIFIED_INBOX_ID, query)
+					.filter((envelope) => failedMailboxIds.has(envelope.mailboxId))
+				const exactPage = sliceToPage(combineEnvelopeLists(sortOrder)([
+					freshBySection[section],
+					retained,
+				]))
+				this.replaceKnownEnvelopeListMutation({
+					mailboxId: UNIFIED_INBOX_ID,
+					query,
+					envelopes: exactPage,
+				})
+				this.replaceKnownEnvelopeListMutation({
+					mailboxId: PRIORITY_INBOX_ID,
+					query,
+					envelopes: exactPage,
+				})
+			})
+
+			this.recordPriorityInboxNewMessagesMutation(successful
+				.flatMap((result) => result.envelopes)
+				.filter((envelope) => !previousVisibleIds.has(envelope.databaseId)))
+			await this.refreshPriorityInboxStats(workClass)
+			return sectionQueries
+		},
 		async refreshPriorityInboxStats(workClass = WorkClass.ACTIVE_CONTENT) {
 			const existing = pendingPriorityInboxStats.get(this)
 			if (existing) {
@@ -1936,6 +2099,9 @@ export default function mainStoreActions() {
 		// MailboxThread.vue alongside setCurrentViewMailboxIdMutation().
 		setCurrentViewFilterMutation(filter) {
 			this.currentViewFilter = filter
+		},
+		setCurrentPriorityInboxSearchQueryMutation(query) {
+			this.currentPriorityInboxSearchQuery = query
 		},
 		// See currentOpenThreadId in mainStore.js's state() -- mirrored
 		// from Thread.vue's own route watcher, the same way

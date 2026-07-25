@@ -34,14 +34,13 @@
 		</div>
 
 		<div class="priority-overview__actions">
-			<button
-				type="button"
+			<NcCheckboxRadioSwitch
+				type="checkbox"
 				class="priority-overview__unread-toggle"
-				:aria-pressed="unreadOnly ? 'true' : 'false'"
-				@click="$emit('toggle-unread')">
-				<span class="priority-overview__toggle-mark" aria-hidden="true">{{ unreadOnly ? '✓' : '' }}</span>
+				:model-value="unreadOnly"
+				@update:modelValue="$emit('set-unread', $event)">
 				{{ t('mail', 'Unread only') }}
-			</button>
+			</NcCheckboxRadioSwitch>
 			<button
 				v-if="totalNew > 0"
 				type="button"
@@ -63,13 +62,14 @@
 </template>
 
 <script>
-import { NcCounterBubble as CounterBubble } from '@nextcloud/vue'
+import { NcCounterBubble as CounterBubble, NcCheckboxRadioSwitch } from '@nextcloud/vue'
 
 export default {
 	name: 'PriorityInboxOverview',
 
 	components: {
 		CounterBubble,
+		NcCheckboxRadioSwitch,
 	},
 
 	props: {
@@ -253,26 +253,7 @@ export default {
 }
 
 .priority-overview__unread-toggle {
-	display: inline-flex;
-	align-items: center;
-	gap: 4px;
-	color: var(--color-main-text);
-}
-
-.priority-overview__toggle-mark {
-	display: inline-flex;
-	width: 16px;
-	height: 16px;
-	align-items: center;
-	justify-content: center;
-	border: 1px solid var(--color-border-maxcontrast);
-	border-radius: 4px;
-}
-
-.priority-overview__unread-toggle[aria-pressed='true'] .priority-overview__toggle-mark {
-	border-color: var(--color-primary-element);
-	background: var(--color-primary-element);
-	color: var(--color-primary-element-text);
+	min-height: var(--default-clickable-area);
 }
 
 .priority-overview__new-message {

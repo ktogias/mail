@@ -26,7 +26,7 @@
 						:unread-only="priorityUnreadOnly"
 						:loading="mainStore.priorityInboxStatsLoading"
 						@select="selectPrioritySection"
-						@toggle-unread="togglePriorityUnreadOnly" />
+						@set-unread="setPriorityUnreadOnly" />
 				</div>
 				<div ref="pullToRefreshIndicator" class="pull-to-refresh-indicator" aria-hidden="true">
 					<IconLoading v-if="pullToRefreshSpinning" :size="20" />
@@ -607,7 +607,7 @@ export default {
 			this.mainStore.setCurrentViewFilterMutation(to.params?.filter)
 			this.handleMailto()
 			if (to.name === 'mailbox' && to.params.mailboxId === PRIORITY_INBOX_ID) {
-				await this.onPriorityMailboxOpened()
+				await this.onPriorityMailboxOpened({ refreshView: true })
 			} else if (this.isThreadShown) {
 				await this.fetchEnvelopes()
 			}
@@ -632,6 +632,9 @@ export default {
 				this.searchQuery = this.searchQuery ? this.searchQuery + ' not:starred' : 'not:starred'
 			} else if (this.searchQuery?.includes('not:starred')) {
 				this.searchQuery = this.searchQuery.replace('not:starred', '').trim() || undefined
+			}
+			if (this.mailbox.isPriorityInbox) {
+				this.mainStore.setCurrentPriorityInboxSearchQueryMutation(this.searchQuery)
 			}
 		},
 
@@ -675,6 +678,9 @@ export default {
 		if (this.sortFavorites) {
 			this.searchQuery = 'not:starred'
 		}
+		if (this.mailbox.isPriorityInbox) {
+			this.mainStore.setCurrentPriorityInboxSearchQueryMutation(this.searchQuery)
+		}
 	},
 
 	async mounted() {
@@ -701,7 +707,10 @@ export default {
 		if (scroller) {
 			const container = getScrollEventTarget(scroller)
 			this.pullToRefreshTeardown = enablePullToRefresh(container, this.$refs.pullToRefreshIndicator, {
-				canStart: () => getScrollTop(container) === 0,
+				// Firefox may retain a fractional/sub-pixel scrollTop at the
+				// visual top. Treat that as top instead of silently refusing
+				// to arm the gesture forever.
+				canStart: () => getScrollTop(container) <= 1,
 				onRefresh: () => this.onPullToRefresh(),
 			})
 		}
@@ -744,14 +753,19 @@ export default {
 		// pull-to-refresh spinner reflect real completion.
 		async refreshCurrentView() {
 			this.mainStore.setInteractionPriorityMutation()
-			await this.mainStore.syncEnvelopes({
-				mailboxId: this.mailbox.databaseId,
-				workClass: WorkClass.EXPLICIT_HEAVY,
-			})
-			await this.mainStore.syncMailboxesForAccount(this.account, WorkClass.EXPLICIT_HEAVY)
 			if (this.mailbox.isPriorityInbox) {
-				await this.mainStore.refreshPriorityInboxStats(WorkClass.ACTIVE_CONTENT)
+				await this.mainStore.refreshPriorityInboxView({
+					searchQuery: this.searchQuery,
+					workClass: WorkClass.EXPLICIT_HEAVY,
+					syncSources: true,
+				})
+			} else {
+				await this.mainStore.syncEnvelopes({
+					mailboxId: this.mailbox.databaseId,
+					workClass: WorkClass.EXPLICIT_HEAVY,
+				})
 			}
+			await this.mainStore.syncMailboxesForAccount(this.account, WorkClass.EXPLICIT_HEAVY)
 		},
 
 		getGroupedEnvelopes(envelopes, syncTimestamp) {
@@ -768,12 +782,18 @@ export default {
 			}
 		},
 
-		async onPriorityMailboxOpened() {
+		async onPriorityMailboxOpened({ refreshView = false } = {}) {
 			logger.debug('Priority inbox was opened')
 
 			await Promise.all([
 				this.mainStore.checkFollowUpReminders({ query: this.followUpQuery }),
-				this.mainStore.refreshPriorityInboxStats(WorkClass.ACTIVE_CONTENT).catch(() => {}),
+				refreshView
+					? this.mainStore.refreshPriorityInboxView({
+							searchQuery: this.searchQuery,
+							workClass: WorkClass.ACTIVE_CONTENT,
+							syncSources: false,
+						}).catch(() => {})
+					: this.mainStore.refreshPriorityInboxStats(WorkClass.ACTIVE_CONTENT).catch(() => {}),
 			])
 		},
 
@@ -781,12 +801,12 @@ export default {
 			return this.priorityInboxStats?.sections?.[section] ?? { unread: 0, total: 0 }
 		},
 
-		togglePriorityUnreadOnly() {
+		setPriorityUnreadOnly(enabled) {
 			// SearchMessages already owns the canonical quick-filter state,
 			// serialization (`flags:unread`) and interaction with all other
 			// search controls. Reuse that implementation so the sticky
 			// overview and the existing Unread chip can never diverge.
-			this.$refs.searchMessages?.toggleUnread()
+			this.$refs.searchMessages?.setUnread(enabled)
 		},
 
 		prioritySectionElement(section) {
@@ -981,6 +1001,9 @@ export default {
 				tokens.push('not:starred')
 			}
 			this.searchQuery = tokens.join(' ') || undefined
+			if (this.mailbox.isPriorityInbox) {
+				this.mainStore.setCurrentPriorityInboxSearchQueryMutation(this.searchQuery)
+			}
 		},
 
 		dismissBackfillBanner() {

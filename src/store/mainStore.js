@@ -86,6 +86,11 @@ export default defineStore('main', {
 			// every row's link() and re-render the whole list (see
 			// Envelope.vue::link() and EnvelopeSkeleton.vue).
 			currentViewFilter: undefined,
+			// The active Priority Inbox search, including its structural
+			// not:starred partition. App-level focus recovery has no
+			// component ref, so mirror it just like currentViewMailboxId and
+			// refresh the exact compound lists currently rendered.
+			currentPriorityInboxSearchQuery: undefined,
 			// The envelope id of the currently open thread/message (the
 			// route's own :threadId, mirrored the same way
 			// currentViewMailboxId is -- see Thread.vue's own route

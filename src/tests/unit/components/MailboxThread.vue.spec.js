@@ -125,6 +125,18 @@ describe('MailboxThread', () => {
 		expect(wrapper.vm.priorityUnreadOnly).toBe(false)
 	})
 
+	it('drives the canonical SearchMessages unread state from the overview control', () => {
+		const wrapper = mountThread()
+		const setUnread = vi.fn()
+		Object.defineProperty(wrapper.vm.$refs, 'searchMessages', {
+			value: { setUnread },
+			configurable: true,
+		})
+
+		wrapper.vm.setPriorityUnreadOnly(true)
+		expect(setUnread).toHaveBeenCalledWith(true)
+	})
+
 	it("shows the 'Other' section once it actually has envelopes, even if Important is empty", () => {
 		seedEnvelope(priorityOtherQuery, 2)
 		// priorityImportantQuery deliberately left empty
@@ -202,7 +214,7 @@ describe('MailboxThread', () => {
 			vi.useFakeTimers()
 			const wrapper = mountThread()
 			let resolveSync
-			store.syncEnvelopes = vi.fn().mockReturnValue(new Promise((r) => {
+			store.refreshPriorityInboxView = vi.fn().mockReturnValue(new Promise((r) => {
 				resolveSync = r
 			}))
 			store.syncMailboxesForAccount = vi.fn().mockResolvedValue()
@@ -212,9 +224,10 @@ describe('MailboxThread', () => {
 			// Past the min-visible window, but the sync is still pending, so
 			// the spinner must NOT have retracted (the whole point of the fix).
 			await vi.advanceTimersByTimeAsync(1500)
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({
-				mailboxId: wrapper.vm.mailbox.databaseId,
+			expect(store.refreshPriorityInboxView).toHaveBeenCalledWith({
+				searchQuery: wrapper.vm.searchQuery,
 				workClass: WorkClass.EXPLICIT_HEAVY,
+				syncSources: true,
 			})
 			expect(wrapper.vm.pullToRefreshSpinning).toBe(true)
 
@@ -230,7 +243,7 @@ describe('MailboxThread', () => {
 		it('retracts at the max cap if the sync never resolves (no infinite spin)', async () => {
 			vi.useFakeTimers()
 			const wrapper = mountThread()
-			store.syncEnvelopes = vi.fn().mockReturnValue(new Promise(() => {})) // never resolves
+			store.refreshPriorityInboxView = vi.fn().mockReturnValue(new Promise(() => {})) // never resolves
 			store.syncMailboxesForAccount = vi.fn().mockResolvedValue()
 
 			const done = wrapper.vm.onPullToRefresh()
@@ -244,7 +257,7 @@ describe('MailboxThread', () => {
 		it('clears the spinner even when the sync rejects (does not hang)', async () => {
 			vi.useFakeTimers()
 			const wrapper = mountThread()
-			store.syncEnvelopes = vi.fn().mockRejectedValue(new Error('network error'))
+			store.refreshPriorityInboxView = vi.fn().mockRejectedValue(new Error('network error'))
 			store.syncMailboxesForAccount = vi.fn().mockResolvedValue()
 
 			const done = wrapper.vm.onPullToRefresh()

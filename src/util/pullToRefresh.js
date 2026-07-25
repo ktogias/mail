@@ -39,6 +39,7 @@ export function enablePullToRefresh(container, indicatorEl, { canStart, onRefres
 	}
 
 	let startY = 0
+	let dragDistance = 0
 	let pulled = 0
 	let tracking = false
 	let refreshing = false
@@ -54,6 +55,7 @@ export function enablePullToRefresh(container, indicatorEl, { canStart, onRefres
 			return
 		}
 		startY = event.touches[0].clientY
+		dragDistance = 0
 		pulled = 0
 		tracking = true
 		indicatorEl.style.transition = 'none'
@@ -70,6 +72,7 @@ export function enablePullToRefresh(container, indicatorEl, { canStart, onRefres
 			resetIndicator()
 			return
 		}
+		dragDistance = deltaY
 		pulled = Math.min(MAX_PULL_PX, deltaY * RESISTANCE)
 		indicatorEl.style.transform = `translateY(${pulled}px) rotate(${pulled * 3}deg)`
 		indicatorEl.style.opacity = String(Math.min(1, pulled / PULL_REFRESH_THRESHOLD_PX))
@@ -81,7 +84,10 @@ export function enablePullToRefresh(container, indicatorEl, { canStart, onRefres
 		}
 		tracking = false
 		indicatorEl.style.transition = ''
-		if (pulled < PULL_REFRESH_THRESHOLD_PX) {
+		// Threshold is the user's real finger travel. `pulled` is only the
+		// resistance-scaled visual distance; comparing that instead made the
+		// documented 70px gesture require a 140px drag on real phones.
+		if (dragDistance < PULL_REFRESH_THRESHOLD_PX) {
 			resetIndicator()
 			return
 		}
