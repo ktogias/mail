@@ -1,3 +1,26 @@
+## 5.11.0-dev.0.ktogias.23 (2026-07-26, resource-constrained deployment fork)
+
+### Flag Write Protection
+
+* keep a `\Seen` or `\Flagged` value this server just wrote on the user's behalf from being reverted by a partial sync whose IMAP `FETCH` predates the `STORE`, using a bounded 120-second local-write record rather than a permanent preference for local state
+* record that write where it happens, when the message row is updated after the IMAP `STORE`, so the guard covers exactly the flags this server owns
+* retire the protection as soon as a reading agrees, and trust a change made in another mail client on its first reading, since it has no local write record here
+
+### Priority Inbox Counter Consistency
+
+* replay a flag change made while a counter snapshot was in flight onto that snapshot, so the section counters and the rows beneath them can no longer describe different states
+* leave a change that predates the request to the server aggregate, so a counter is never adjusted twice for one action
+
+### Resume Sync Coalescing
+
+* let periodic and resume-driven refreshes join a canonical mailbox sync that finished moments earlier instead of each opening its own IMAP round trip
+* keep the opt-in per caller, so a sync that needs a fresh response — backpressure, lock state, new mail — still gets one, and never retain a failed sync
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.22 (2026-07-26, resource-constrained deployment fork)
 
 ### Delete-Lane Backpressure

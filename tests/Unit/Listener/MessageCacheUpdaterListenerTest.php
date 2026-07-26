@@ -66,7 +66,8 @@ class MessageCacheUpdaterListenerTest extends TestCase {
 
 	public function testHandleMessageFlagged() {
 		$account = $this->createStub(Account::class);
-		$mailbox = $this->createStub(Mailbox::class);
+		$mailbox = new Mailbox();
+		$mailbox->setId(149);
 		$event = new MessageFlaggedEvent(
 			$account,
 			$mailbox,
@@ -88,5 +89,40 @@ class MessageCacheUpdaterListenerTest extends TestCase {
 		$this->listener->handle($event);
 
 		$this->assertTrue($message->getFlagJunk());
+	}
+
+	/**
+	 * The row this listener just wrote is newer than any sync still holding
+	 * a FETCH from before the IMAP STORE. Recording the write is what lets
+	 * MessageMapper::updateBulk() tell a stale contradicting reading from a
+	 * real external change -- without it, marking a message read is silently
+	 * reverted by whichever partial sync happens to land next.
+	 */
+	public function testHandleMessageFlaggedRecordsTheLocalWrite() {
+		$account = $this->createStub(Account::class);
+		// A real entity, not a stub: Mailbox::getId() is a magic
+		// __call() accessor that PHPUnit cannot configure.
+		$mailbox = new Mailbox();
+		$mailbox->setId(149);
+		$event = new MessageFlaggedEvent(
+			$account,
+			$mailbox,
+			123,
+			'seen',
+			true
+		);
+		$message = new Message();
+		$this->serviceMock->getParameter('mapper')
+			->expects($this->once())
+			->method('findByUids')
+			->willReturn([$message]);
+		$this->serviceMock->getParameter('mapper')
+			->expects($this->once())
+			->method('recordLocalFlagWrite')
+			->with(149, 123, 'seen', true);
+
+		$this->listener->handle($event);
+
+		$this->assertTrue($message->getFlagSeen());
 	}
 }

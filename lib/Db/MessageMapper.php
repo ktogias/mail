@@ -78,6 +78,25 @@ class MessageMapper extends QBMapper {
 	// server-side here since there is no client action to anchor it to.
 	private const FLAG_IMPORTANT_GRACE_SECONDS = 120;
 
+	// How long a flag this server just wrote on the user's behalf is
+	// protected from a resync reading a contradicting, pre-write value.
+	// Deliberately the same 120s as FLAG_IMPORTANT_GRACE_SECONDS above and
+	// as the client's own RECENT_FLAG_CHANGE_GRACE_MS: all three windows
+	// exist for the one race, and letting them drift apart would leave a
+	// stretch where the client still shows the local value while the
+	// database has already been reverted -- exactly the visible symptom
+	// this guard was added for.
+	private const LOCAL_FLAG_WRITE_GRACE_SECONDS = 120;
+
+	// Flags this server writes on the user's behalf via
+	// MailManager::flagMessages(), and therefore the only ones with a local
+	// write to protect. flag_important is NOT here: it is not a genuine
+	// externally-owned IMAP flag but this app's own classification, and it
+	// already has its own, differently-anchored guard
+	// (shouldTrustFlagImportantReading(), seeded from every reading rather
+	// than only from local writes).
+	private const LOCALLY_GUARDED_FLAGS = ['seen', 'flagged'];
+
 	public function __construct(
 		IDBConnection $db,
 		ITimeFactory $timeFactory,
@@ -553,6 +572,93 @@ class MessageMapper extends QBMapper {
 		return "confirmed_important_{$mailboxId}_{$uid}";
 	}
 
+	private static function localFlagWriteKey(int $mailboxId, int $uid, string $flag): string {
+		return "local_write_{$flag}_{$mailboxId}_{$uid}";
+	}
+
+	/**
+	 * Records that THIS server just wrote $flag for this message on the
+	 * user's behalf, so a resync started before that write cannot silently
+	 * revert it (see shouldTrustFreshFlagReading()).
+	 *
+	 * Called from MessageCacheUpdaterListener, i.e. at the moment
+	 * MailManager::flagMessages() has issued the IMAP STORE and the local
+	 * row has been updated to match -- not from the sync path, which is
+	 * precisely the reader this protects against.
+	 */
+	public function recordLocalFlagWrite(int $mailboxId, int $uid, string $flag, bool $value): void {
+		if (!in_array($flag, self::LOCALLY_GUARDED_FLAGS, true)) {
+			return;
+		}
+
+		$cache = $this->cacheFactory->createDistributed('mail_local_flag_write');
+		if (!($cache instanceof IMemcache)) {
+			return;
+		}
+
+		$cache->set(
+			self::localFlagWriteKey($mailboxId, $uid, $flag),
+			['value' => $value, 'writtenAt' => $this->timeFactory->getTime()],
+			self::LOCAL_FLAG_WRITE_GRACE_SECONDS * 2,
+		);
+	}
+
+	/**
+	 * Whether a fresh IMAP-derived reading of a user-owned flag (\Seen,
+	 * \Flagged) should be trusted and written.
+	 *
+	 * flagMessages() writes the IMAP STORE and updates the local row in the
+	 * same request. A partial sync that had already FETCHed its flags before
+	 * that STORE landed -- or that reads an IMAP server which has not settled
+	 * the write yet -- carries the pre-change value, and updateBulk() would
+	 * otherwise write it straight back over the newer local truth.
+	 *
+	 * Confirmed live on 2026-07-26: a message marked read at 16:27:34 (HTTP
+	 * 200) was unread again in the database by 16:29, while the client kept
+	 * rendering it read for its own 120s grace window
+	 * (RECENT_FLAG_CHANGE_GRACE_MS in actions.js) -- so the Priority Inbox
+	 * counters, which are a straight database aggregate, said "1 unread"
+	 * about a row the same screen was drawing as read.
+	 *
+	 * Deliberately symmetric and deliberately narrow:
+	 * - symmetric, because marking unread races exactly like marking read;
+	 * - narrow, because only flags this server writes on the user's behalf
+	 *   are recorded at all. A flag changed in another mail client has no
+	 *   local write record, so its fresh reading is always trusted and
+	 *   external changes still converge normally.
+	 *
+	 * A fresh reading that AGREES retires the record: the write has settled,
+	 * and keeping the entry would only delay a genuine later external change
+	 * by up to the grace window.
+	 *
+	 * No distributed memcache available reads as "trust every fresh reading",
+	 * the same fail-open choice shouldTrustFlagImportantReading() makes.
+	 *
+	 * @return bool whether $freshValue should be written
+	 */
+	private function shouldTrustFreshFlagReading(int $mailboxId, int $uid, string $flag, bool $freshValue): bool {
+		$cache = $this->cacheFactory->createDistributed('mail_local_flag_write');
+		if (!($cache instanceof IMemcache)) {
+			return true;
+		}
+
+		$key = self::localFlagWriteKey($mailboxId, $uid, $flag);
+		$localWrite = $cache->get($key);
+		if (!is_array($localWrite) || !array_key_exists('value', $localWrite)) {
+			return true;
+		}
+
+		if ($localWrite['value'] === $freshValue) {
+			$cache->remove($key);
+			return true;
+		}
+
+		$stillWithinGraceWindow = array_key_exists('writtenAt', $localWrite)
+			&& $this->timeFactory->getTime() < ((int)$localWrite['writtenAt'] + self::LOCAL_FLAG_WRITE_GRACE_SECONDS);
+
+		return !$stillWithinGraceWindow;
+	}
+
 	/**
 	 * Whether a fresh IMAP-derived flag_important reading should be
 	 * trusted and written, symmetric for both directions -- there is no
@@ -716,16 +822,27 @@ class MessageMapper extends QBMapper {
 					$updateData['flag_draft_false'][] = $message->getUid();
 				}
 
-				if ($message->getFlagFlagged()) {
-					$updateData['flag_flagged_true'][] = $message->getUid();
-				} else {
-					$updateData['flag_flagged_false'][] = $message->getUid();
+				// \Flagged and \Seen are user-owned flags this server writes
+				// itself, so a fresh reading that contradicts a local write
+				// made moments ago is a stale FETCH, not a real change --
+				// see shouldTrustFreshFlagReading(). Omitting the uid from
+				// BOTH lists is what "leave this flag alone this round"
+				// means here; the next sync whose reading agrees retires the
+				// protection again.
+				if ($this->shouldTrustFreshFlagReading($message->getMailboxId(), $message->getUid(), 'flagged', $message->getFlagFlagged())) {
+					if ($message->getFlagFlagged()) {
+						$updateData['flag_flagged_true'][] = $message->getUid();
+					} else {
+						$updateData['flag_flagged_false'][] = $message->getUid();
+					}
 				}
 
-				if ($message->getFlagSeen()) {
-					$updateData['flag_seen_true'][] = $message->getUid();
-				} else {
-					$updateData['flag_seen_false'][] = $message->getUid();
+				if ($this->shouldTrustFreshFlagReading($message->getMailboxId(), $message->getUid(), 'seen', $message->getFlagSeen())) {
+					if ($message->getFlagSeen()) {
+						$updateData['flag_seen_true'][] = $message->getUid();
+					} else {
+						$updateData['flag_seen_false'][] = $message->getUid();
+					}
 				}
 
 				if ($message->getFlagForwarded()) {

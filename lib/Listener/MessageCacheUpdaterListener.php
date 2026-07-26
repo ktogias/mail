@@ -40,6 +40,18 @@ class MessageCacheUpdaterListener implements IEventListener {
 			$message->setFlag($event->getFlag(), $event->isSet());
 
 			$this->mapper->update($message);
+
+			// This row is now newer than any sync still holding a FETCH from
+			// before the IMAP STORE that triggered this event. Record the
+			// write so updateBulk() can tell that a contradicting fresh
+			// reading is stale rather than a real external change --
+			// see MessageMapper::shouldTrustFreshFlagReading().
+			$this->mapper->recordLocalFlagWrite(
+				$event->getMailbox()->getId(),
+				$event->getUid(),
+				$event->getFlag(),
+				$event->isSet(),
+			);
 		} elseif ($event instanceof MessageDeletedEvent) {
 			$this->mapper->deleteByUid(
 				$event->getMailbox(),

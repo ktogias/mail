@@ -426,6 +426,7 @@ describe('Vuex store actions', () => {
 		expect(store.syncEnvelopes).toHaveBeenCalledWith({
 			mailboxId: UNIFIED_INBOX_ID,
 			workClass: WorkClass.EXPLICIT_HEAVY,
+			coalesceRecent: true,
 		})
 	})
 
@@ -491,6 +492,92 @@ describe('Vuex store actions', () => {
 		// Ending while the envelope still exists is Undo/failure.
 		store.endPendingRemoval([101])
 		expect(store.priorityInboxStats.sections.important).toEqual({ total: 1, unread: 1 })
+	})
+
+	it('keeps a read marked while the counter snapshot was in flight, instead of letting the snapshot revert it', async () => {
+		// The live symptom this covers: "Σημαντικό 1 unread of 121" rendered
+		// above a single, visibly-read row. The snapshot describes the state
+		// before the click, so applying it verbatim resurrects the unread
+		// count next to a row the same screen draws as read.
+		store.preferences['layout-message-view'] = 'singleton'
+		store.preferences['sort-favorites'] = 'true'
+		store.mailboxes[11] = { databaseId: 11, specialRole: 'inbox', unread: 1 }
+		store.priorityInboxStats = {
+			sections: {
+				favorite: { total: 0, unread: 0 },
+				important: { total: 1, unread: 1 },
+				other: { total: 0, unread: 0 },
+			},
+			complete: true,
+		}
+		const envelope = {
+			databaseId: 101,
+			accountId: 13,
+			mailboxId: 11,
+			flags: { seen: false, important: true },
+		}
+		store.envelopes[101] = envelope
+
+		let resolveStats
+		PriorityInboxService.fetchPriorityInboxStats.mockReturnValueOnce(new Promise((resolve) => {
+			resolveStats = resolve
+		}))
+		const refresh = store.refreshPriorityInboxStats()
+
+		// The click lands while the request is still open.
+		store.flagEnvelopeMutation({ envelope, flag: 'seen', value: true })
+		expect(store.priorityInboxStats.sections.important.unread).toBe(0)
+
+		resolveStats({
+			sections: {
+				favorite: { total: 0, unread: 0 },
+				important: { total: 1, unread: 1 },
+				other: { total: 0, unread: 0 },
+			},
+			complete: true,
+		})
+		await refresh
+
+		expect(store.priorityInboxStats.sections.important.unread).toBe(0)
+		expect(store.mailboxes.priority.unread).toBe(0)
+	})
+
+	it('trusts a counter snapshot for a change that predates the request', async () => {
+		// The other side of the same rule: an adjustment older than the
+		// request is one the server query could see, so replaying it onto
+		// the snapshot would subtract it twice.
+		store.preferences['layout-message-view'] = 'singleton'
+		store.preferences['sort-favorites'] = 'true'
+		store.mailboxes[11] = { databaseId: 11, specialRole: 'inbox', unread: 1 }
+		store.priorityInboxStats = {
+			sections: {
+				favorite: { total: 0, unread: 0 },
+				important: { total: 1, unread: 1 },
+				other: { total: 0, unread: 0 },
+			},
+			complete: true,
+		}
+		const envelope = {
+			databaseId: 101,
+			accountId: 13,
+			mailboxId: 11,
+			flags: { seen: false, important: true },
+		}
+		store.envelopes[101] = envelope
+
+		store.flagEnvelopeMutation({ envelope, flag: 'seen', value: true })
+
+		PriorityInboxService.fetchPriorityInboxStats.mockResolvedValueOnce({
+			sections: {
+				favorite: { total: 0, unread: 0 },
+				important: { total: 1, unread: 0 },
+				other: { total: 0, unread: 0 },
+			},
+			complete: true,
+		})
+		await store.refreshPriorityInboxStats()
+
+		expect(store.priorityInboxStats.sections.important.unread).toBe(0)
 	})
 
 	it('creates a mailbox', async () => {
@@ -2859,11 +2946,13 @@ describe('Vuex store actions', () => {
 				mailboxId: 11,
 				query: undefined,
 				workClass: 'maintenance',
+				coalesceRecent: true,
 			})
 			expect(store.syncEnvelopes).toHaveBeenNthCalledWith(2, {
 				mailboxId: 21,
 				query: undefined,
 				workClass: 'maintenance',
+				coalesceRecent: true,
 			})
 
 			// We can't detect new messages here
@@ -2940,11 +3029,13 @@ describe('Vuex store actions', () => {
 				mailboxId: 11,
 				query: undefined,
 				workClass: 'maintenance',
+				coalesceRecent: true,
 			})
 			expect(store.syncEnvelopes).toHaveBeenNthCalledWith(2, {
 				mailboxId: 21,
 				query: undefined,
 				workClass: 'maintenance',
+				coalesceRecent: true,
 			})
 			expect(store.syncEnvelopes).toHaveBeenNthCalledWith(3, {
 				mailboxId: UNIFIED_INBOX_ID,
@@ -3495,6 +3586,7 @@ describe('Vuex store actions', () => {
 				mailboxId: 11,
 				query: '',
 				workClass: 'maintenance',
+				coalesceRecent: true,
 			})
 			expect(store.syncEnvelopes).not.toHaveBeenCalledWith(expect.objectContaining({ query: 'subject:foo' }))
 		})
@@ -3521,7 +3613,7 @@ describe('Vuex store actions', () => {
 			await store.syncWatchedMailboxes()
 
 			expect(store.syncEnvelopes).toHaveBeenCalledTimes(1)
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 911, query: '', workClass: 'maintenance' })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 911, query: '', workClass: 'maintenance', coalesceRecent: true })
 		})
 
 		it('establishes one canonical bucket when only filtered buckets were loaded', async () => {
@@ -3551,7 +3643,7 @@ describe('Vuex store actions', () => {
 				workClass: 'maintenance',
 			})
 			expect(store.syncEnvelopes).toHaveBeenCalledTimes(1)
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 921, query: undefined, workClass: 'maintenance' })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 921, query: undefined, workClass: 'maintenance', coalesceRecent: true })
 		})
 
 		it('never independently syncs filtered Priority buckets on a real mailbox', async () => {
@@ -3588,7 +3680,7 @@ describe('Vuex store actions', () => {
 			await store.syncWatchedMailboxes()
 
 			expect(store.syncEnvelopes).toHaveBeenCalledTimes(1)
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 922, query: undefined, workClass: 'maintenance' })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 922, query: undefined, workClass: 'maintenance', coalesceRecent: true })
 			expect(store.syncEnvelopes).not.toHaveBeenCalledWith(expect.objectContaining({ query: 'is:starred' }))
 		})
 
@@ -3628,6 +3720,7 @@ describe('Vuex store actions', () => {
 				mailboxId: 11,
 				query: '',
 				workClass: 'maintenance',
+				coalesceRecent: true,
 			})
 			// The notification still fired (that's the whole point).
 			expect(NotificationService.showNewMessagesNotification).toHaveBeenCalledWith([newMessage])
@@ -4016,8 +4109,8 @@ describe('Vuex store actions', () => {
 			// Drafts (13) has neither specialRole 'inbox' nor syncInBackground --
 			// only the inbox and the explicitly-flagged mailbox are watched.
 			expect(store.syncEnvelopes).toHaveBeenCalledTimes(2)
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 11, query: undefined, workClass: 'maintenance' })
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 13, query: undefined, workClass: 'maintenance' })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 11, query: undefined, workClass: 'maintenance', coalesceRecent: true })
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 13, query: undefined, workClass: 'maintenance', coalesceRecent: true })
 			expect(store.syncEnvelopes).not.toHaveBeenCalledWith(expect.objectContaining({ mailboxId: 12 }))
 		})
 
@@ -4493,6 +4586,61 @@ describe('Vuex store actions', () => {
 			await Promise.all([viewRefresh, watchedRefresh])
 
 			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(1)
+		})
+
+		it('lets a resume-driven caller join a canonical sync that just finished', async () => {
+			// Single-flight alone only collapses OVERLAPPING syncs. A tab
+			// resume fires its triggers back to back instead, so each one
+			// found the previous sync already done and opened its own -- 40
+			// requests in 10s across 5 inboxes, live, one of them killed by
+			// FPM at 76.7s.
+			MessageService.syncEnvelopes.mockResolvedValue({
+				newMessages: [],
+				changedMessages: [],
+				vanishedMessages: [],
+				stats: { unread: 0 },
+			})
+
+			await store.syncEnvelopes({ mailboxId: 100, coalesceRecent: true })
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(1)
+
+			await store.syncEnvelopes({ mailboxId: 100, coalesceRecent: true })
+			await store.syncEnvelopes({ mailboxId: 100, query: '', coalesceRecent: true })
+
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(1)
+		})
+
+		it('still gives a caller that did not opt in its own round trip', async () => {
+			// serverBusy, new mail and lock state all arrive on sync
+			// responses; a caller that needs a fresh one must never be
+			// handed a settled result.
+			MessageService.syncEnvelopes.mockResolvedValue({
+				newMessages: [],
+				changedMessages: [],
+				vanishedMessages: [],
+				stats: { unread: 0 },
+			})
+
+			await store.syncEnvelopes({ mailboxId: 100, coalesceRecent: true })
+			await store.syncEnvelopes({ mailboxId: 100 })
+
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(2)
+		})
+
+		it('never retains a failed canonical sync for the settle window', async () => {
+			MessageService.syncEnvelopes
+				.mockRejectedValueOnce(new Error('sync blew up'))
+				.mockResolvedValueOnce({
+					newMessages: [],
+					changedMessages: [],
+					vanishedMessages: [],
+					stats: { unread: 0 },
+				})
+
+			await expect(store.syncEnvelopes({ mailboxId: 100, coalesceRecent: true })).rejects.toThrow('sync blew up')
+			await store.syncEnvelopes({ mailboxId: 100, coalesceRecent: true })
+
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(2)
 		})
 
 		it('keeps an incomplete canonical leader retry inside the shared chain without self-awaiting', async () => {

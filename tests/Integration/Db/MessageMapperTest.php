@@ -529,6 +529,173 @@ class MessageMapperTest extends TestCase {
 		self::assertFalse($this->selectFlagImportant($uid, $mailboxId));
 	}
 
+	/**
+	 * \Seen and \Flagged race exactly like flag_important does, but they
+	 * had no protection at all: MailManager::flagMessages() writes IMAP and
+	 * updates the row in the same request, and any partial sync that had
+	 * already FETCHed its flags before that STORE landed writes the
+	 * pre-change value straight back over it.
+	 *
+	 * Confirmed live on 2026-07-26: a message marked read at 16:27:34 (HTTP
+	 * 200) was unread again in the database by 16:29, so the Priority Inbox
+	 * counters -- a straight database aggregate -- reported "1 unread"
+	 * about a row the client was still drawing as read from its own 120s
+	 * grace window. Four flag writes went out for that one message in three
+	 * minutes as the state kept flipping back.
+	 *
+	 * Unlike flag_important's guard, this one is anchored to LOCAL WRITES
+	 * only: a message never written here has no record, so a change made in
+	 * another mail client is trusted on its first reading, as before.
+	 */
+	public function testUpdateBulkKeepsAJustMarkedReadMessageReadAgainstAStaleUnseenReading(): void {
+		$mailboxId = 1;
+		$uid = 70;
+		$this->insertMessage($uid, $mailboxId);
+		$account = $this->createMock(Account::class);
+		$account->method('getId')->willReturn(13);
+		$account->method('getName')->willReturn('test account');
+
+		// The user marks it read: the IMAP STORE goes out, the row is
+		// updated, and MessageCacheUpdaterListener records the write.
+		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessageWithFlags($uid, $mailboxId, true, false));
+		$this->mapper->recordLocalFlagWrite($mailboxId, $uid, 'seen', true);
+		self::assertTrue($this->selectFlag('flag_seen', $uid, $mailboxId));
+
+		// A sync already in flight when that STORE landed reports the
+		// message as still unread.
+		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessageWithFlags($uid, $mailboxId, false, false));
+
+		self::assertTrue($this->selectFlag('flag_seen', $uid, $mailboxId));
+	}
+
+	public function testUpdateBulkKeepsAJustStarredMessageStarredAgainstAStaleReading(): void {
+		$mailboxId = 1;
+		$uid = 71;
+		$this->insertMessage($uid, $mailboxId);
+		$account = $this->createMock(Account::class);
+		$account->method('getId')->willReturn(13);
+		$account->method('getName')->willReturn('test account');
+
+		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessageWithFlags($uid, $mailboxId, false, true));
+		$this->mapper->recordLocalFlagWrite($mailboxId, $uid, 'flagged', true);
+		self::assertTrue($this->selectFlag('flag_flagged', $uid, $mailboxId));
+
+		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessageWithFlags($uid, $mailboxId, false, false));
+
+		self::assertTrue($this->selectFlag('flag_flagged', $uid, $mailboxId));
+	}
+
+	/**
+	 * Symmetric: marking something UNREAD races the same way, and an
+	 * earlier one-directional version of this guard would have left it
+	 * unprotected.
+	 */
+	public function testUpdateBulkKeepsAJustMarkedUnreadMessageUnreadAgainstAStaleSeenReading(): void {
+		$mailboxId = 1;
+		$uid = 72;
+		$this->insertMessage($uid, $mailboxId);
+		$account = $this->createMock(Account::class);
+		$account->method('getId')->willReturn(13);
+		$account->method('getName')->willReturn('test account');
+
+		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessageWithFlags($uid, $mailboxId, true, false));
+		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessageWithFlags($uid, $mailboxId, false, false));
+		$this->mapper->recordLocalFlagWrite($mailboxId, $uid, 'seen', false);
+		self::assertFalse($this->selectFlag('flag_seen', $uid, $mailboxId));
+
+		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessageWithFlags($uid, $mailboxId, true, false));
+
+		self::assertFalse($this->selectFlag('flag_seen', $uid, $mailboxId));
+	}
+
+	/**
+	 * A flag changed in another client -- Thunderbird, the phone, webmail --
+	 * has no local write record here, so it must apply on its very first
+	 * reading. This is the property that keeps the guard from turning into
+	 * "this server's opinion always wins".
+	 */
+	public function testUpdateBulkAppliesAnExternalSeenChangeWithNoLocalWriteRecorded(): void {
+		$mailboxId = 1;
+		$uid = 73;
+		$this->insertMessage($uid, $mailboxId);
+		$account = $this->createMock(Account::class);
+		$account->method('getId')->willReturn(13);
+		$account->method('getName')->willReturn('test account');
+
+		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessageWithFlags($uid, $mailboxId, true, false));
+
+		self::assertTrue($this->selectFlag('flag_seen', $uid, $mailboxId));
+	}
+
+	public function testUpdateBulkTrustsAContradictingSeenReadingOnceTheGracePeriodHasElapsed(): void {
+		$mailboxId = 1;
+		$uid = 74;
+		$this->insertMessage($uid, $mailboxId);
+		$account = $this->createMock(Account::class);
+		$account->method('getId')->willReturn(13);
+		$account->method('getName')->willReturn('test account');
+
+		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessageWithFlags($uid, $mailboxId, true, false));
+		$this->mapper->recordLocalFlagWrite($mailboxId, $uid, 'seen', true);
+
+		// Past LOCAL_FLAG_WRITE_GRACE_SECONDS: a still-contradicting
+		// reading is now the real state, e.g. the message was marked unread
+		// again elsewhere. Without a bound the row would be stuck forever.
+		$this->timestamp += 130;
+
+		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessageWithFlags($uid, $mailboxId, false, false));
+
+		self::assertFalse($this->selectFlag('flag_seen', $uid, $mailboxId));
+	}
+
+	/**
+	 * Once a reading agrees, the write has demonstrably settled on IMAP and
+	 * the record is retired immediately -- otherwise a genuine external
+	 * change arriving a second later would still be swallowed for the rest
+	 * of the window.
+	 */
+	public function testUpdateBulkRetiresTheProtectionAsSoonAsAReadingAgrees(): void {
+		$mailboxId = 1;
+		$uid = 75;
+		$this->insertMessage($uid, $mailboxId);
+		$account = $this->createMock(Account::class);
+		$account->method('getId')->willReturn(13);
+		$account->method('getName')->willReturn('test account');
+
+		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessageWithFlags($uid, $mailboxId, true, false));
+		$this->mapper->recordLocalFlagWrite($mailboxId, $uid, 'seen', true);
+
+		// IMAP has caught up and reports it read.
+		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessageWithFlags($uid, $mailboxId, true, false));
+		self::assertTrue($this->selectFlag('flag_seen', $uid, $mailboxId));
+
+		// Now an external "mark unread", well inside the original window.
+		$this->mapper->updateBulk($account, false, $this->freshlyFetchedMessageWithFlags($uid, $mailboxId, false, false));
+
+		self::assertFalse($this->selectFlag('flag_seen', $uid, $mailboxId));
+	}
+
+	private function freshlyFetchedMessageWithFlags(int $uid, int $mailboxId, bool $flagSeen, bool $flagFlagged): Message {
+		$message = $this->freshlyFetchedMessage($uid, $mailboxId, false);
+		$message->setFlagSeen($flagSeen);
+		$message->setFlagFlagged($flagFlagged);
+		return $message;
+	}
+
+	private function selectFlag(string $column, int $uid, int $mailboxId): bool {
+		$qb = $this->db->getQueryBuilder();
+		$result = $qb->select($column)
+			->from($this->mapper->getTableName())
+			->where(
+				$qb->expr()->eq('uid', $qb->createNamedParameter($uid, IQueryBuilder::PARAM_INT), IQueryBuilder::PARAM_INT),
+				$qb->expr()->eq('mailbox_id', $qb->createNamedParameter($mailboxId, IQueryBuilder::PARAM_INT), IQueryBuilder::PARAM_INT)
+			)
+			->executeQuery();
+		$value = $result->fetchOne();
+		$result->closeCursor();
+		return (bool)$value;
+	}
+
 	public function testUpdateBulkAppliesAMatchingReadingNormally(): void {
 		$mailboxId = 1;
 		$uid = 43;

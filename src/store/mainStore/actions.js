@@ -280,6 +280,49 @@ function adjustPriorityInboxStats(store, section, totalDelta = 0, unreadDelta = 
 	}
 }
 
+// The Priority Inbox counters are a server-materialized aggregate, replaced
+// wholesale on every refresh; the rows next to them are the client's own
+// envelopes, where a local flag change wins over any server response for
+// RECENT_FLAG_CHANGE_GRACE_MS. Two different truth policies on one screen,
+// with nothing tying them together: a snapshot that was already being
+// computed when the user marked a message read lands describing the
+// pre-click state and silently discards the optimistic counter adjustment,
+// while the row it belongs to keeps rendering as read.
+//
+// Confirmed live on 2026-07-26: "Σημαντικό 1 unread of 121" above a single,
+// visibly-read row, with "Unread only" active.
+//
+// Same shape of fix as refreshPriorityInboxView()'s
+// prioritySectionMutationRevision overlap test, and deliberately no wider
+// than it: only adjustments made AFTER a snapshot's request started are
+// replayed onto it. An adjustment older than the request is one the server
+// query had every opportunity to see, so replaying it would double-count.
+let priorityStatsAdjustmentRevision = 0
+let priorityStatsAdjustmentLog = []
+const PRIORITY_STATS_ADJUSTMENT_LOG_LIMIT = 200
+
+function adjustAndRecordPriorityInboxStats(store, section, totalDelta = 0, unreadDelta = 0) {
+	adjustPriorityInboxStats(store, section, totalDelta, unreadDelta)
+	priorityStatsAdjustmentRevision++
+	priorityStatsAdjustmentLog.push({
+		revision: priorityStatsAdjustmentRevision,
+		section,
+		totalDelta,
+		unreadDelta,
+	})
+	if (priorityStatsAdjustmentLog.length > PRIORITY_STATS_ADJUSTMENT_LOG_LIMIT) {
+		priorityStatsAdjustmentLog = priorityStatsAdjustmentLog.slice(-PRIORITY_STATS_ADJUSTMENT_LOG_LIMIT)
+	}
+}
+
+function replayPriorityInboxStatsAdjustmentsSince(store, revision) {
+	priorityStatsAdjustmentLog.forEach((entry) => {
+		if (entry.revision > revision) {
+			adjustPriorityInboxStats(store, entry.section, entry.totalDelta, entry.unreadDelta)
+		}
+	})
+}
+
 function capProgressiveResults(envelopes, sortOrder, view, prioritySplit) {
 	const unique = [...new Map(combineEnvelopeLists(sortOrder)(envelopes).map((envelope) => [envelope.databaseId, envelope])).values()]
 	if (!prioritySplit) {
@@ -457,6 +500,33 @@ const pendingUnifiedSyncs = new Map()
 // otherwise hit the same physical INBOX concurrently. Keep this per Pinia
 // store, and never collapse distinct structural searches.
 const pendingCanonicalPhysicalSyncs = new WeakMap()
+
+// Single-flight alone only collapses syncs that OVERLAP. Resuming a
+// backgrounded tab fires several independent triggers -- the visibility
+// handler's tick, the focus handler, a Priority view refresh, a remounting
+// list component -- back to back rather than simultaneously, so each one
+// found the previous sync already finished and started its own.
+//
+// Confirmed live on 2026-07-26 after a mobile tab resume: 40 sync requests in
+// 10 seconds across 5 inboxes, 11 of them for the same mailbox, against an
+// account already answering "IMAP account concurrency limit reached". One of
+// those syncs ran 76.7s and was killed by PHP-FPM, returning 502.
+//
+// Keeping a FULFILLED canonical sync joinable for a short settle window makes
+// those late triggers share the result the first one already produced. It is
+// deliberately short: long enough to cover one resume burst, short enough that
+// a user action a moment later still gets a real round trip. Rejections are
+// never retained -- a failed sync must not be handed to the next caller.
+//
+// Opt-in per caller (coalesceRecent), never global: an unconditional window
+// would also serve a stale result to callers that specifically need a fresh
+// one. Caught by the adaptive-backpressure test, which marks a mailbox busy
+// and then expects the very next sync to observe it recovered -- a real
+// regression, not a test artifact: serverBusy, new mail and lock state all
+// arrive on sync responses, so silently reusing one would freeze that
+// feedback for every caller at once. Only the periodic/resume refreshes,
+// which have no such expectation, pass it.
+const CANONICAL_PHYSICAL_SYNC_SETTLE_MS = 5000
 
 // Concurrent Priority/Unified section components searching the same content
 // share one physical request wave. Kept per Pinia store (rather than one
@@ -691,6 +761,8 @@ export function resetRecentLocalChangesForTests() {
 	recentLocalChanges = new Map()
 	prioritySectionMutationRevision = 0
 	prioritySectionMutationsInFlight = 0
+	priorityStatsAdjustmentRevision = 0
+	priorityStatsAdjustmentLog = []
 }
 
 // IMPORTANT_TAG_LABEL (imported above) is the IMAP keyword backing the
@@ -1528,6 +1600,10 @@ export default function mainStoreActions() {
 				await this.syncEnvelopes({
 					mailboxId: UNIFIED_INBOX_ID,
 					workClass,
+					// A view refresh is one of several triggers a tab resume
+					// fires at almost the same moment; it does not need its
+					// own round trip when another just finished.
+					coalesceRecent: true,
 				}).catch((error) => {
 					logger.debug('One or more Priority Inbox source syncs were deferred; publishing the available exact snapshot', { error })
 				})
@@ -1672,6 +1748,11 @@ export default function mainStoreActions() {
 			}
 
 			this.priorityInboxStatsLoading = true
+			// Captured before the request leaves: everything the user changes
+			// from here on cannot be in the snapshot that comes back, and has
+			// to be re-applied to it. See
+			// adjustAndRecordPriorityInboxStats().
+			const adjustmentRevisionAtStart = priorityStatsAdjustmentRevision
 			const request = fetchPriorityInboxStats(
 				this.getPreference('layout-message-view', 'threaded'),
 				workClass,
@@ -1692,6 +1773,7 @@ export default function mainStoreActions() {
 							contribution.unread ? -1 : 0,
 						)
 					})
+					replayPriorityInboxStatsAdjustmentsSince(this, adjustmentRevisionAtStart)
 					const priorityMailbox = this.mailboxes[PRIORITY_INBOX_ID]
 					if (priorityMailbox) {
 						const unread = Object.values(this.priorityInboxStats.sections ?? {})
@@ -3155,6 +3237,11 @@ export default function mainStoreActions() {
 			// leader and its recursive retries. Without carrying this marker,
 			// a retry would discover and await its own still-pending promise.
 			physicalSyncLeader = false,
+			// Opt-in: this call is a periodic or resume-driven refresh with no
+			// need for a guaranteed-fresh round trip, so it may join a
+			// canonical physical sync that just finished. See
+			// CANONICAL_PHYSICAL_SYNC_SETTLE_MS.
+			coalesceRecent = false,
 		}) {
 			query = stripMalformedUndefinedToken(query)
 
@@ -3185,8 +3272,12 @@ export default function mainStoreActions() {
 
 				const physicalKey = String(mailboxId)
 				const existing = pendingForStore.get(physicalKey)
-				if (existing) {
-					return existing
+				// Still running: every caller joins it, as before. Already
+				// finished and only being held open for the settle window:
+				// only a caller that opted into coalescing may join, so a
+				// sync that needs its own fresh response still gets one.
+				if (existing && (!existing.settled || coalesceRecent)) {
+					return existing.promise
 				}
 
 				const leader = this.syncEnvelopes({
@@ -3199,13 +3290,25 @@ export default function mainStoreActions() {
 					malformedResponseRetried,
 					physicalSyncLeader: true,
 				})
-				const tracked = leader.finally(() => {
-					if (pendingForStore.get(physicalKey) === tracked) {
+				const entry = { promise: null, settled: false }
+				const forget = () => {
+					if (pendingForStore.get(physicalKey) === entry) {
 						pendingForStore.delete(physicalKey)
 					}
-				})
-				pendingForStore.set(physicalKey, tracked)
-				return tracked
+				}
+				entry.promise = leader.then(
+					(result) => {
+						entry.settled = true
+						setTimeout(forget, CANONICAL_PHYSICAL_SYNC_SETTLE_MS)
+						return result
+					},
+					(error) => {
+						forget()
+						throw error
+					},
+				)
+				pendingForStore.set(physicalKey, entry)
+				return entry.promise
 			}
 
 			const promise = handleHttpAuthErrors(async () => {
@@ -3236,6 +3339,7 @@ export default function mainStoreActions() {
 						query,
 						init,
 						workClass,
+						coalesceRecent,
 					}))
 				} else if (mailbox.isPriorityInbox) {
 					// "priority" is a virtual id with no real mailbox behind
@@ -3658,6 +3762,11 @@ export default function mainStoreActions() {
 								mailboxId: mailbox.databaseId,
 								query,
 								workClass: WorkClass.MAINTENANCE,
+								// The background tick is the other half of a
+								// resume burst: rescheduleTickNow() fires it
+								// immediately on visibilitychange, right next
+								// to the active-view recovery above.
+								coalesceRecent: true,
 							}))
 						}
 
@@ -6303,12 +6412,12 @@ export default function mainStoreActions() {
 			}
 			if (!threaded && previousValue !== value) {
 				if (flag === 'seen' && previousSection !== undefined) {
-					adjustPriorityInboxStats(this, previousSection, 0, value ? -1 : 1)
+					adjustAndRecordPriorityInboxStats(this, previousSection, 0, value ? -1 : 1)
 				} else if ((flag === 'flagged' || flag === 'important') && previousSection !== undefined) {
 					const nextSection = priorityStatsSection(this, envelope)
 					if (nextSection !== previousSection) {
-						adjustPriorityInboxStats(this, previousSection, -1, previousUnread ? -1 : 0)
-						adjustPriorityInboxStats(this, nextSection, 1, previousUnread ? 1 : 0)
+						adjustAndRecordPriorityInboxStats(this, previousSection, -1, previousUnread ? -1 : 0)
+						adjustAndRecordPriorityInboxStats(this, nextSection, 1, previousUnread ? 1 : 0)
 					}
 				}
 			}
@@ -6347,7 +6456,7 @@ export default function mainStoreActions() {
 				&& previous !== value
 				&& section !== undefined
 			) {
-				adjustPriorityInboxStats(this, section, 0, value ? 1 : -1)
+				adjustAndRecordPriorityInboxStats(this, section, 0, value ? 1 : -1)
 			}
 			if (!envelope.threadRootId) {
 				this.flagEnvelopeMutation({ envelope, flag: 'hasUnseenInThread', value })

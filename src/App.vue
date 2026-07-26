@@ -439,6 +439,11 @@ export default {
 					await this.mainStore.syncEnvelopes({
 						mailboxId,
 						workClass: WorkClass.VISIBLE_REVALIDATION,
+						// Resume recovery runs alongside the visibility tick
+						// and, on Firefox Android, a focus event moments
+						// later; one shared round trip is enough for all of
+						// them.
+						coalesceRecent: true,
 					}).catch((error) => {
 						logger.debug('Active view revalidation deferred after connectivity recovery', { error })
 					})
@@ -510,6 +515,7 @@ export default {
 			this.mainStore.syncEnvelopes({
 				mailboxId,
 				workClass: WorkClass.VISIBLE_REVALIDATION,
+				coalesceRecent: true,
 			}).catch((error) => {
 				logger.debug('Cross-tab active view revalidation failed', { error })
 			})
