@@ -195,6 +195,76 @@ describe('Mailbox', () => {
 		})
 	})
 
+	describe('coordinator cancellation is not a broken folder', () => {
+		// The request coordinator cancels fetches on purpose -- offline,
+		// connectivity recovering, speculative work shed under foreground
+		// pressure, a stale running request reclaimed. That is a decision
+		// about WHEN to fetch, not evidence the folder is unreadable, and it
+		// does not go through this component's own AbortController, so the
+		// aborted-signal guard never covered it.
+		//
+		// Confirmed live on 2026-07-26: two section fetches were cancelled
+		// during a resume burst (nginx logged 499; every server-side request
+		// in that window returned 200) and the Favorites section showed
+		// "Could not open folder" from then on, across two tab resumes and a
+		// manual pull-to-refresh.
+		function cancellation() {
+			const error = new Error('Speculative mail request dropped under foreground pressure')
+			error.name = 'CanceledError'
+			error.code = 'ERR_CANCELED'
+			return error
+		}
+
+		it('does not put the folder into an error state', async () => {
+			store.fetchEnvelopes = vi.fn().mockRejectedValue(cancellation())
+
+			const view = mountMailbox()
+			await view.vm.loadEnvelopes()
+
+			expect(view.vm.error).toBe(false)
+			expect(view.vm.loadingEnvelopes).toBe(false)
+		})
+
+		it('still reports a genuine failure', async () => {
+			store.fetchEnvelopes = vi.fn().mockRejectedValue(new Error('boom'))
+
+			const view = mountMailbox()
+			await view.vm.loadEnvelopes()
+
+			expect(view.vm.error).toBeTruthy()
+			expect(view.vm.errorTitle).toBe('Could not open folder')
+		})
+
+		it('retries a failed section when the Priority view is refreshed', async () => {
+			store.fetchEnvelopes = vi.fn().mockRejectedValue(new Error('boom'))
+
+			const view = mountMailbox({ isPriorityInbox: true })
+			await view.vm.loadEnvelopes()
+			expect(view.vm.error).toBeTruthy()
+
+			store.fetchEnvelopes = vi.fn().mockResolvedValue([])
+			view.vm.onPriorityInboxViewReplaced()
+			await view.vm.$nextTick()
+			await view.vm.$nextTick()
+
+			expect(store.fetchEnvelopes).toHaveBeenCalled()
+			expect(view.vm.error).toBe(false)
+		})
+
+		it('does not refetch a healthy section on a Priority view refresh', async () => {
+			store.fetchEnvelopes = vi.fn().mockResolvedValue([])
+
+			const view = mountMailbox({ isPriorityInbox: true })
+			await view.vm.loadEnvelopes()
+			store.fetchEnvelopes.mockClear()
+
+			view.vm.onPriorityInboxViewReplaced()
+			await view.vm.$nextTick()
+
+			expect(store.fetchEnvelopes).not.toHaveBeenCalled()
+		})
+	})
+
 	it('resets loadingCacheInitialization when the forced init sync fails, instead of hanging forever', async () => {
 		// Regression: a missing `return`/`.catch()` meant that if the forced
 		// sync() a not-yet-cached mailbox needs failed for ANY reason -- a

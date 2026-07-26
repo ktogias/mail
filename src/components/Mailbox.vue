@@ -510,6 +510,25 @@ export default {
 					// loading/error state now, don't touch it.
 					return
 				}
+				if (error?.code === 'ERR_CANCELED') {
+					// The request coordinator declined to run this fetch --
+					// offline, connectivity recovering, speculative work shed
+					// under foreground pressure, or a stale running request
+					// reclaimed (see RequestCoordinator's cancellationError()).
+					// That is a deliberate scheduling decision about WHEN to
+					// fetch, not evidence that the folder is broken, and the
+					// component's own AbortController is not involved, so the
+					// guard above does not cover it.
+					//
+					// Confirmed live on 2026-07-26: two section fetches were
+					// cancelled during a resume burst (nginx logged them as
+					// 499, every server-side request in the window returned
+					// 200), and the Favorites section rendered "Could not open
+					// folder" from then on.
+					logger.debug(`Envelope fetch for folder ${this.mailbox.databaseId} (${this.searchQuery}) was cancelled by the request coordinator`, { error })
+					this.loadingEnvelopes = false
+					return
+				}
 				await matchError(error, {
 					[MailboxLockedError.getName()]: async (error) => {
 						logger.info(`Mailbox ${this.mailbox.databaseId} (${this.searchQuery}) is locked`, { error })
@@ -597,6 +616,21 @@ export default {
 			// empty pagination result is no longer sufficient evidence that
 			// this refreshed result set has no older page.
 			this.endReached = false
+
+			// A section that failed to load stayed failed forever: this
+			// component only fetches from created() and from the mailbox/
+			// searchQuery/sortOrder watchers, so neither a tab resume, nor
+			// pull-to-refresh, nor this very view refresh ever retried it.
+			// Confirmed live on 2026-07-26: the Favorites section showed
+			// "Could not open folder" across two resumes and a manual
+			// refresh while every server request returned 200 and the
+			// counters beside it kept updating normally.
+			//
+			// A refresh is exactly the moment to try again, so a transient
+			// failure heals itself instead of needing a full page reload.
+			if (this.error) {
+				this.loadEnvelopes()
+			}
 		},
 
 		// The inverse of loadMore()'s expand step: shrink the section back
