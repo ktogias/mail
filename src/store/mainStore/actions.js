@@ -89,6 +89,8 @@ import {
 	fetchMessageHtmlBody,
 	fetchMessageItineraries,
 	fetchThread,
+	messageBodyRequestKey,
+	messageThreadRequestKey,
 	moveMessage,
 	removeEnvelopeTag,
 	setEnvelopeFlags,
@@ -107,7 +109,7 @@ import {
 	deleteQuickAction,
 	updateQuickAction,
 } from '../../service/QuickActionsService.js'
-import { WorkClass } from '../../service/RequestCoordinator.js'
+import { promoteMailRequest, WorkClass } from '../../service/RequestCoordinator.js'
 import {
 	getActiveScript,
 	updateActiveScript,
@@ -997,6 +999,98 @@ async function reconcileOrRevert({ envelope, hasLanded, onLanded = () => {}, rev
 		return true
 	}
 	revert()
+	return false
+}
+
+const AMBIGUOUS_DELETE_RECONCILIATION_DELAYS_MS = [
+	0,
+	1_000,
+	3_000,
+	5_000,
+	8_000,
+]
+
+function isAmbiguousMutationFailure(error) {
+	const status = error?.response?.status
+	return error?.response === undefined
+		|| status === 408
+		|| status === 502
+		|| status === 503
+		|| status === 504
+}
+
+/**
+ * A proxy timeout does not prove that an IMAP mutation failed. The FastCGI
+ * client may already be gone while the mutation worker is still completing
+ * the operation. Keep the optimistic deletion while bounded authoritative
+ * probes distinguish "gone" from "still present"; restore only targets that
+ * the server actually confirms remain. An unavailable reconciliation fails
+ * open because resurrecting a possibly-deleted message is worse than letting
+ * the next normal mailbox sync settle an uncertain state.
+ *
+ * @param {object} options reconciliation inputs
+ * @param {Array<{envelope: object, members: object[], accountId?: number|string}>} options.targets optimistically removed targets
+ * @param {object} options.error the original mutation failure
+ * @param {(envelopes: object[]) => void} options.restore restore confirmed remaining targets
+ * @return {Promise<boolean>} true if all targets landed or remain uncertain
+ */
+async function reconcileDeletedTargets({ targets, error, restore }) {
+	const delays = isAmbiguousMutationFailure(error)
+		? AMBIGUOUS_DELETE_RECONCILIATION_DELAYS_MS
+		: [0]
+	let confirmedRemaining = []
+	let hasUnknown = false
+
+	for (const delay of delays) {
+		if (delay > 0) {
+			await wait(delay)
+		}
+
+		const observations = await Promise.all(targets.map(async (target) => {
+			try {
+				return {
+					target,
+					authoritative: await fetchEnvelope(
+						target.accountId ?? target.envelope.accountId,
+						target.envelope.databaseId,
+					),
+				}
+			} catch (reconciliationError) {
+				logger.debug('could not confirm a timed-out delete target yet', {
+					id: target.envelope.databaseId,
+					error: reconciliationError,
+				})
+				return { target, unknown: true }
+			}
+		}))
+
+		confirmedRemaining = observations
+			.filter(({ authoritative }) => authoritative !== undefined)
+		hasUnknown = observations.some(({ unknown }) => unknown === true)
+		if (confirmedRemaining.length === 0 && !hasUnknown) {
+			return true
+		}
+	}
+
+	if (confirmedRemaining.length === 0) {
+		logger.debug('delete reconciliation remained unavailable -- trusting optimistic removal')
+		return true
+	}
+
+	const envelopesById = new Map()
+	confirmedRemaining.forEach(({ target, authoritative }) => {
+		target.members.forEach((member) => {
+			const isAuthoritativeRepresentative = member.databaseId === target.envelope.databaseId
+				&& authoritative.databaseId === member.databaseId
+			envelopesById.set(
+				member.databaseId,
+				isAuthoritativeRepresentative
+					? authoritative
+					: member,
+			)
+		})
+	})
+	restore([...envelopesById.values()])
 	return false
 }
 
@@ -4235,6 +4329,9 @@ export default function mainStoreActions() {
 			}
 
 			if (pendingThreadFetches.has(id)) {
+				if (!speculative) {
+					promoteMailRequest(messageThreadRequestKey(id), WorkClass.ACTIVE_CONTENT)
+				}
 				return pendingThreadFetches.get(id)
 			}
 
@@ -4292,6 +4389,9 @@ export default function mainStoreActions() {
 			}
 
 			if (pendingMessageFetches.has(id)) {
+				if (!speculative) {
+					promoteMailRequest(messageBodyRequestKey(id), WorkClass.ACTIVE_CONTENT)
+				}
 				return pendingMessageFetches.get(id)
 			}
 
@@ -4464,10 +4564,17 @@ export default function mainStoreActions() {
 						throw err
 					}
 
-					const landed = await reconcileOrRevert({
-						envelope,
-						hasLanded: (authoritative) => authoritative === undefined,
-						revert: () => this.addEnvelopesMutation({ envelopes: [envelope], bypassRemovalSuppression: true }),
+					const landed = await reconcileDeletedTargets({
+						targets: [{
+							envelope,
+							members: [envelope],
+							accountId: envelope.accountId ?? this.getMailbox(envelope.mailboxId)?.accountId,
+						}],
+						error: err,
+						restore: (envelopes) => this.addEnvelopesMutation({
+							envelopes,
+							bypassRemovalSuppression: true,
+						}),
 					})
 					if (landed) {
 						return
@@ -4815,8 +4922,27 @@ export default function mainStoreActions() {
 						logger.debug('thread was already deleted', { id: envelope.databaseId })
 						return
 					}
-					this.addEnvelopesMutation({ envelopes: members, bypassRemovalSuppression: true })
-					logger.error('could not delete thread', { error: e })
+
+					const landed = await reconcileDeletedTargets({
+						targets: [{
+							envelope,
+							members,
+							accountId: envelope.accountId ?? this.getMailbox(envelope.mailboxId)?.accountId,
+						}],
+						error: e,
+						restore: (envelopes) => this.addEnvelopesMutation({
+							envelopes,
+							bypassRemovalSuppression: true,
+						}),
+					})
+					if (landed) {
+						logger.debug('thread deletion landed despite request failure', {
+							id: envelope.databaseId,
+						})
+						return
+					}
+
+					logger.error('could not delete thread after reconciliation', { error: e })
 					throw e
 				}
 			})
@@ -4862,10 +4988,12 @@ export default function mainStoreActions() {
 					const group = groupsByAccount.get(groupKey) ?? {
 						ids: [],
 						membersById: new Map(),
+						targets: [],
 					}
 					group.ids.push(envelope.databaseId)
-					knownLocalThreadMembers(this, envelope)
-						.forEach((member) => group.membersById.set(member.databaseId, member))
+					const members = knownLocalThreadMembers(this, envelope)
+					members.forEach((member) => group.membersById.set(member.databaseId, member))
+					group.targets.push({ envelope, members, accountId })
 					groupsByAccount.set(groupKey, group)
 				})
 
@@ -4882,11 +5010,23 @@ export default function mainStoreActions() {
 							count: group.ids.length,
 						})
 					} catch (error) {
-						this.addEnvelopesMutation({
-							envelopes: [...group.membersById.values()],
-							bypassRemovalSuppression: true,
+						const landed = await reconcileDeletedTargets({
+							targets: group.targets,
+							error,
+							restore: (envelopes) => this.addEnvelopesMutation({
+								envelopes,
+								bypassRemovalSuppression: true,
+							}),
 						})
-						logger.error('could not delete account thread batch', { accountId, error })
+						if (landed) {
+							logger.debug('account thread batch landed despite request failure', {
+								accountId,
+								count: group.ids.length,
+							})
+							continue
+						}
+
+						logger.error('could not delete account thread batch after reconciliation', { accountId, error })
 						failures.push(error)
 					}
 				}

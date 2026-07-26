@@ -422,6 +422,51 @@ class MessageMapper {
 		}
 	}
 
+	/**
+	 * Move a set of UIDs with one IMAP command.
+	 *
+	 * Delete-thread and bulk-delete operations do not need destination UID
+	 * mappings. Sending one UID set per source mailbox avoids one network
+	 * round trip per cached thread member or Gmail label copy.
+	 *
+	 * @param int[] $messageIds
+	 *
+	 * @throws ServiceException
+	 */
+	public function moveBatch(
+		Horde_Imap_Client_Base $client,
+		string $sourceFolderId,
+		array $messageIds,
+		string $destFolderId,
+	): void {
+		if ($messageIds === []) {
+			return;
+		}
+
+		$messageIds = array_values(array_unique(array_map('intval', $messageIds)));
+		try {
+			$client->copy(
+				$sourceFolderId,
+				$destFolderId,
+				[
+					'ids' => new Horde_Imap_Client_Ids($messageIds),
+					'move' => true,
+					'force_map' => false,
+				],
+			);
+		} catch (Horde_Imap_Client_Exception $e) {
+			$this->logger->debug($e->getMessage(), [
+				'exception' => $e,
+			]);
+
+			throw new ServiceException(
+				'Could not move message batch from ' . $sourceFolderId . ' to ' . $destFolderId,
+				0,
+				$e,
+			);
+		}
+	}
+
 	public function markAllRead(Horde_Imap_Client_Base $client,
 		string $mailbox): void {
 		$client->store($mailbox, [
@@ -455,6 +500,45 @@ class MessageMapper {
 		}
 
 		$this->logger->info("Message expunged: $id from mailbox $mailbox");
+	}
+
+	/**
+	 * Permanently delete a set of UIDs with one IMAP command.
+	 *
+	 * @param int[] $ids
+	 *
+	 * @throws ServiceException
+	 */
+	public function expungeBatch(
+		Horde_Imap_Client_Base $client,
+		string $mailbox,
+		array $ids,
+	): void {
+		if ($ids === []) {
+			return;
+		}
+
+		$ids = array_values(array_unique(array_map('intval', $ids)));
+		try {
+			$client->expunge(
+				$mailbox,
+				[
+					'ids' => new Horde_Imap_Client_Ids($ids),
+					'delete' => true,
+				],
+			);
+		} catch (Horde_Imap_Client_Exception $e) {
+			$this->logger->debug($e->getMessage(), [
+				'exception' => $e,
+			]);
+
+			throw new ServiceException("Could not expunge message batch from $mailbox", 0, $e);
+		}
+
+		$this->logger->info('Message batch expunged', [
+			'mailbox' => $mailbox,
+			'messageCount' => count($ids),
+		]);
 	}
 
 	/**
@@ -659,7 +743,7 @@ class MessageMapper {
 	 * @param string $mailbox
 	 * @param int $uid
 	 * @param string $userId
-	 * @param array|null $attachmentIds
+	 * @param string[]|null $attachmentIds
 	 * @return array
 	 *
 	 * @throws DoesNotExistException
@@ -732,7 +816,25 @@ class MessageMapper {
 
 		$visibleAttachmentIds = AttachmentClassifier::getVisibleAttachmentIds($structure);
 		if ($attachmentIds !== []) {
-			$visibleAttachmentIds = array_values(array_intersect($visibleAttachmentIds, $attachmentIds));
+			// An exact request is also used by the inline-image bundle path.
+			// Inline MIME parts are intentionally absent from the ordinary
+			// HTML-message attachment list, but are still safe attachment
+			// resources. Select only requested ids that the MIME classifier
+			// recognizes as regular or inline, never body/signature parts.
+			$requestedAttachmentIds = [];
+			foreach ($structure->partIterator() as $part) {
+				/** @var Horde_Mime_Part $part */
+				if (!in_array($part->getMimeId(), $attachmentIds, true)) {
+					continue;
+				}
+				if (
+					AttachmentClassifier::isRegularAttachment($part)
+					|| AttachmentClassifier::isInlineAttachment($part)
+				) {
+					$requestedAttachmentIds[] = $part->getMimeId();
+				}
+			}
+			$visibleAttachmentIds = $requestedAttachmentIds;
 		}
 		if ($visibleAttachmentIds === []) {
 			return [];

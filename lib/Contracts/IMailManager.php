@@ -274,9 +274,16 @@ interface IMailManager {
 	 * @param Account $account
 	 * @param Mailbox $mailbox
 	 * @param Message $message
+	 * @param string[] $attachmentIds exact regular or inline MIME part IDs;
+	 *                                empty selects all user-visible attachments
 	 * @return Attachment[]
 	 */
-	public function getMailAttachments(Account $account, Mailbox $mailbox, Message $message) : array;
+	public function getMailAttachments(
+		Account $account,
+		Mailbox $mailbox,
+		Message $message,
+		array $attachmentIds = [],
+	): array;
 
 	/**
 	 * @param Account $account

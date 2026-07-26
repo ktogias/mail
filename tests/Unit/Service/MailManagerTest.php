@@ -240,11 +240,11 @@ class MailManagerTest extends TestCase {
 			->method('getClient')
 			->willReturn($client);
 		$this->imapMessageMapper->expects($this->once())
-			->method('move')
+			->method('moveBatch')
 			->with(
 				$client,
 				'INBOX',
-				123,
+				[123],
 				'Trash'
 			);
 
@@ -280,11 +280,11 @@ class MailManagerTest extends TestCase {
 			->method('getClient')
 			->willReturn($client);
 		$this->imapMessageMapper->expects($this->once())
-			->method('expunge')
+			->method('expungeBatch')
 			->with(
 				$client,
 				'Trash',
-				123
+				[123]
 			);
 
 		$this->manager->deleteMessage(
@@ -618,10 +618,52 @@ class MailManagerTest extends TestCase {
 			->with(
 				$client,
 				$mailbox->getName(),
-				$message->getUid()
+				$message->getUid(),
+				'user',
+				[],
 			)->willReturn($attachments);
 		$result = $this->manager->getMailAttachments($account, $mailbox, $message);
 		$this->assertEquals($attachments, $result);
+	}
+
+	public function testGetMailAttachmentsFetchesExactPartsThroughOneClient(): void {
+		$account = $this->createMock(Account::class);
+		$account->expects(self::once())
+			->method('getUserId')
+			->willReturn('user');
+		$attachments = [
+			new Attachment(
+				'2.2',
+				'logo.png',
+				'image/png',
+				'abcdefg',
+				7,
+				'logo@example.test',
+				'inline',
+			),
+		];
+		$client = $this->createStub(Horde_Imap_Client_Socket::class);
+		$mailbox = new Mailbox();
+		$mailbox->setName('Inbox');
+		$message = new Message();
+		$message->setUid(123);
+		$this->imapClientFactory->expects(self::once())
+			->method('getClient')
+			->with($account, true, false, false, ImapWorkClass::ACTIVE_CONTENT)
+			->willReturn($client);
+		$this->imapMessageMapper->expects(self::once())
+			->method('getAttachments')
+			->with($client, 'Inbox', 123, 'user', ['2.2', '2.3'])
+			->willReturn($attachments);
+
+		$result = $this->manager->getMailAttachments(
+			$account,
+			$mailbox,
+			$message,
+			['2.2', '2.3'],
+		);
+
+		self::assertSame($attachments, $result);
 	}
 
 	public function testGetMailAttachmentWaitsForOrdinaryCapacity(): void {
@@ -868,7 +910,7 @@ class MailManagerTest extends TestCase {
 			->expects(self::once())
 			->method('logout');
 		$this->mailboxMapper
-			->expects(self::exactly(2))
+			->expects(self::once())
 			->method('find')
 			->with($account, $mailbox->getName())
 			->willReturn($mailbox);
@@ -885,13 +927,14 @@ class MailManagerTest extends TestCase {
 		$trashMailbox->setAccountId($mailAccount->getId());
 		$trashMailbox->setName('Trash');
 		$this->mailboxMapper
-			->expects(self::exactly(2))
+			->expects(self::once())
 			->method('findById')
 			->with($trashMailbox->getId())
 			->willReturn($trashMailbox);
 		$this->imapMessageMapper
-			->expects(self::exactly(2))
-			->method('move');
+			->expects(self::once())
+			->method('moveBatch')
+			->with($client, 'INBOX', [200, 300], 'Trash');
 		$this->eventDispatcher
 			->expects(self::exactly(4))
 			->method('dispatchTyped');
@@ -924,12 +967,12 @@ class MailManagerTest extends TestCase {
 			->expects(self::once())
 			->method('logout');
 		$this->mailboxMapper
-			->expects(self::exactly(2))
+			->expects(self::once())
 			->method('find')
 			->with($account, $mailbox->getName())
 			->willReturn($mailbox);
 		$this->mailboxMapper
-			->expects(self::exactly(2))
+			->expects(self::once())
 			->method('findById')
 			->with($mailbox->getId())
 			->willReturn($mailbox);
@@ -942,8 +985,9 @@ class MailManagerTest extends TestCase {
 				['messageUid' => 300, 'mailboxName' => 'Trash'],
 			]);
 		$this->imapMessageMapper
-			->expects(self::exactly(2))
-			->method('expunge');
+			->expects(self::once())
+			->method('expungeBatch')
+			->with($client, 'Trash', [200, 300]);
 		$this->eventDispatcher
 			->expects(self::exactly(4))
 			->method('dispatchTyped');

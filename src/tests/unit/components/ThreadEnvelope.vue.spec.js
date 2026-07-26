@@ -608,6 +608,49 @@ describe('ThreadEnvelope', () => {
 			view.destroy()
 		})
 
+		it('does not start DKIM after itinerary capacity rejection', async () => {
+			const view = mountThreadEnvelope(true, true, {
+				attachments: [{}],
+				hasDkimSignature: true,
+				dkimValid: undefined,
+				itineraries: undefined,
+			})
+			store.fetchItineraries = vi.fn().mockRejectedValue({
+				httpStatus: 429,
+				isTransient: true,
+			})
+			store.fetchDkim = vi.fn().mockResolvedValue({})
+			await vi.advanceTimersByTimeAsync(0)
+
+			view.vm.onMessageLoaded()
+			await vi.advanceTimersByTimeAsync(250)
+
+			expect(store.fetchItineraries).toHaveBeenCalledTimes(1)
+			expect(store.fetchDkim).not.toHaveBeenCalled()
+			view.destroy()
+		})
+
+		it('still attempts DKIM after a non-capacity itinerary failure', async () => {
+			const view = mountThreadEnvelope(true, true, {
+				attachments: [{}],
+				hasDkimSignature: true,
+				dkimValid: undefined,
+				itineraries: undefined,
+			})
+			store.fetchItineraries = vi.fn().mockRejectedValue({
+				httpStatus: 500,
+			})
+			store.fetchDkim = vi.fn().mockResolvedValue({})
+			await vi.advanceTimersByTimeAsync(0)
+
+			view.vm.onMessageLoaded()
+			await vi.advanceTimersByTimeAsync(250)
+
+			expect(store.fetchItineraries).toHaveBeenCalledTimes(1)
+			expect(store.fetchDkim).toHaveBeenCalledTimes(1)
+			view.destroy()
+		})
+
 		it('marks as read 2s after the content actually finishes rendering', async () => {
 			const view = mountThreadEnvelope(true, true)
 			await vi.advanceTimersByTimeAsync(0)

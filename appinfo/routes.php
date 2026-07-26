@@ -211,6 +211,11 @@ return [
 			'verb' => 'GET'
 		],
 		[
+			'name' => 'messages#getInlineAttachments',
+			'url' => '/api/messages/{id}/attachments/inline',
+			'verb' => 'GET'
+		],
+		[
 			'name' => 'messages#downloadAttachments',
 			'url' => '/api/messages/{id}/attachments',
 			'verb' => 'GET'

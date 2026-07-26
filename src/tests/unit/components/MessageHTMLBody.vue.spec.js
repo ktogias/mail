@@ -112,10 +112,70 @@ describe('MessageHTMLBody', () => {
 		view.vm.onMessageFrameLoad()
 		const [firstObserver] = MockResizeObserver.instances
 
+		// A real navigation replaces the iframe Document. A second native
+		// load for the same Document is deliberately idempotent.
+		stubIframeDoc(view)
 		view.vm.onMessageFrameLoad()
 
 		expect(firstObserver.disconnected).toBe(true)
 		expect(MockResizeObserver.instances).toHaveLength(2)
+	})
+
+	it('reveals parsed HTML on the same-origin ready signal without waiting for native iframe load', () => {
+		const view = mountMessageHTMLBody()
+		stubIframeDoc(view)
+
+		view.vm.onMessageFrameReady({
+			origin: window.location.origin,
+			source: view.vm.$refs.iframe.contentWindow,
+			data: { type: 'nextcloud-mail:message-html-ready' },
+		})
+
+		expect(view.emitted('load')).toHaveLength(1)
+		expect(MockResizeObserver.instances).toHaveLength(1)
+
+		// Embedded images may finish much later and trigger native load. That
+		// must not hide/reveal or mark the message as rendered a second time.
+		view.vm.onMessageFrameLoad()
+		expect(view.emitted('load')).toHaveLength(1)
+		expect(MockResizeObserver.instances).toHaveLength(1)
+	})
+
+	it('ignores ready messages from another source, origin or event type', () => {
+		const view = mountMessageHTMLBody()
+		stubIframeDoc(view)
+		const source = view.vm.$refs.iframe.contentWindow
+
+		view.vm.onMessageFrameReady({
+			origin: 'https://other.example.test',
+			source,
+			data: { type: 'nextcloud-mail:message-html-ready' },
+		})
+		view.vm.onMessageFrameReady({
+			origin: window.location.origin,
+			source: window,
+			data: { type: 'nextcloud-mail:message-html-ready' },
+		})
+		view.vm.onMessageFrameReady({
+			origin: window.location.origin,
+			source,
+			data: { type: 'unrelated' },
+		})
+
+		expect(view.emitted('load')).toBeUndefined()
+		expect(MockResizeObserver.instances).toHaveLength(0)
+	})
+
+	it('does not reveal the iframe initial about:blank document', () => {
+		const view = mountMessageHTMLBody()
+		stubIframeDoc(view, {
+			location: { href: 'about:blank' },
+		})
+
+		view.vm.onMessageFrameLoad()
+
+		expect(view.emitted('load')).toBeUndefined()
+		expect(MockResizeObserver.instances).toHaveLength(0)
 	})
 
 	it('disconnects the observer on unmount', () => {

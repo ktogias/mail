@@ -1,3 +1,78 @@
+## 5.11.0-dev.0.ktogias.22 (2026-07-26, resource-constrained deployment fork)
+
+### Delete-Lane Backpressure
+
+* serialize quick mutations in the browser across accounts so the single global `mailmutation` PHP-FPM worker receives one active request instead of several already-aging FastCGI requests
+* keep active message content independent of that queue so a slow delete cannot block the message the user is currently opening
+
+### Batched Thread Deletion
+
+* group thread and bulk-thread deletes by physical source mailbox and issue one UID-set `MOVE` or `EXPUNGE` command per mailbox
+* deduplicate Gmail label copies and reuse one reserved IMAP client for the complete account-local operation while preserving per-message before/after events
+
+### Ambiguous Timeout Reconciliation
+
+* treat transport loss and `408`/`502`/`503`/`504` responses as unknown outcomes instead of immediately resurrecting optimistically deleted messages
+* run bounded authoritative probes, accept deletes that completed after the client timeout, restore only targets confirmed to remain, and leave unavailable targets for normal mailbox reconciliation
+
+### Database
+
+* no schema changes or migrations
+
+
+## 5.11.0-dev.0.ktogias.21 (2026-07-26, resource-constrained deployment fork)
+
+### Supplementary Metadata Load Shedding
+
+* return `429` plus `Retry-After` when DKIM validation encounters the same bounded IMAP-capacity limit already handled by itinerary extraction
+* preserve supplementary HTTP capacity status after response parsing so the message component can distinguish expected load shedding from endpoint failures
+* stop the current itinerary-to-DKIM enrichment chain after capacity rejection or cancellation instead of immediately issuing a second speculative IMAP request
+* retain the independent DKIM attempt after a genuine non-capacity itinerary error
+
+### Database
+
+* no schema changes or migrations
+
+
+## 5.11.0-dev.0.ktogias.20 (2026-07-26, resource-constrained deployment fork)
+
+### Single-Request Inline Image Hydration
+
+* replace one browser/PHP request per eligible inline MIME image with one authenticated, message-level JSON bundle request
+* defer eligible image `src` attributes until the trusted same-origin iframe helper hydrates bounded `data:` images, preventing native parser fan-out from occupying every Mail PHP worker
+* validate bundle and fallback URLs against the exact same-origin Mail routes before fetching, and retain the established individual endpoint only for missing, oversized, unknown or failed parts
+* transform cached message HTML at response time so previously cached bodies immediately gain the new behavior without a cache flush
+
+### Prefetch Promotion
+
+* give body and thread requests stable deduplication identities in the browser request coordinator
+* promote a queued viewport, hover or touch prefetch to active-content priority when the user opens that same message, while continuing to reuse its single in-flight promise
+
+### Database
+
+* no schema changes or migrations
+
+
+## 5.11.0-dev.0.ktogias.19 (2026-07-26, resource-constrained deployment fork)
+
+### Progressive HTML Message Rendering
+
+* reveal parsed, sanitized message HTML at `DOMContentLoaded` instead of keeping the whole message behind a skeleton until every embedded image finishes
+* retain the native iframe load event as an idempotent fallback and continue resizing as late images change the document layout
+* accept the early-ready signal only from the exact same-origin message iframe
+
+### Bounded Inline MIME Retrieval
+
+* coalesce eligible inline image parts into one exact multi-part IMAP fetch instead of one authenticated IMAP session per image
+* single-flight concurrent sibling requests through a short-lived distributed lease, then serve them from a bounded per-message bundle
+* cap cache admission at 32 parts, 64 KiB per part and 256 KiB per message, retain the shared bundle for 15 minutes and use a private immutable browser cache for one hour
+* preserve the established single-part path for large, unknown-size, non-image and failed bundle parts
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.18 (2026-07-26, resource-constrained deployment fork)
 
 ### Priority Inbox Startup

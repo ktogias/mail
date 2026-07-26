@@ -32,12 +32,14 @@ use OCA\Mail\Exception\ClientException;
 use OCA\Mail\Exception\ServiceException;
 use OCA\Mail\Http\AttachmentDownloadResponse;
 use OCA\Mail\Http\HtmlResponse;
+use OCA\Mail\Http\TrapError;
 use OCA\Mail\IMAP\IMAPClientFactory;
 use OCA\Mail\Model\IMAPMessage;
 use OCA\Mail\Model\Message;
 use OCA\Mail\Service\AccountService;
 use OCA\Mail\Service\AiIntegrations\AiIntegrationsService;
 use OCA\Mail\Service\DelegationService;
+use OCA\Mail\Service\InlineAttachmentCache;
 use OCA\Mail\Service\ItineraryService;
 use OCA\Mail\Service\MailManager;
 use OCA\Mail\Service\SmimeService;
@@ -57,6 +59,7 @@ use OCP\IRequest;
 use OCP\IURLGenerator;
 use PHPUnit\Framework\MockObject\MockObject;
 use Psr\Log\LoggerInterface;
+use ReflectionMethod;
 use ReflectionObject;
 
 class MessagesControllerTest extends TestCase {
@@ -137,6 +140,7 @@ class MessagesControllerTest extends TestCase {
 	private ICacheFactory&MockObject $cacheFactory;
 
 	private DelegationService|MockObject $delegationService;
+	private InlineAttachmentCache|MockObject $inlineAttachmentCache;
 
 	protected function setUp(): void {
 		parent::setUp();
@@ -171,6 +175,7 @@ class MessagesControllerTest extends TestCase {
 		$this->delegationService = $this->createMock(DelegationService::class);
 		$this->delegationService->method('resolveMessageUserId')->willReturn($this->userId);
 		$this->delegationService->method('resolveMailboxUserId')->willReturn($this->userId);
+		$this->inlineAttachmentCache = $this->createMock(InlineAttachmentCache::class);
 
 		$timeFactory = $this->createMocK(ITimeFactory::class);
 		$timeFactory->expects($this->any())
@@ -203,6 +208,7 @@ class MessagesControllerTest extends TestCase {
 			$this->aiIntegrationsService,
 			$this->cacheFactory,
 			$this->delegationService,
+			$this->inlineAttachmentCache,
 		);
 
 		$this->account = $this->createMock(Account::class);
@@ -245,6 +251,10 @@ class MessagesControllerTest extends TestCase {
 			->will($this->returnValue($this->account));
 		$client = $this->createStub(Horde_Imap_Client_Socket::class);
 		$imapMessage = $this->createStub(IMAPMessage::class);
+		$imapMessage->method('getFullMessage')->willReturn([
+			'body' => '',
+			'inlineAttachments' => [],
+		]);
 		$this->mailManager->expects($this->exactly(2))
 			->method('getImapMessage')
 			->with($client, $this->account, $mailbox, 123, true)
@@ -274,14 +284,18 @@ class MessagesControllerTest extends TestCase {
 		$expectedRichResponse = HtmlResponse::withResizer('', $nonce, $scriptUrl);
 		$expectedRichResponse->cacheFor(3600);
 
-		$policy = new ContentSecurityPolicy();
-		$policy->disallowScriptDomain('\'self\'');
-		$policy->disallowConnectDomain('\'self\'');
-		$policy->disallowFontDomain('\'self\'');
-		$policy->disallowMediaDomain('\'self\'');
-		$expectedPlainResponse->setContentSecurityPolicy($policy);
+		$plainPolicy = new ContentSecurityPolicy();
+		$plainPolicy->disallowScriptDomain('\'self\'');
+		$plainPolicy->disallowConnectDomain('\'self\'');
+		$plainPolicy->disallowFontDomain('\'self\'');
+		$plainPolicy->disallowMediaDomain('\'self\'');
+		$expectedPlainResponse->setContentSecurityPolicy($plainPolicy);
 		$expectedPlainResponse->cacheFor(60 * 60, false, true);
-		$expectedRichResponse->setContentSecurityPolicy($policy);
+		$richPolicy = new ContentSecurityPolicy();
+		$richPolicy->disallowScriptDomain('\'self\'');
+		$richPolicy->disallowFontDomain('\'self\'');
+		$richPolicy->disallowMediaDomain('\'self\'');
+		$expectedRichResponse->setContentSecurityPolicy($richPolicy);
 		$expectedRichResponse->cacheFor(60 * 60, false, true);
 
 		$actualPlainResponse = $this->controller->getHtmlBody($messageId, true);
@@ -326,6 +340,7 @@ class MessagesControllerTest extends TestCase {
 			$this->aiIntegrationsService,
 			$cacheFactory,
 			$this->delegationService,
+			$this->inlineAttachmentCache,
 		);
 	}
 
@@ -495,6 +510,101 @@ class MessagesControllerTest extends TestCase {
 		$this->assertStringContainsString('from getBody\'s own cache', $response->render());
 	}
 
+	public function testGetHtmlBodyDefersEligibleCachedInlineImagesToOneBundle(): void {
+		$accountId = 17;
+		$mailboxId = 13;
+		$messageId = 4321;
+		$attachmentId = '2.2';
+		$attachmentUrl = "https://next.cloud/apps/mail/api/messages/$messageId/attachment/$attachmentId";
+		$bundleUrl = "https://next.cloud/apps/mail/api/messages/$messageId/attachments/inline";
+		$this->account->method('getId')->willReturn($accountId);
+		$mailbox = new Mailbox();
+		$mailbox->setAccountId($accountId);
+		$message = new DbMessage();
+		$message->setMailboxId($mailboxId);
+		$message->setUid(123);
+		$this->mailManager->method('getMessage')->with($this->userId, $messageId)->willReturn($message);
+		$this->mailManager->method('getMailbox')->with($this->userId, $mailboxId)->willReturn($mailbox);
+		$this->accountService->method('find')->with($this->userId, $accountId)->willReturn($this->account);
+		$this->inlineAttachmentCache->expects(self::once())
+			->method('getCandidateIds')
+			->with([
+				['id' => $attachmentId, 'mime' => 'image/png', 'size' => 5],
+			])
+			->willReturn([$attachmentId]);
+		$this->urlGenerator->method('linkToRouteAbsolute')
+			->willReturnCallback(static function (string $route, array $params) use (
+				$messageId,
+				$attachmentId,
+				$attachmentUrl,
+				$bundleUrl,
+			): string {
+				if ($route === 'mail.messages.getInlineAttachments') {
+					self::assertSame(['id' => $messageId], $params);
+					return $bundleUrl;
+				}
+				self::assertSame('mail.messages.downloadAttachment', $route);
+				self::assertSame([
+					'id' => $messageId,
+					'attachmentId' => $attachmentId,
+				], $params);
+				return $attachmentUrl;
+			});
+		$this->nonceManager->method('getNonce')->willReturn('nonce');
+		$this->urlGenerator->method('linkTo')->willReturn('/htmlresponse.js');
+		$this->urlGenerator->method('getAbsoluteURL')->willReturn('https://next.cloud/htmlresponse.js');
+
+		$cache = $this->createMock(ICache::class);
+		$cache->method('get')->with("message_$messageId")->willReturn([
+			'body' => '<p>cached</p><img src="' . $attachmentUrl . '">',
+			'inlineAttachments' => [
+				['id' => $attachmentId, 'mime' => 'image/png', 'size' => 5],
+			],
+			'hasHtmlBody' => true,
+		]);
+		$this->rebuildControllerWithCache($cache);
+
+		$response = $this->controller->getHtmlBody($messageId, false);
+		$rendered = $response->render();
+
+		self::assertStringNotContainsString('src="' . $attachmentUrl . '"', $rendered);
+		self::assertStringContainsString('data-mail-inline-id="' . $attachmentId . '"', $rendered);
+		self::assertStringContainsString('data-mail-inline-bundle="' . $bundleUrl . '"', $rendered);
+		self::assertStringContainsString('data-mail-inline-fallback="' . $attachmentUrl . '"', $rendered);
+	}
+
+	public function testGetInlineAttachmentsReturnsOnePrivateBoundedBundle(): void {
+		$accountId = 17;
+		$mailboxId = 987;
+		$messageId = 123;
+		$message = new DbMessage();
+		$message->setMailboxId($mailboxId);
+		$mailbox = new Mailbox();
+		$mailbox->setAccountId($accountId);
+		$this->mailManager->method('getMessage')->with($this->userId, $messageId)->willReturn($message);
+		$this->mailManager->method('getMailbox')->with($this->userId, $mailboxId)->willReturn($mailbox);
+		$this->accountService->method('find')->with($this->userId, $accountId)->willReturn($this->account);
+		$this->inlineAttachmentCache->expects(self::once())
+			->method('getBundle')
+			->with($this->account, $mailbox, $message, $messageId)
+			->willReturn([
+				'2.2' => new Attachment('2.2', 'first.png', 'image/png', 'first', 5, 'first', 'inline'),
+				'2.3' => new Attachment('2.3', 'second.jpg', 'image/jpeg', 'second', 6, 'second', 'inline'),
+			]);
+
+		$response = $this->controller->getInlineAttachments($messageId);
+
+		self::assertSame([
+			'parts' => [
+				'2.2' => ['mime' => 'image/png', 'content' => base64_encode('first')],
+				'2.3' => ['mime' => 'image/jpeg', 'content' => base64_encode('second')],
+			],
+		], $response->getData());
+		self::assertSame('2', $response->getHeaders()['X-Mail-Inline-Part-Count']);
+		self::assertStringContainsString('private', $response->getHeaders()['Cache-Control']);
+		self::assertStringContainsString('max-age=3600', $response->getHeaders()['Cache-Control']);
+	}
+
 	public function testDownloadAttachment() {
 		$accountId = 17;
 		$mailboxId = 987;
@@ -506,6 +616,7 @@ class MessagesControllerTest extends TestCase {
 		$contents = 'abcdef';
 		$name = 'cat.jpg';
 		$type = 'image/jpg';
+		$this->account->method('getId')->willReturn($accountId);
 		$message = new \OCA\Mail\Db\Message();
 		$message->setMailboxId($mailboxId);
 		$message->setUid($uid);
@@ -545,6 +656,96 @@ class MessagesControllerTest extends TestCase {
 		);
 
 		$this->assertEquals($expected, $response);
+	}
+
+	public function testDownloadCachedInlineAttachmentGetsPrivateBrowserCache(): void {
+		$accountId = 17;
+		$mailboxId = 987;
+		$messageId = 123;
+		$uid = 321;
+		$attachmentId = '2.2';
+		$message = new DbMessage();
+		$message->setMailboxId($mailboxId);
+		$message->setUid($uid);
+		$mailbox = new Mailbox();
+		$mailbox->setName('INBOX');
+		$mailbox->setAccountId($accountId);
+		$this->mailManager->expects(self::once())
+			->method('getMessage')
+			->with($this->userId, $messageId)
+			->willReturn($message);
+		$this->mailManager->expects(self::once())
+			->method('getMailbox')
+			->with($this->userId, $mailboxId)
+			->willReturn($mailbox);
+		$this->accountService->expects(self::once())
+			->method('find')
+			->with($this->userId, $accountId)
+			->willReturn($this->account);
+		$attachment = new Attachment(
+			$attachmentId,
+			'first.png',
+			'image/png',
+			'first',
+			5,
+			'first',
+			'inline',
+		);
+		$this->inlineAttachmentCache->expects(self::once())
+			->method('get')
+			->with(
+				$this->account,
+				$mailbox,
+				$message,
+				$messageId,
+				$attachmentId,
+			)
+			->willReturn($attachment);
+		$this->mailManager->expects(self::never())->method('getMailAttachment');
+
+		$response = $this->controller->downloadAttachment($messageId, $attachmentId);
+
+		self::assertSame('first', $response->render());
+		self::assertStringContainsString('private', $response->getHeaders()['Cache-Control']);
+		self::assertStringContainsString('max-age=3600', $response->getHeaders()['Cache-Control']);
+	}
+
+	public function testDownloadAttachmentFallsBackWhenInlineCacheDoesNotCoverPart(): void {
+		$accountId = 17;
+		$mailboxId = 987;
+		$messageId = 123;
+		$attachmentId = '2.2';
+		$message = new DbMessage();
+		$message->setMailboxId($mailboxId);
+		$mailbox = new Mailbox();
+		$mailbox->setAccountId($accountId);
+		$this->mailManager->method('getMessage')->willReturn($message);
+		$this->mailManager->method('getMailbox')->willReturn($mailbox);
+		$this->accountService->method('find')->willReturn($this->account);
+		$this->inlineAttachmentCache->expects(self::once())
+			->method('get')
+			->with($this->account, $mailbox, $message, $messageId, $attachmentId)
+			->willReturn(null);
+		$this->mailManager->expects(self::once())
+			->method('getMailAttachment')
+			->with($this->account, $mailbox, $message, $attachmentId)
+			->willReturn(new Attachment(
+				$attachmentId,
+				'large.png',
+				'image/png',
+				'large',
+				5,
+				null,
+				'inline',
+			));
+
+		$response = $this->controller->downloadAttachment($messageId, $attachmentId);
+
+		self::assertSame('large', $response->render());
+		self::assertStringNotContainsString(
+			'max-age=3600',
+			$response->getHeaders()['Cache-Control'],
+		);
 	}
 
 	public function testSaveSingleAttachment() {
@@ -1560,6 +1761,12 @@ class MessagesControllerTest extends TestCase {
 		$this->assertEquals(['valid' => true], $actualResponse->getData());
 	}
 
+	public function testGetDkimTrapsCapacityErrors(): void {
+		$method = new ReflectionMethod(MessagesController::class, 'getDkim');
+
+		self::assertCount(1, $method->getAttributes(TrapError::class));
+	}
+
 	public static function provideCacheBusterData(): array {
 		return [
 			[null, false],
@@ -1643,6 +1850,7 @@ class MessagesControllerTest extends TestCase {
 			$this->aiIntegrationsService,
 			$this->cacheFactory,
 			$this->delegationService,
+			$this->inlineAttachmentCache,
 		);
 
 		$actualResponse = $controller->needsTranslation(100);
@@ -1817,6 +2025,7 @@ class MessagesControllerTest extends TestCase {
 			$this->aiIntegrationsService,
 			$this->cacheFactory,
 			$this->delegationService,
+			$this->inlineAttachmentCache,
 		);
 
 		$actualResponse = $controller->smartReply(100);

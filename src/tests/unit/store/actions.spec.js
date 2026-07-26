@@ -15,13 +15,15 @@ import * as MailboxService from '../../../service/MailboxService.js'
 import * as MessageService from '../../../service/MessageService.js'
 import * as NotificationService from '../../../service/NotificationService.js'
 import * as PriorityInboxService from '../../../service/PriorityInboxService.js'
-import { WorkClass } from '../../../service/RequestCoordinator.js'
+import * as RequestCoordinatorService from '../../../service/RequestCoordinator.js'
 import * as ThreadService from '../../../service/ThreadService.js'
 import { PAGE_SIZE, PRIORITY_INBOX_ID, UNIFIED_INBOX_ID } from '../../../store/constants.js'
 import useMainStore from '../../../store/mainStore.js'
 import { computeLockRetryDelayMs, mapWithConcurrencyLimit, reconcileNearExpiryLocalChanges, resetPendingDeleteRefillsForTests, resetRecentLocalChangesForTests, resetSharedNetworkLimiterForTests } from '../../../store/mainStore/actions.js'
 import { normalizedEnvelopeListId } from '../../../util/normalization.js'
 import { wait } from '../../../util/wait.js'
+
+const { WorkClass } = RequestCoordinatorService
 
 vi.mock('../../../service/AccountService.js')
 vi.mock('../../../service/DeepSearchService.js')
@@ -4828,11 +4830,63 @@ describe('Vuex store actions', () => {
 			]
 			store.addEnvelopesMutation({ envelopes: siblings, addToUnifiedMailboxes: false })
 			ThreadService.deleteThread.mockRejectedValue({ response: { status: 500 } })
+			MessageService.fetchEnvelope.mockResolvedValue(siblings[0])
 
 			await expect(store.deleteThread({ envelope: store.envelopes[1] })).rejects.toBeDefined()
 
 			expect(store.getEnvelope(1)).toBeDefined()
 			expect(store.getEnvelope(2)).toBeDefined()
+		})
+
+		it('deleteThread keeps the optimistic removal when a timed-out request is confirmed landed', async () => {
+			const account = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: { databaseId: 11, accountId: 13, name: 'INBOX' },
+			})
+			const envelope = {
+				databaseId: 1,
+				accountId: 13,
+				mailboxId: 11,
+				threadRootId: 'thread-a',
+				dateInt: 1,
+				flags: {},
+			}
+			store.addEnvelopesMutation({ envelopes: [envelope], addToUnifiedMailboxes: false })
+			ThreadService.deleteThread.mockRejectedValue({ response: { status: 504 } })
+			MessageService.fetchEnvelope.mockResolvedValue(undefined)
+
+			await expect(store.deleteThread({ envelope: store.envelopes[1] })).resolves.toBeUndefined()
+
+			expect(store.getEnvelope(1)).toBeUndefined()
+		})
+
+		it('deleteThread retries an ambiguous timeout before deciding to restore', async () => {
+			const account = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: { databaseId: 11, accountId: 13, name: 'INBOX' },
+			})
+			const envelope = {
+				databaseId: 1,
+				accountId: 13,
+				mailboxId: 11,
+				threadRootId: 'thread-a',
+				dateInt: 1,
+				flags: {},
+			}
+			store.addEnvelopesMutation({ envelopes: [envelope], addToUnifiedMailboxes: false })
+			ThreadService.deleteThread.mockRejectedValue({ response: { status: 504 } })
+			MessageService.fetchEnvelope
+				.mockResolvedValueOnce(envelope)
+				.mockResolvedValueOnce(undefined)
+
+			await expect(store.deleteThread({ envelope: store.envelopes[1] })).resolves.toBeUndefined()
+
+			expect(wait).toHaveBeenCalledWith(1_000)
+			expect(store.getEnvelope(1)).toBeUndefined()
 		})
 
 		it('deleteThreads sends one batch request and removes all selected thread siblings', async () => {
@@ -4882,6 +4936,10 @@ describe('Vuex store actions', () => {
 			ThreadService.deleteThreads
 				.mockResolvedValueOnce({})
 				.mockRejectedValueOnce({ response: { status: 500 } })
+			MessageService.fetchEnvelope.mockImplementation((accountId, id) => Promise.resolve({
+				...envelopes.find((envelope) => envelope.databaseId === id),
+				accountId,
+			}))
 
 			await expect(store.deleteThreads({
 				envelopes: [store.envelopes[1], store.envelopes[3]],
@@ -4895,9 +4953,34 @@ describe('Vuex store actions', () => {
 			expect(store.getEnvelope(4)).toBeDefined()
 		})
 
+		it('deleteThreads does not restore a batch that completed behind a 504', async () => {
+			const account = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: { databaseId: 11, accountId: 13, name: 'INBOX' },
+			})
+			const envelopes = [{
+				databaseId: 1,
+				accountId: 13,
+				mailboxId: 11,
+				threadRootId: 'thread-a',
+				dateInt: 1,
+				flags: {},
+			}]
+			store.addEnvelopesMutation({ envelopes, addToUnifiedMailboxes: false })
+			ThreadService.deleteThreads.mockRejectedValue({ response: { status: 504 } })
+			MessageService.fetchEnvelope.mockResolvedValue(undefined)
+
+			await expect(store.deleteThreads({ envelopes })).resolves.toBeUndefined()
+
+			expect(store.getEnvelope(1)).toBeUndefined()
+		})
+
 		it('deleteThread still surfaces a genuine failure (not 403)', async () => {
 			ThreadService.deleteThread.mockRejectedValue({ response: { status: 500 } })
 			const envelope = { databaseId: 1, mailboxId: 11, dateInt: 1, flags: {} }
+			MessageService.fetchEnvelope.mockResolvedValue(envelope)
 
 			await expect(store.deleteThread({ envelope })).rejects.toBeDefined()
 		})
@@ -5343,6 +5426,29 @@ describe('Vuex store actions', () => {
 			expect(MessageService.fetchMessage).toHaveBeenCalledTimes(1)
 		})
 
+		it('promotes a pending speculative body request when the user opens it', async () => {
+			let resolveFetch
+			MessageService.messageBodyRequestKey.mockReturnValue('message-body:42')
+			MessageService.fetchMessage.mockReturnValue(new Promise((resolve) => {
+				resolveFetch = resolve
+			}))
+			const promote = vi.spyOn(RequestCoordinatorService, 'promoteMailRequest')
+				.mockReturnValue(true)
+
+			const speculativeCall = store.fetchMessage(42, { speculative: true })
+			const activeCall = store.fetchMessage(42)
+
+			expect(MessageService.fetchMessage).toHaveBeenCalledTimes(1)
+			expect(promote).toHaveBeenCalledWith(
+				'message-body:42',
+				WorkClass.ACTIVE_CONTENT,
+			)
+
+			resolveFetch({ databaseId: 42 })
+			await Promise.all([speculativeCall, activeCall])
+			promote.mockRestore()
+		})
+
 		it('fires a fresh request for a later call once the first has resolved', async () => {
 			MessageService.fetchMessage.mockResolvedValue({ databaseId: 42, subject: 'Hello' })
 
@@ -5463,6 +5569,29 @@ describe('Vuex store actions', () => {
 
 			expect(first).toEqual(second)
 			expect(MessageService.fetchThread).toHaveBeenCalledTimes(1)
+		})
+
+		it('promotes a pending speculative thread request when the user opens it', async () => {
+			let resolveFetch
+			MessageService.messageThreadRequestKey.mockReturnValue('message-thread:119855')
+			MessageService.fetchThread.mockReturnValue(new Promise((resolve) => {
+				resolveFetch = resolve
+			}))
+			const promote = vi.spyOn(RequestCoordinatorService, 'promoteMailRequest')
+				.mockReturnValue(true)
+
+			const speculativeCall = store.fetchThread(119855, { speculative: true })
+			const activeCall = store.fetchThread(119855)
+
+			expect(MessageService.fetchThread).toHaveBeenCalledTimes(1)
+			expect(promote).toHaveBeenCalledWith(
+				'message-thread:119855',
+				WorkClass.ACTIVE_CONTENT,
+			)
+
+			resolveFetch([threadEnvelope])
+			await Promise.all([speculativeCall, activeCall])
+			promote.mockRestore()
 		})
 
 		it('fires a fresh request for a later call once the first has resolved', async () => {

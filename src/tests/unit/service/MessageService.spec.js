@@ -101,6 +101,10 @@ describe('service/MessageService test suite', () => {
 			await expect(MessageService.fetchMessage(42, { speculative: true }))
 				.rejects.toMatchObject({ isTransient: true, httpStatus: 429 })
 			expect(axios.get).toHaveBeenCalledTimes(1)
+			expect(axios.get).toHaveBeenCalledWith('/generated-url', expect.objectContaining({
+				mailRequestKey: 'message-body:42',
+				mailWorkClass: WorkClass.SPECULATIVE,
+			}))
 		})
 
 		it('marks an exhausted temporary failure as transient instead of not-found', async () => {
@@ -116,7 +120,28 @@ describe('service/MessageService test suite', () => {
 
 			await rejection
 			expect(axios.get).toHaveBeenCalledTimes(3)
+			expect(axios.get).toHaveBeenLastCalledWith('/generated-url', expect.objectContaining({
+				mailRequestKey: 'message-body:42',
+				mailWorkClass: WorkClass.ACTIVE_CONTENT,
+			}))
 		})
+	})
+
+	it('gives speculative and active thread calls the same promotion key', async () => {
+		generateUrl.mockReturnValue('/generated-url')
+		axios.get.mockResolvedValue({ data: [] })
+
+		await MessageService.fetchThread(73, { speculative: true })
+		await MessageService.fetchThread(73)
+
+		expect(axios.get).toHaveBeenNthCalledWith(1, '/generated-url', expect.objectContaining({
+			mailRequestKey: 'message-thread:73',
+			mailWorkClass: WorkClass.SPECULATIVE,
+		}))
+		expect(axios.get).toHaveBeenNthCalledWith(2, '/generated-url', expect.objectContaining({
+			mailRequestKey: 'message-thread:73',
+			mailWorkClass: WorkClass.ACTIVE_CONTENT,
+		}))
 	})
 
 	it('requests an exact server-side Priority Inbox split when asked', async () => {
@@ -212,6 +237,26 @@ describe('service/MessageService test suite', () => {
 			})
 		})
 
+		it('preserves an itinerary capacity response after parsing', async () => {
+			generateUrl.mockReturnValueOnce('/generated-url')
+			axios.get.mockRejectedValueOnce({
+				response: {
+					status: 429,
+					headers: { 'x-mail-response': '1' },
+					data: {
+						status: 'error',
+						data: { message: 'Mail account is busy' },
+					},
+				},
+			})
+
+			await expect(MessageService.fetchMessageItineraries(42)).rejects.toMatchObject({
+				httpStatus: 429,
+				isTransient: true,
+				message: 'Mail account is busy',
+			})
+		})
+
 		it('fetchMessageDkim', async () => {
 			generateUrl.mockReturnValueOnce('/generated-url')
 			const networkError = new Error('Network Error')
@@ -230,6 +275,26 @@ describe('service/MessageService test suite', () => {
 			expect(axios.get).toHaveBeenCalledWith('/generated-url', {
 				signal: controller.signal,
 				mailWorkClass: WorkClass.SPECULATIVE,
+			})
+		})
+
+		it('preserves a DKIM capacity response after parsing', async () => {
+			generateUrl.mockReturnValueOnce('/generated-url')
+			axios.get.mockRejectedValueOnce({
+				response: {
+					status: 429,
+					headers: { 'x-mail-response': '1' },
+					data: {
+						status: 'error',
+						data: { message: 'Mail account is busy' },
+					},
+				},
+			})
+
+			await expect(MessageService.fetchMessageDkim(42)).rejects.toMatchObject({
+				httpStatus: 429,
+				isTransient: true,
+				message: 'Mail account is busy',
 			})
 		})
 

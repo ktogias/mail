@@ -110,6 +110,93 @@ describe('RequestCoordinator', () => {
 		releaseSecondBackground()
 	})
 
+	it('keeps quick mutations single-file like the global server mutation worker', async () => {
+		const coordinator = new RequestCoordinator()
+		const releaseFirst = await coordinator.acquire({
+			workClass: WorkClass.QUICK_MUTATION,
+			accountId: 'account-1',
+		})
+		let secondStarted = false
+		const second = coordinator.acquire({
+			workClass: WorkClass.QUICK_MUTATION,
+			accountId: 'account-1',
+		}).then((release) => {
+			secondStarted = true
+			return release
+		})
+		const releaseContent = await coordinator.acquire({
+			workClass: WorkClass.ACTIVE_CONTENT,
+			accountId: 'account-1',
+		})
+
+		await Promise.resolve()
+
+		expect(secondStarted).toBe(false)
+		expect(coordinator.snapshot().running).toBe(2)
+
+		releaseFirst()
+		const releaseSecond = await second
+		expect(secondStarted).toBe(true)
+
+		releaseSecond()
+		releaseContent()
+	})
+
+	it('serializes quick mutations globally because the server lane is global', async () => {
+		const coordinator = new RequestCoordinator()
+		const releaseFirst = await coordinator.acquire({
+			workClass: WorkClass.QUICK_MUTATION,
+			accountId: 'account-1',
+		})
+		let otherAccountStarted = false
+		const otherAccount = coordinator.acquire({
+			workClass: WorkClass.QUICK_MUTATION,
+			accountId: 'account-2',
+		}).then((release) => {
+			otherAccountStarted = true
+			return release
+		})
+
+		await Promise.resolve()
+		expect(otherAccountStarted).toBe(false)
+
+		releaseFirst()
+		const releaseOtherAccount = await otherAccount
+		expect(otherAccountStarted).toBe(true)
+		releaseOtherAccount()
+	})
+
+	it('promotes a queued speculative request when it becomes the active user open', async () => {
+		const coordinator = new RequestCoordinator()
+		const releaseBackground = await coordinator.acquire({
+			workClass: WorkClass.MAINTENANCE,
+			accountId: 'account-1',
+		})
+		const config = {
+			url: '/apps/mail/api/messages/123/body',
+			headers: {},
+			mailWorkClass: WorkClass.SPECULATIVE,
+			mailRequestKey: 'message-body:123',
+		}
+		const coordinated = coordinateMailRequest(config, coordinator)
+
+		expect(coordinator.snapshot().queuedByClass[WorkClass.SPECULATIVE]).toBe(1)
+		expect(coordinator.promoteQueued(
+			'message-body:123',
+			WorkClass.ACTIVE_CONTENT,
+		)).toBe(true)
+
+		const promotedConfig = await coordinated
+		expect(promotedConfig.mailWorkClass).toBe(WorkClass.ACTIVE_CONTENT)
+		expect(promotedConfig.headers['X-Mail-Request-Class']).toBe(WorkClass.ACTIVE_CONTENT)
+		expect(promotedConfig.headers.Priority).toBe('u=1')
+		expect(coordinator.snapshot().queuedByClass[WorkClass.SPECULATIVE]).toBe(0)
+		expect(coordinator.snapshot().running).toBe(2)
+
+		promotedConfig.mailCoordinatorRelease()
+		releaseBackground()
+	})
+
 	it('drops speculative work while a foreground action is active', async () => {
 		const coordinator = new RequestCoordinator()
 		const releaseMutation = await coordinator.acquire({

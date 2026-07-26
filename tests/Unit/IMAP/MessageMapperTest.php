@@ -64,6 +64,41 @@ class MessageMapperTest extends TestCase {
 		);
 	}
 
+	public function testMoveBatchUsesOneUidSet(): void {
+		/** @var Horde_Imap_Client_Base|MockObject $client */
+		$client = $this->createMock(Horde_Imap_Client_Base::class);
+		$client->expects(self::once())
+			->method('copy')
+			->with(
+				'INBOX',
+				'Trash',
+				[
+					'ids' => new Horde_Imap_Client_Ids([20, 30]),
+					'move' => true,
+					'force_map' => false,
+				],
+			)
+			->willReturn([]);
+
+		$this->mapper->moveBatch($client, 'INBOX', [20, 30, 20], 'Trash');
+	}
+
+	public function testExpungeBatchUsesOneUidSet(): void {
+		/** @var Horde_Imap_Client_Base|MockObject $client */
+		$client = $this->createMock(Horde_Imap_Client_Base::class);
+		$client->expects(self::once())
+			->method('expunge')
+			->with(
+				'Trash',
+				[
+					'ids' => new Horde_Imap_Client_Ids([20, 30]),
+					'delete' => true,
+				],
+			);
+
+		$this->mapper->expungeBatch($client, 'Trash', [20, 30, 20]);
+	}
+
 	public function testGetByIds(): void {
 		/** @var Horde_Imap_Client_Socket|MockObject $imapClient */
 		$imapClient = $this->createMock(Horde_Imap_Client_Socket::class);
@@ -1305,6 +1340,79 @@ class MessageMapperTest extends TestCase {
 			static fn ($attachment): string => $attachment->getContent(),
 			$attachments,
 		));
+	}
+
+	public function testGetAttachmentsIncludesExactInlineImageFromHtmlMessage(): void {
+		$messageUid = 6697;
+		$structure = Horde_Mime_Part::parseMessage(
+			file_get_contents(__DIR__ . '/../../data/mime-html-body-with-cid.txt'),
+		);
+		$inlineAttachmentId = '2';
+		$inlineContent = 'small-inline-image';
+
+		$structureData = new Horde_Imap_Client_Data_Fetch();
+		$structureData->setUid($messageUid);
+		$structureData->setStructure($structure);
+		$structureResult = new Horde_Imap_Client_Fetch_Results();
+		$structureResult[$messageUid] = $structureData;
+
+		$partsData = new Horde_Imap_Client_Data_Fetch();
+		$partsData->setUid($messageUid);
+		$partsData->setMimeHeader(
+			$inlineAttachmentId,
+			"Content-Type: image/gif\r\n"
+				. "Content-ID: <_1_0FAD84280FACDD0C0038DE9FC1258E02>\r\n"
+				. "Content-Transfer-Encoding: base64\r\n"
+		);
+		$partsData->setBodyPart($inlineAttachmentId, base64_encode($inlineContent));
+		$partsResult = new Horde_Imap_Client_Fetch_Results();
+		$partsResult[$messageUid] = $partsData;
+
+		$imapClient = $this->createMock(Horde_Imap_Client_Socket::class);
+		$imapClient->expects(self::exactly(2))
+			->method('fetch')
+			->willReturnOnConsecutiveCalls($structureResult, $partsResult);
+		$this->sMimeService->method('isEncrypted')->willReturn(false);
+
+		$attachments = $this->mapper->getAttachments(
+			$imapClient,
+			'INBOX',
+			$messageUid,
+			'alice',
+			[$inlineAttachmentId],
+		);
+
+		self::assertCount(1, $attachments);
+		self::assertSame($inlineAttachmentId, $attachments[0]->getId());
+		self::assertSame('image/gif', $attachments[0]->getType());
+		self::assertSame($inlineContent, $attachments[0]->getContent());
+	}
+
+	public function testGetAttachmentsDoesNotExposeAnExactHtmlBodyPart(): void {
+		$messageUid = 6697;
+		$structure = Horde_Mime_Part::parseMessage(
+			file_get_contents(__DIR__ . '/../../data/mime-html-body-with-cid.txt'),
+		);
+		$structureData = new Horde_Imap_Client_Data_Fetch();
+		$structureData->setUid($messageUid);
+		$structureData->setStructure($structure);
+		$structureResult = new Horde_Imap_Client_Fetch_Results();
+		$structureResult[$messageUid] = $structureData;
+		$imapClient = $this->createMock(Horde_Imap_Client_Socket::class);
+		$imapClient->expects(self::once())
+			->method('fetch')
+			->willReturn($structureResult);
+		$this->sMimeService->method('isEncrypted')->willReturn(false);
+
+		$attachments = $this->mapper->getAttachments(
+			$imapClient,
+			'INBOX',
+			$messageUid,
+			'alice',
+			['1'],
+		);
+
+		self::assertSame([], $attachments);
 	}
 
 	private function mockEncryptedFetch(int $messageUid, string $decryptedMime): Horde_Imap_Client_Base {

@@ -310,9 +310,31 @@ class MailManager implements IMailManager {
 		int $messageUid,
 		Horde_Imap_Client_Socket $client,
 	): void {
-		$this->eventDispatcher->dispatchTyped(
-			new BeforeMessageDeletedEvent($account, $mailbox->getName(), $messageUid)
-		);
+		$this->deleteMessagesWithClient($account, $mailbox, [$messageUid], $client);
+	}
+
+	/**
+	 * @param int[] $messageUids
+	 *
+	 * @throws ServiceException
+	 * @throws TrashMailboxNotSetException
+	 */
+	private function deleteMessagesWithClient(
+		Account $account,
+		Mailbox $mailbox,
+		array $messageUids,
+		Horde_Imap_Client_Socket $client,
+	): void {
+		if ($messageUids === []) {
+			return;
+		}
+
+		$messageUids = array_values(array_unique(array_map('intval', $messageUids)));
+		foreach ($messageUids as $messageUid) {
+			$this->eventDispatcher->dispatchTyped(
+				new BeforeMessageDeletedEvent($account, $mailbox->getName(), $messageUid)
+			);
+		}
 
 		try {
 			$trashMailboxId = $account->getMailAccount()->getTrashMailboxId();
@@ -326,23 +348,25 @@ class MailManager implements IMailManager {
 
 		if ($mailbox->getName() === $trashMailbox->getName()) {
 			// Delete inside trash -> expunge
-			$this->imapMessageMapper->expunge(
+			$this->imapMessageMapper->expungeBatch(
 				$client,
 				$mailbox->getName(),
-				$messageUid
+				$messageUids,
 			);
 		} else {
-			$this->imapMessageMapper->move(
+			$this->imapMessageMapper->moveBatch(
 				$client,
 				$mailbox->getName(),
-				$messageUid,
+				$messageUids,
 				$trashMailbox->getName()
 			);
 		}
 
-		$this->eventDispatcher->dispatchTyped(
-			new MessageDeletedEvent($account, $mailbox, $messageUid)
-		);
+		foreach ($messageUids as $messageUid) {
+			$this->eventDispatcher->dispatchTyped(
+				new MessageDeletedEvent($account, $mailbox, $messageUid)
+			);
+		}
 	}
 
 	/**
@@ -689,10 +713,17 @@ class MailManager implements IMailManager {
 	 * @param Account $account
 	 * @param Mailbox $mailbox
 	 * @param Message $message
+	 * @param string[] $attachmentIds exact regular or inline MIME part IDs;
+	 *                                empty selects all user-visible attachments
 	 * @return Attachment[]
 	 */
 	#[\Override]
-	public function getMailAttachments(Account $account, Mailbox $mailbox, Message $message): array {
+	public function getMailAttachments(
+		Account $account,
+		Mailbox $mailbox,
+		Message $message,
+		array $attachmentIds = [],
+	): array {
 		$client = $this->imapClientFactory->getClient($account, workClass: ImapWorkClass::ACTIVE_CONTENT);
 		try {
 			return $this->imapMessageMapper->getAttachments(
@@ -700,6 +731,7 @@ class MailManager implements IMailManager {
 				$mailbox->getName(),
 				$message->getUid(),
 				$account->getUserId(),
+				$attachmentIds,
 			);
 		} finally {
 			$client->logout();
@@ -941,7 +973,7 @@ class MailManager implements IMailManager {
 	#[\Override]
 	public function deleteThreads(Account $account, array $threads): void {
 		$mailAccount = $account->getMailAccount();
-		$messagesByLocation = [];
+		$messageUidsByMailbox = [];
 		foreach ($threads as $thread) {
 			$messageInTrash = $thread['mailbox']->getId() === $mailAccount->getTrashMailboxId();
 			$threadMessages = $this->threadMapper->findMessageUidsAndMailboxNamesByAccountAndThreadRoot(
@@ -950,12 +982,11 @@ class MailManager implements IMailManager {
 				$messageInTrash
 			);
 			foreach ($threadMessages as $message) {
-				$messagesByLocation[$message['mailboxName'] . "\0" . $message['messageUid']] = $message;
+				$messageUidsByMailbox[$message['mailboxName']][$message['messageUid']] = $message['messageUid'];
 			}
 		}
-		$messages = array_values($messagesByLocation);
 
-		if ($messages === []) {
+		if ($messageUidsByMailbox === []) {
 			return;
 		}
 
@@ -965,21 +996,21 @@ class MailManager implements IMailManager {
 		// primitive for every member.
 		$client = $this->imapClientFactory->getClient($account, allowReservedSlot: true);
 		try {
-			foreach ($messages as $message) {
-				$this->logger->debug('deleting message', [
-					'messageId' => $message['messageUid'],
-					'mailbox' => $message['mailboxName'],
+			foreach ($messageUidsByMailbox as $mailboxName => $messageUids) {
+				$this->logger->debug('deleting message batch', [
+					'messageCount' => count($messageUids),
+					'mailbox' => $mailboxName,
 				]);
 
 				try {
-					$sourceMailbox = $this->mailboxMapper->find($account, $message['mailboxName']);
+					$sourceMailbox = $this->mailboxMapper->find($account, $mailboxName);
 				} catch (DoesNotExistException $e) {
-					throw new ServiceException("Source mailbox {$message['mailboxName']} does not exist", 0, $e);
+					throw new ServiceException("Source mailbox $mailboxName does not exist", 0, $e);
 				}
-				$this->deleteMessageWithClient(
+				$this->deleteMessagesWithClient(
 					$account,
 					$sourceMailbox,
-					$message['messageUid'],
+					array_values($messageUids),
 					$client,
 				);
 			}

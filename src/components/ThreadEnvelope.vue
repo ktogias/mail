@@ -466,6 +466,10 @@ function isRequestCancellation(error) {
 		|| ['AbortError', 'CanceledError', 'TimeoutError'].includes(error?.name)
 }
 
+function isSupplementaryCapacityError(error) {
+	return [425, 429].includes(error?.httpStatus ?? error?.response?.status)
+}
+
 export default {
 	name: 'ThreadEnvelope',
 	components: {
@@ -1049,10 +1053,15 @@ export default {
 					// low-priority request at a time globally, and launching
 					// both together only adds a queued request that may already
 					// be obsolete by the time the user navigates away.
+					let continueEnrichment = true
 					if (!this.message.itineraries) {
-						await this.fetchItineraries(controller.signal)
+						continueEnrichment = await this.fetchItineraries(controller.signal)
 					}
-					if (!controller.signal.aborted && this.message.dkimValid === undefined) {
+					if (
+						continueEnrichment
+						&& !controller.signal.aborted
+						&& this.message.dkimValid === undefined
+					) {
 						await this.fetchDkim(controller.signal)
 					}
 				}
@@ -1126,7 +1135,7 @@ export default {
 		async fetchItineraries(signal) {
 			// Sanity check before actually making the request
 			if (!this.message.hasHtmlBody && this.message.attachments.length === 0) {
-				return
+				return true
 			}
 
 			logger.debug(`Fetching itineraries for message ${this.envelope.databaseId}`)
@@ -1134,10 +1143,19 @@ export default {
 			try {
 				const itineraries = await this.mainStore.fetchItineraries(this.envelope.databaseId, { signal })
 				logger.debug(`Itineraries of message ${this.envelope.databaseId} fetched`, { itineraries })
+				return true
 			} catch (error) {
-				if (!axios.isCancel(error) && error.name !== 'CanceledError') {
-					logger.error(`Could not fetch itineraries of message ${this.envelope.databaseId}`, { error })
+				if (isRequestCancellation(error) || isSupplementaryCapacityError(error)) {
+					logger.debug(`Stopped supplementary fetches for message ${this.envelope.databaseId}`, {
+						reason: isSupplementaryCapacityError(error) ? 'capacity' : 'cancelled',
+					})
+					return false
 				}
+				logger.error(`Could not fetch itineraries of message ${this.envelope.databaseId}`, { error })
+				// A non-capacity itinerary failure does not imply that DKIM
+				// validation will fail, so retain the established independent
+				// attempt for genuine endpoint-specific errors.
+				return true
 			}
 		},
 
@@ -1152,9 +1170,13 @@ export default {
 				const dkim = await this.mainStore.fetchDkim(this.envelope.databaseId, { signal })
 				logger.debug(`DKIM of message ${this.envelope.databaseId} fetched`, { dkim })
 			} catch (error) {
-				if (!axios.isCancel(error) && error.name !== 'CanceledError') {
-					logger.error(`Could not fetch DKIM of message ${this.envelope.databaseId}`, { error })
+				if (isRequestCancellation(error) || isSupplementaryCapacityError(error)) {
+					logger.debug(`Skipped DKIM enrichment for message ${this.envelope.databaseId}`, {
+						reason: isSupplementaryCapacityError(error) ? 'capacity' : 'cancelled',
+					})
+					return
 				}
+				logger.error(`Could not fetch DKIM of message ${this.envelope.databaseId}`, { error })
 			}
 		},
 

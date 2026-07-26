@@ -169,7 +169,7 @@ export class RequestCoordinator {
 		this.nextId = 1
 	}
 
-	acquire({ workClass, accountId, signal, cancel, onRelease }) {
+	acquire({ workClass, accountId, signal, cancel, onRelease, requestKey, onPromote }) {
 		// Mobile browsers may freeze a tab after the server has completed a
 		// request but before Axios can run its response interceptor. Never let
 		// such an orphaned browser-side permit block every future request.
@@ -201,6 +201,8 @@ export class RequestCoordinator {
 				signal,
 				cancel,
 				onRelease,
+				requestKey,
+				onPromote,
 				queuedAt: Date.now(),
 				resolve,
 				reject,
@@ -224,6 +226,33 @@ export class RequestCoordinator {
 			this.drain()
 			this.emit()
 		})
+	}
+
+	/**
+	 * Upgrade a request which was speculative when queued after the user
+	 * explicitly opens that same message. The existing promise and network
+	 * request remain deduplicated; only its place in this not-yet-started
+	 * queue and the eventual HTTP/server priority change.
+	 *
+	 * @param {string} requestKey stable body/thread identity
+	 * @param {string} workClass higher-priority class
+	 * @return {boolean} whether a queued request was promoted
+	 */
+	promoteQueued(requestKey, workClass) {
+		if (typeof requestKey !== 'string' || PRIORITY[workClass] === undefined) {
+			return false
+		}
+
+		const item = this.queue.find((candidate) => candidate.requestKey === requestKey)
+		if (item === undefined || PRIORITY[workClass] >= PRIORITY[item.workClass]) {
+			return false
+		}
+
+		item.workClass = workClass
+		item.onPromote?.(workClass)
+		this.drain()
+		this.emit()
+		return true
 	}
 
 	hasForegroundPressure() {
@@ -286,6 +315,18 @@ export class RequestCoordinator {
 		}
 		const accountRunning = this.runningByAccount.get(item.accountId) ?? 0
 		if (accountRunning >= PER_ACCOUNT_CONCURRENCY) {
+			return false
+		}
+		// The server deliberately has one global mailmutation FPM worker.
+		// Starting several undo-window-deferred mutations at once only moves
+		// their queue into FastCGI, where every request's 75-second timeout is
+		// already running. Keep that queue in the browser instead: the next
+		// mutation starts only after the previous response releases its
+		// permit, while active content continues through its separate lane.
+		if (
+			item.workClass === WorkClass.QUICK_MUTATION
+			&& (this.runningByClass.get(WorkClass.QUICK_MUTATION) ?? 0) > 0
+		) {
 			return false
 		}
 		// Keep one global and one per-account browser slot available for a
@@ -467,6 +508,10 @@ export class RequestCoordinator {
 
 export const requestCoordinator = new RequestCoordinator()
 
+export function promoteMailRequest(requestKey, workClass = WorkClass.ACTIVE_CONTENT) {
+	return requestCoordinator.promoteQueued(requestKey, workClass)
+}
+
 let installed = false
 
 function createLifecycleAbort(config) {
@@ -508,6 +553,7 @@ export async function coordinateMailRequest(config, coordinator = requestCoordin
 	}
 
 	const workClass = inferWorkClass(config)
+	let grantedWorkClass = workClass
 	const lifecycleAbort = createLifecycleAbort(config)
 	let release
 	try {
@@ -517,19 +563,24 @@ export async function coordinateMailRequest(config, coordinator = requestCoordin
 			signal: config.signal,
 			cancel: lifecycleAbort.cancel,
 			onRelease: lifecycleAbort.cleanup,
+			requestKey: config.mailRequestKey,
+			onPromote: (promotedWorkClass) => {
+				grantedWorkClass = promotedWorkClass
+			},
 		})
 	} catch (error) {
 		lifecycleAbort.cleanup()
 		throw error
 	}
 	config.mailCoordinatorRelease = release
+	config.mailWorkClass = grantedWorkClass
 	config.headers = config.headers ?? {}
 	if (typeof config.headers.set === 'function') {
-		config.headers.set('X-Mail-Request-Class', workClass)
-		config.headers.set('Priority', HTTP_PRIORITY[workClass])
+		config.headers.set('X-Mail-Request-Class', grantedWorkClass)
+		config.headers.set('Priority', HTTP_PRIORITY[grantedWorkClass])
 	} else {
-		config.headers['X-Mail-Request-Class'] = workClass
-		config.headers.Priority = HTTP_PRIORITY[workClass]
+		config.headers['X-Mail-Request-Class'] = grantedWorkClass
+		config.headers.Priority = HTTP_PRIORITY[grantedWorkClass]
 	}
 	return config
 }

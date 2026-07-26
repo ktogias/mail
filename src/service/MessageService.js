@@ -43,6 +43,9 @@ const ACTIVE_MESSAGE_FETCH_ATTEMPTS = 3
 const ACTIVE_MESSAGE_FETCH_RETRY_STATUSES = new Set([408, 425, 429, 502, 503, 504])
 const ACTIVE_MESSAGE_FETCH_MAX_RETRY_AFTER_MS = 5_000
 
+export const messageBodyRequestKey = (id) => `message-body:${id}`
+export const messageThreadRequestKey = (id) => `message-thread:${id}`
+
 function retryAfterMs(error, attempt, id) {
 	const headers = error.response?.headers
 	const retryAfter = typeof headers?.get === 'function'
@@ -89,6 +92,7 @@ async function fetchActiveMessage(url, id, signal, attempt = 0) {
 		return await axios.get(url, {
 			signal,
 			mailWorkClass: WorkClass.ACTIVE_CONTENT,
+			mailRequestKey: messageBodyRequestKey(id),
 		})
 	} catch (error) {
 		const status = error.response?.status
@@ -202,6 +206,7 @@ export async function fetchThread(id, { signal, speculative = false } = {}) {
 	const resp = await axios.get(url, {
 		signal,
 		mailWorkClass: speculative ? WorkClass.SPECULATIVE : WorkClass.ACTIVE_CONTENT,
+		mailRequestKey: messageThreadRequestKey(id),
 	})
 	return resp.data
 }
@@ -405,6 +410,7 @@ export async function fetchMessage(id, { signal, speculative = false } = {}) {
 			? await axios.get(url, {
 					signal,
 					mailWorkClass: WorkClass.SPECULATIVE,
+					mailRequestKey: messageBodyRequestKey(id),
 				})
 			: await fetchActiveMessage(url, id, signal)
 		return resp.data
@@ -452,6 +458,24 @@ export async function fetchMessageHtmlBody(id) {
 	}
 }
 
+function parseSupplementaryError(error) {
+	const parsed = parseErrorResponse(error.response)
+	if (parsed === null || typeof parsed !== 'object') {
+		return parsed
+	}
+
+	const status = error.response.status
+	return {
+		...parsed,
+		httpStatus: status,
+		// Capacity rejection is expected load shedding for supplementary
+		// metadata. Preserve that distinction after parseErrorResponse()
+		// removes the Axios response wrapper so the component can stop the
+		// rest of the same enrichment chain without logging a false error.
+		...([425, 429].includes(status) ? { isTransient: true } : {}),
+	}
+}
+
 export async function fetchMessageItineraries(id, { signal } = {}) {
 	const url = generateUrl('/apps/mail/api/messages/{id}/itineraries', {
 		id,
@@ -478,7 +502,7 @@ export async function fetchMessageItineraries(id, { signal } = {}) {
 			throw error
 		}
 
-		throw parseErrorResponse(error.response)
+		throw parseSupplementaryError(error)
 	}
 }
 
@@ -507,7 +531,7 @@ export async function fetchMessageDkim(id, { signal } = {}) {
 			throw error
 		}
 
-		throw parseErrorResponse(error.response)
+		throw parseSupplementaryError(error)
 	}
 }
 

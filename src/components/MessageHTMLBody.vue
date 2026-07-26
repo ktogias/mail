@@ -62,6 +62,7 @@ import { needsTranslation } from '../service/AiIntergrationsService.js'
 import { trustSender } from '../service/TrustedSenderService.js'
 
 const scout = new PrintScout()
+const MESSAGE_HTML_READY = 'nextcloud-mail:message-html-ready'
 
 export default {
 	name: 'MessageHTMLBody',
@@ -116,6 +117,7 @@ export default {
 	beforeMount() {
 		scout.on('beforeprint', this.onBeforePrint)
 		scout.on('afterprint', this.onAfterPrint)
+		window.addEventListener('message', this.onMessageFrameReady)
 	},
 
 	async mounted() {
@@ -134,6 +136,7 @@ export default {
 		// against the installed Vue source, not just empirically.
 		scout.off('beforeprint', this.onBeforePrint)
 		scout.off('afterprint', this.onAfterPrint)
+		window.removeEventListener('message', this.onMessageFrameReady)
 		this.resizeObserver?.disconnect()
 	},
 
@@ -143,8 +146,38 @@ export default {
 			return iframe.contentDocument || iframe.contentWindow.document
 		},
 
+		onMessageFrameReady(event) {
+			const iframe = this.$refs.iframe
+			if (
+				event.origin !== window.location.origin
+				|| event.source !== iframe?.contentWindow
+				|| event.data?.type !== MESSAGE_HTML_READY
+			) {
+				return
+			}
+
+			this.prepareMessageFrame()
+		},
+
 		onMessageFrameLoad() {
+			// Fallback for cached/legacy responses that did not execute the
+			// DOMContentLoaded notifier. prepareMessageFrame() is document-
+			// idempotent, so the final native load after progressive image
+			// hydration cannot emit a second visible-content event.
+			this.prepareMessageFrame()
+		},
+
+		prepareMessageFrame() {
 			const iframeDoc = this.getIframeDoc()
+			if (
+				!iframeDoc?.body
+				|| iframeDoc.location?.href === 'about:blank'
+				|| this.preparedIframeDocument === iframeDoc
+			) {
+				return
+			}
+			this.preparedIframeDocument = iframeDoc
+
 			this.hasBlockedContent
 				= iframeDoc.querySelectorAll('[data-original-src]').length > 0
 					|| iframeDoc.querySelectorAll('[data-original-style]').length > 0

@@ -32,6 +32,7 @@ use OCA\Mail\Service\AccountService;
 use OCA\Mail\Service\AiIntegrations\AiIntegrationsService;
 use OCA\Mail\Service\ClientOperationService;
 use OCA\Mail\Service\DelegationService;
+use OCA\Mail\Service\InlineAttachmentCache;
 use OCA\Mail\Service\ItineraryService;
 use OCA\Mail\Service\SmimeService;
 use OCA\Mail\Service\SnoozeService;
@@ -95,6 +96,7 @@ class MessagesController extends Controller {
 		private AiIntegrationsService $aiIntegrationService,
 		private ICacheFactory $cacheFactory,
 		private DelegationService $delegationService,
+		private InlineAttachmentCache $inlineAttachmentCache,
 		private ?ClientOperationService $clientOperationService = null,
 	) {
 		parent::__construct($appName, $request);
@@ -332,6 +334,7 @@ class MessagesController extends Controller {
 	 * @param int $id
 	 * @return JSONResponse
 	 */
+	#[TrapError]
 	public function getDkim(int $id): JSONResponse {
 		if ($this->userId === null) {
 			return new JSONResponse([], Http::STATUS_UNAUTHORIZED);
@@ -670,8 +673,13 @@ class MessagesController extends Controller {
 			// its own if getBody() hasn't already been fetched for this
 			// message yet.
 			$cached = $cacheInstance->get($imapMessageCacheKey);
-			if (is_array($cached) && array_key_exists('body', $cached)) {
-				$html = $cached['body'];
+			$cachedBody = is_array($cached) ? ($cached['body'] ?? null) : null;
+			if (is_string($cachedBody)) {
+				$html = $cachedBody;
+				$cachedInlineAttachments = $cached['inlineAttachments'] ?? [];
+				$inlineAttachments = is_array($cachedInlineAttachments)
+					? $cachedInlineAttachments
+					: [];
 			} else {
 				$client = $this->clientFactory->getClient($account, workClass: ImapWorkClass::ACTIVE_CONTENT);
 				try {
@@ -682,13 +690,31 @@ class MessagesController extends Controller {
 						$message->getUid(),
 						true
 					);
-					$html = $imapMessage->getHtmlBody($id);
+					$fullMessage = $imapMessage->getFullMessage($id);
+					$fullMessageBody = $fullMessage['body'] ?? null;
+					$html = is_string($fullMessageBody)
+						? $fullMessageBody
+						: $imapMessage->getHtmlBody($id);
+					$fullMessageInlineAttachments = $fullMessage['inlineAttachments'] ?? [];
+					$inlineAttachments = is_array($fullMessageInlineAttachments)
+						? $fullMessageInlineAttachments
+						: [];
 					if ($imapMessage->hasHtmlMessage()) {
-						$cacheInstance->set($imapMessageCacheKey, $imapMessage->getFullMessage($id), self::BODY_CACHE_TTL);
+						$cacheInstance->set($imapMessageCacheKey, $fullMessage, self::BODY_CACHE_TTL);
 					}
 				} finally {
 					$client->logout();
 				}
+			}
+
+			if (!$plain) {
+				// Convert every eligible inline <img> into an inert data
+				// marker. htmlresponse.js hydrates all markers through one
+				// bounded JSON bundle request. This response-time transform
+				// also upgrades already-cached .19 HTML, so the 24-hour body
+				// cache does not preserve the old one-request-per-image
+				// waterfall after deployment.
+				$html = $this->deferInlineAttachmentImages($id, $html, $inlineAttachments);
 			}
 
 			$htmlResponse = $plain
@@ -704,7 +730,9 @@ class MessagesController extends Controller {
 			// Harden the default security policy
 			$policy = new ContentSecurityPolicy();
 			$policy->disallowScriptDomain('\'self\'');
-			$policy->disallowConnectDomain('\'self\'');
+			if ($plain) {
+				$policy->disallowConnectDomain('\'self\'');
+			}
 			$policy->disallowFontDomain('\'self\'');
 			$policy->disallowMediaDomain('\'self\'');
 			$htmlResponse->setContentSecurityPolicy($policy);
@@ -722,6 +750,94 @@ class MessagesController extends Controller {
 				Http::STATUS_INTERNAL_SERVER_ERROR
 			);
 		}
+	}
+
+	/**
+	 * @param array<array-key, mixed> $inlineAttachments
+	 */
+	private function deferInlineAttachmentImages(
+		int $messageId,
+		string $html,
+		array $inlineAttachments,
+	): string {
+		$candidateIds = $this->inlineAttachmentCache->getCandidateIds($inlineAttachments);
+		if ($candidateIds === []) {
+			return $html;
+		}
+
+		$bundleUrl = $this->urlGenerator->linkToRouteAbsolute(
+			'mail.messages.getInlineAttachments',
+			['id' => $messageId],
+		);
+		$encodedBundleUrl = htmlspecialchars($bundleUrl, ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+
+		foreach ($candidateIds as $attachmentId) {
+			$attachmentUrl = $this->urlGenerator->linkToRouteAbsolute(
+				'mail.messages.downloadAttachment',
+				[
+					'id' => $messageId,
+					'attachmentId' => $attachmentId,
+				],
+			);
+			$encodedAttachmentUrl = htmlspecialchars(
+				$attachmentUrl,
+				ENT_QUOTES | ENT_SUBSTITUTE,
+				'UTF-8',
+			);
+			$encodedAttachmentId = htmlspecialchars(
+				$attachmentId,
+				ENT_QUOTES | ENT_SUBSTITUTE,
+				'UTF-8',
+			);
+
+			// HTMLPurifier emits normalized double-quoted attributes. Remove
+			// src entirely so the parser cannot start thirteen HTTP requests
+			// before the trusted iframe helper has a chance to coalesce them.
+			$html = str_replace(
+				'src="' . $encodedAttachmentUrl . '"',
+				'data-mail-inline-id="' . $encodedAttachmentId . '"'
+					. ' data-mail-inline-bundle="' . $encodedBundleUrl . '"'
+					. ' data-mail-inline-fallback="' . $encodedAttachmentUrl . '"',
+				$html,
+			);
+		}
+
+		return $html;
+	}
+
+	/**
+	 * Return every eligible small inline image in one bounded response.
+	 *
+	 * @NoAdminRequired
+	 * @NoCSRFRequired
+	 */
+	#[TrapError]
+	public function getInlineAttachments(int $id): JSONResponse {
+		if ($this->userId === null) {
+			return new JSONResponse([], Http::STATUS_UNAUTHORIZED);
+		}
+
+		try {
+			$effectiveUserId = $this->delegationService->resolveMessageUserId($id, $this->userId);
+			$message = $this->mailManager->getMessage($effectiveUserId, $id);
+			$mailbox = $this->mailManager->getMailbox($effectiveUserId, $message->getMailboxId());
+			$account = $this->accountService->find($effectiveUserId, $mailbox->getAccountId());
+		} catch (DoesNotExistException) {
+			return new JSONResponse([], Http::STATUS_FORBIDDEN);
+		}
+
+		$parts = [];
+		foreach ($this->inlineAttachmentCache->getBundle($account, $mailbox, $message, $id) as $attachmentId => $attachment) {
+			$parts[$attachmentId] = [
+				'mime' => $attachment->getType(),
+				'content' => base64_encode($attachment->getContent()),
+			];
+		}
+
+		$response = new JSONResponse(['parts' => $parts]);
+		$response->addHeader('X-Mail-Inline-Part-Count', (string)count($parts));
+		$response->cacheFor(InlineAttachmentCache::getBrowserCacheTtl(), false, true);
+		return $response;
 	}
 
 	/**
@@ -750,7 +866,16 @@ class MessagesController extends Controller {
 			return new JSONResponse([], Http::STATUS_FORBIDDEN);
 		}
 
-		$attachment = $this->mailManager->getMailAttachment(
+		$attachment = $this->inlineAttachmentCache->get(
+			$account,
+			$mailbox,
+			$message,
+			$id,
+			$attachmentId,
+		);
+		$fromInlineBundle = $attachment !== null;
+
+		$attachment ??= $this->mailManager->getMailAttachment(
 			$account,
 			$mailbox,
 			$message,
@@ -760,19 +885,29 @@ class MessagesController extends Controller {
 		// Body party and embedded messages do not have a name
 		$attachmentName = $attachment->getName();
 		if ($attachmentName === null) {
-			return new AttachmentDownloadResponse(
+			$response = new AttachmentDownloadResponse(
 				$attachment->getContent(),
 				$this->l10n->t('Embedded message %s', [
 					$attachmentId,
 				]) . '.eml',
 				$attachment->getType()
 			);
+		} else {
+			$response = new AttachmentDownloadResponse(
+				$attachment->getContent(),
+				$attachmentName,
+				$attachment->getType()
+			);
 		}
-		return new AttachmentDownloadResponse(
-			$attachment->getContent(),
-			$attachmentName,
-			$attachment->getType()
-		);
+
+		if ($fromInlineBundle) {
+			// Private browser caching removes even the cheap HTTP/Redis work
+			// on a reopen while never making authenticated mail content
+			// publicly cacheable.
+			$response->cacheFor(InlineAttachmentCache::getBrowserCacheTtl(), false, true);
+		}
+
+		return $response;
 	}
 
 	/**
