@@ -20,6 +20,7 @@ use OCA\Mail\Contracts\IMailTransmission;
 use OCA\Mail\Contracts\ITrustedSenderService;
 use OCA\Mail\Contracts\IUserPreferences;
 use OCA\Mail\Db\Message;
+use OCA\Mail\Db\Tag;
 use OCA\Mail\Exception\ClientException;
 use OCA\Mail\Exception\ServiceException;
 use OCA\Mail\Http\AttachmentDownloadResponse;
@@ -1081,9 +1082,29 @@ class MessagesController extends Controller {
 				// Re-fetch: only the server knows whether another message in
 				// this thread remains unseen.
 				$updated = $this->mailManager->getMessage($effectiveUserId, $id);
-				return [
+				$response = [
 					'hasUnseenInThread' => $updated->getHasUnseenInThread(),
 				];
+
+				// flagMessages() now maintains the importance tag row itself,
+				// so this response carries the tag the browser used to fetch
+				// with a second request. A session that has not seen the tag
+				// yet still needs its id to update the badge.
+				if (array_key_exists(Tag::LABEL_IMPORTANT, $flags)) {
+					try {
+						$response['importantTag'] = $this->mailManager->getTagByImapLabel(
+							Tag::LABEL_IMPORTANT,
+							$effectiveUserId,
+						);
+					} catch (ClientException $e) {
+						// No importance tag for this user. The flag itself
+						// still landed and already drives the badge and the
+						// Priority sections; nothing here should fail.
+						$this->logger->warning('Importance flag written without a tag to report back', ['exception' => $e]);
+					}
+				}
+
+				return $response;
 			},
 		);
 	}
@@ -1165,7 +1186,22 @@ class MessagesController extends Controller {
 					'messageCount' => count($ids),
 					'flags' => $flagsSummary,
 				]);
-				return ['messages' => $response];
+
+				// Same contract as setFlags(): the flag write maintains the
+				// importance tag row, so report the tag back rather than
+				// making the browser fetch it separately.
+				$result = ['messages' => $response];
+				if (array_key_exists(Tag::LABEL_IMPORTANT, $flags)) {
+					try {
+						$result['importantTag'] = $this->mailManager->getTagByImapLabel(
+							Tag::LABEL_IMPORTANT,
+							$this->userId,
+						);
+					} catch (ClientException $e) {
+						$this->logger->warning('Importance flags written without a tag to report back', ['exception' => $e]);
+					}
+				}
+				return $result;
 			},
 		);
 	}

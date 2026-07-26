@@ -493,6 +493,20 @@ class MailManager implements IMailManager {
 			$client->logout();
 		}
 
+		// The importance TAG is the same fact as flag_important stored a
+		// second time, and the IMAP side of it ($label1 plus the RFC 8457
+		// $important mirror) was already written above with THIS request's
+		// client. Only the local mail_message_tags row was still missing,
+		// and the client used to obtain it with a second HTTP request to
+		// the tag endpoint -- which opened a second IMAP connection of its
+		// own to rewrite keywords that were already correct.
+		//
+		// Measured live on 2026-07-26: each mutation is 2.6-5.6s at 10-16%
+		// CPU, i.e. almost entirely IMAP connect/auth, so one user click on
+		// "unmark important" cost roughly seven seconds across two
+		// connections. Maintaining the row here makes it one.
+		$this->syncImportanceTagRows($account, $mb, $uids, $flags);
+
 		foreach ($flags as $flag => $value) {
 			foreach ($uids as $uid) {
 				$this->eventDispatcher->dispatch(
@@ -542,6 +556,49 @@ class MailManager implements IMailManager {
 			}
 		} else {
 			foreach ($messages as $message) {
+				$this->tagMapper->untagMessage($tag, $message->getMessageId());
+			}
+		}
+	}
+
+	/**
+	 * Keep mail_message_tags in step with an importance flag write.
+	 *
+	 * Deliberately DB-only: flagMessages() has already written both IMAP
+	 * keywords with its own client, so re-running the tag endpoint's IMAP
+	 * work here would just pay a second connect/auth for a no-op.
+	 *
+	 * Best effort by design. A missing importance tag (a user whose default
+	 * tags were never created) must not fail the flag write the user
+	 * actually asked for -- the flag alone still drives the badge and the
+	 * Priority sections, and the repair step that creates default tags will
+	 * reconcile the row later.
+	 *
+	 * @param int[] $uids
+	 * @param array<string, mixed> $flags
+	 */
+	private function syncImportanceTagRows(Account $account, Mailbox $mailbox, array $uids, array $flags): void {
+		$importanceValue = null;
+		foreach ($flags as $flag => $value) {
+			if ($flag === Tag::LABEL_IMPORTANT) {
+				$importanceValue = filter_var($value, FILTER_VALIDATE_BOOLEAN);
+			}
+		}
+		if ($importanceValue === null) {
+			return;
+		}
+
+		try {
+			$tag = $this->tagMapper->getTagByImapLabel(Tag::LABEL_IMPORTANT, $account->getUserId());
+		} catch (DoesNotExistException $e) {
+			$this->logger->warning('No importance tag for this user; flag written without the tag row', ['exception' => $e]);
+			return;
+		}
+
+		foreach ($this->dbMessageMapper->findByUids($mailbox, $uids) as $message) {
+			if ($importanceValue) {
+				$this->tagMapper->tagMessage($tag, $message->getMessageId(), $account->getUserId());
+			} else {
 				$this->tagMapper->untagMessage($tag, $message->getMessageId());
 			}
 		}

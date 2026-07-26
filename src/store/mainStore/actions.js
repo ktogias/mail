@@ -4026,18 +4026,25 @@ export default function mainStoreActions() {
 				reclassify()
 
 				try {
-					const [, tag] = await Promise.all([
-						setEnvelopeFlags(envelope.databaseId, {
-							[IMPORTANT_TAG_LABEL]: important,
-						}),
-						important
-							? setEnvelopeTag(envelope.databaseId, IMPORTANT_TAG_LABEL)
-							: removeEnvelopeTag(envelope.databaseId, IMPORTANT_TAG_LABEL),
-					])
-					if (!this.getTag(tag.id)) {
+					// One request, not two. The flags endpoint writes both
+					// IMAP keywords AND maintains the tag row now, and reports
+					// the tag back, so the separate tag call is gone.
+					//
+					// That second call was never cheap: measured live on
+					// 2026-07-26, every mutation costs 2.6-5.6s at 10-16% CPU
+					// -- almost entirely IMAP connect/auth, paid once per
+					// request -- and since .22 serializes quick mutations, the
+					// two halves of one click ran back to back for roughly
+					// seven seconds. The tag endpoint's own IMAP work was
+					// redundant anyway: it rewrote keywords the flag write had
+					// just set correctly.
+					const { importantTag: tag } = await setEnvelopeFlags(envelope.databaseId, {
+						[IMPORTANT_TAG_LABEL]: important,
+					}) ?? {}
+					if (tag && !this.getTag(tag.id)) {
 						this.addTagMutation({ tag })
 					}
-					if (!optimisticTagMutationApplied) {
+					if (!optimisticTagMutationApplied && tag) {
 						// Cold-start fallback: the tag wasn't known locally
 						// yet when this call started, so apply it now that
 						// the server confirmed its id.

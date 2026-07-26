@@ -4682,28 +4682,30 @@ describe('Vuex store actions', () => {
 
 		it('toggleEnvelopeImportant on a not-yet-important message sets flag_important and adds the tag', async () => {
 			const envelope = seedEnvelope(false, [])
-			MessageService.setEnvelopeFlags.mockResolvedValue({})
-			MessageService.setEnvelopeTag.mockResolvedValue(importantTag)
+			MessageService.setEnvelopeFlags.mockResolvedValue({ importantTag })
 
 			await store.toggleEnvelopeImportant(envelope)
 
 			expect(envelope.flags.important).toBe(true)
 			expect(MessageService.setEnvelopeFlags).toHaveBeenCalledWith(42, { $label1: true })
-			expect(MessageService.setEnvelopeTag).toHaveBeenCalledWith(42, '$label1')
+			// One request, not two: the flags endpoint maintains the tag row
+			// and reports the tag back. Each mutation costs a full IMAP
+			// connect/auth (2.6-5.6s measured live), so the second call was
+			// most of the wall-clock cost of one click.
+			expect(MessageService.setEnvelopeTag).not.toHaveBeenCalled()
 			expect(envelope.tags).toContain(importantTag.id)
 		})
 
 		it('toggleEnvelopeImportant on an already-important message clears flag_important and removes the tag', async () => {
 			store.tags[importantTag.id] = importantTag
 			const envelope = seedEnvelope(true, [importantTag.id])
-			MessageService.setEnvelopeFlags.mockResolvedValue({})
-			MessageService.removeEnvelopeTag.mockResolvedValue(importantTag)
+			MessageService.setEnvelopeFlags.mockResolvedValue({ importantTag })
 
 			await store.toggleEnvelopeImportant(envelope)
 
 			expect(envelope.flags.important).toBe(false)
 			expect(MessageService.setEnvelopeFlags).toHaveBeenCalledWith(42, { $label1: false })
-			expect(MessageService.removeEnvelopeTag).toHaveBeenCalledWith(42, '$label1')
+			expect(MessageService.removeEnvelopeTag).not.toHaveBeenCalled()
 			expect(envelope.tags).not.toContain(importantTag.id)
 		})
 
@@ -4719,14 +4721,13 @@ describe('Vuex store actions', () => {
 
 		it('markEnvelopeImportantOrUnimportant({ addTag: true }) sets flag_important and adds the tag together', async () => {
 			const envelope = seedEnvelope(false, [])
-			MessageService.setEnvelopeFlags.mockResolvedValue({})
-			MessageService.setEnvelopeTag.mockResolvedValue(importantTag)
+			MessageService.setEnvelopeFlags.mockResolvedValue({ importantTag })
 
 			await store.markEnvelopeImportantOrUnimportant({ envelope, addTag: true })
 
 			expect(envelope.flags.important).toBe(true)
 			expect(MessageService.setEnvelopeFlags).toHaveBeenCalledWith(42, { $label1: true })
-			expect(MessageService.setEnvelopeTag).toHaveBeenCalledWith(42, '$label1')
+			expect(MessageService.setEnvelopeTag).not.toHaveBeenCalled()
 		})
 
 		it('reverts the optimistic flag_important change if setEnvelopeFlags fails', async () => {

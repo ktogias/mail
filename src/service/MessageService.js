@@ -282,6 +282,91 @@ export async function clearCache(accountId, id) {
 	}
 }
 
+// Flag mutations are already serialized app-wide by
+// envelopeFlagMutationLimit, so anything the user does while one is in
+// flight simply waits. Each one costs a full IMAP connect/auth -- measured
+// live on 2026-07-26 at 2.6-5.6s with only 10-16% CPU -- so a run of
+// per-message clicks turned into minutes of queue: eight messages meant
+// eight round trips, back to back.
+//
+// Requests that are still waiting for that single slot have not been sent
+// yet, so identical flag writes can still be merged into one batch. The
+// group stays open only until the limiter admits it, which is exactly the
+// window in which merging is free: no timer, no added latency for the
+// first click, and a lone mutation still takes the single-message
+// endpoint unchanged.
+const FLAG_MUTATION_COALESCE_LIMIT = 50
+const pendingFlagGroups = new Map()
+
+function flagsSignature(flags) {
+	return JSON.stringify(Object.keys(flags).sort().map((key) => [key, flags[key]]))
+}
+
+function createFlagGroup(signature, flags) {
+	const ids = []
+	const group = {
+		flags,
+		ids,
+		join(id) {
+			ids.push(id)
+			return group.result.then((data) => {
+				// A batch reports per-message state under `messages`; a
+				// single-message send returns that state at the top level.
+				const perMessage = data?.messages?.[String(id)] ?? (ids.length === 1 ? data : undefined)
+				return {
+					...perMessage,
+					...(data?.importantTag ? { importantTag: data.importantTag } : {}),
+				}
+			})
+		},
+	}
+
+	group.result = envelopeFlagMutationLimit(async () => {
+		// Admitted: stop accepting joiners, so a mutation started from here
+		// on opens the next group instead of mutating this payload.
+		if (pendingFlagGroups.get(signature) === group) {
+			pendingFlagGroups.delete(signature)
+		}
+		const batchedIds = ids.slice(0, FLAG_MUTATION_COALESCE_LIMIT)
+
+		if (batchedIds.length === 1) {
+			const url = generateUrl('/apps/mail/api/messages/{id}/flags', {
+				id: batchedIds[0],
+			})
+			return executeDurableMutation({
+				type: 'set-flags',
+				payload: { id: batchedIds[0], flags },
+				send: async (operationId) => {
+					const { data } = await axios.put(url, {
+						flags,
+						operationId,
+					}, {
+						mailWorkClass: WorkClass.QUICK_MUTATION,
+					})
+					return data
+				},
+			})
+		}
+
+		return executeDurableMutation({
+			type: 'set-flags-batch',
+			payload: { ids: batchedIds, flags },
+			send: async (operationId) => {
+				const { data } = await axios.put(generateUrl('/apps/mail/api/messages/flags'), {
+					ids: batchedIds,
+					flags,
+					operationId,
+				}, {
+					mailWorkClass: WorkClass.QUICK_MUTATION,
+				})
+				return data
+			},
+		})
+	})
+
+	return group
+}
+
 /**
  * Set flags for envelope
  *
@@ -290,23 +375,17 @@ export async function clearCache(accountId, id) {
  * @return {Promise<{hasUnseenInThread: boolean}>}
  */
 export async function setEnvelopeFlags(id, flags) {
-	const url = generateUrl('/apps/mail/api/messages/{id}/flags', {
-		id,
-	})
+	const signature = flagsSignature(flags)
+	let group = pendingFlagGroups.get(signature)
+	if (!group || group.ids.length >= FLAG_MUTATION_COALESCE_LIMIT) {
+		group = createFlagGroup(signature, flags)
+		pendingFlagGroups.set(signature, group)
+	}
+	return group.join(id)
+}
 
-	return envelopeFlagMutationLimit(() => executeDurableMutation({
-		type: 'set-flags',
-		payload: { id, flags },
-		send: async (operationId) => {
-			const { data } = await axios.put(url, {
-				flags,
-				operationId,
-			}, {
-				mailWorkClass: WorkClass.QUICK_MUTATION,
-			})
-			return data
-		},
-	}))
+export function resetFlagMutationCoalescingForTests() {
+	pendingFlagGroups.clear()
 }
 
 export async function setEnvelopeFlagsBatch(ids, flags) {

@@ -438,6 +438,8 @@ describe('service/MessageService test suite', () => {
 		}
 
 		it('serializes flag writes so thread-wide updates cannot exhaust the reserved IMAP slot', async () => {
+			// Different flag payloads cannot be merged, so they must still
+			// take the single slot one at a time.
 			generateUrl.mockReturnValue('/flags')
 			const first = deferred()
 			const second = deferred()
@@ -446,7 +448,7 @@ describe('service/MessageService test suite', () => {
 				.mockImplementationOnce(() => second.promise)
 
 			const firstWrite = MessageService.setEnvelopeFlags(1, { seen: true })
-			const secondWrite = MessageService.setEnvelopeFlags(2, { seen: true })
+			const secondWrite = MessageService.setEnvelopeFlags(2, { flagged: true })
 			await flush()
 
 			expect(axios.put).toHaveBeenCalledTimes(1)
@@ -459,6 +461,59 @@ describe('service/MessageService test suite', () => {
 			await expect(Promise.all([firstWrite, secondWrite])).resolves.toEqual([
 				{ hasUnseenInThread: true },
 				{ hasUnseenInThread: false },
+			])
+		})
+
+		it('merges identical flag writes that are still waiting for the single slot', async () => {
+			// The queue is the free place to merge: those requests have not
+			// been sent yet. Eight per-message clicks used to mean eight IMAP
+			// connect/auth round trips of 2.6-5.6s each (measured live
+			// 2026-07-26); they now cost one.
+			generateUrl.mockReturnValue('/flags')
+			const first = deferred()
+			const batch = deferred()
+			axios.put
+				.mockImplementationOnce(() => first.promise)
+				.mockImplementationOnce(() => batch.promise)
+
+			const blocking = MessageService.setEnvelopeFlags(1, { $label1: false })
+			await flush()
+			expect(axios.put).toHaveBeenCalledTimes(1)
+
+			// These three arrive while the first one holds the slot.
+			const queued = [
+				MessageService.setEnvelopeFlags(2, { $label1: false }),
+				MessageService.setEnvelopeFlags(3, { $label1: false }),
+				MessageService.setEnvelopeFlags(4, { $label1: false }),
+			]
+			await flush()
+
+			first.resolve({ data: { hasUnseenInThread: false } })
+			await flush()
+
+			// One extra request for all three, not three.
+			expect(axios.put).toHaveBeenCalledTimes(2)
+			expect(axios.put.mock.calls[1][1]).toEqual(expect.objectContaining({
+				ids: [2, 3, 4],
+				flags: { $label1: false },
+			}))
+
+			batch.resolve({
+				data: {
+					messages: {
+						2: { hasUnseenInThread: false },
+						3: { hasUnseenInThread: true },
+						4: { hasUnseenInThread: false },
+					},
+					importantTag: { id: 909, imapLabel: '$label1' },
+				},
+			})
+
+			await expect(blocking).resolves.toEqual({ hasUnseenInThread: false })
+			await expect(Promise.all(queued)).resolves.toEqual([
+				{ hasUnseenInThread: false, importantTag: { id: 909, imapLabel: '$label1' } },
+				{ hasUnseenInThread: true, importantTag: { id: 909, imapLabel: '$label1' } },
+				{ hasUnseenInThread: false, importantTag: { id: 909, imapLabel: '$label1' } },
 			])
 		})
 

@@ -297,6 +297,9 @@ class MailManagerTest extends TestCase {
 	public function testSetCustomFlagNoIMAPCapabilities(): void {
 		$client = $this->createStub(Horde_Imap_Client_Socket::class);
 		$account = $this->createStub(Account::class);
+		$account->method('getUserId')->willReturn('user');
+		$this->tagMapper->method('getTagByImapLabel')
+			->willThrowException(new DoesNotExistException('no importance tag'));
 
 		$this->imapClientFactory->expects($this->any())
 			->method('getClient')
@@ -313,6 +316,9 @@ class MailManagerTest extends TestCase {
 	public function testSetCustomFlagWithIMAPCapabilities(): void {
 		$client = $this->createMock(Horde_Imap_Client_Socket::class);
 		$account = $this->createStub(Account::class);
+		$account->method('getUserId')->willReturn('user');
+		$this->tagMapper->method('getTagByImapLabel')
+			->willThrowException(new DoesNotExistException('no importance tag'));
 
 		$this->imapClientFactory->expects($this->any())
 			->method('getClient')
@@ -335,9 +341,89 @@ class MailManagerTest extends TestCase {
 		self::assertEquals([Tag::LABEL_IMPORTANT, '$important'], $addedFlags);
 	}
 
+	/**
+	 * The importance flag write now maintains mail_message_tags itself, so
+	 * the browser no longer needs a second HTTP request to the tag endpoint
+	 * for the same click.
+	 *
+	 * That second request was not free: measured live on 2026-07-26, every
+	 * mutation costs 2.6-5.6s at 10-16% CPU -- almost entirely IMAP
+	 * connect/auth -- and the tag endpoint opened a connection of its own to
+	 * rewrite keywords this write had already set correctly.
+	 */
+	public function testImportanceFlagWriteMaintainsTheTagRowWithoutASecondImapConnection(): void {
+		$client = $this->createMock(Horde_Imap_Client_Socket::class);
+		$account = $this->createStub(Account::class);
+		$account->method('getUserId')->willReturn('user');
+		$tag = new Tag();
+		$tag->setImapLabel(Tag::LABEL_IMPORTANT);
+		$message = new Message();
+		$message->setUid(123);
+		$message->setMessageId('<abc@example.com>');
+
+		// Exactly one client for the whole operation.
+		$this->imapClientFactory->expects($this->once())
+			->method('getClient')
+			->willReturn($client);
+		$client->method('status')->willReturn(['permflags' => ['11' => "\*"]]);
+		$this->tagMapper->method('getTagByImapLabel')->willReturn($tag);
+		$this->dbMessageMapper->method('findByUids')->willReturn([$message]);
+
+		$this->tagMapper->expects($this->once())
+			->method('tagMessage')
+			->with($tag, '<abc@example.com>', 'user');
+		$this->tagMapper->expects($this->never())
+			->method('untagMessage');
+
+		$this->manager->flagMessage($account, 'INBOX', 123, Tag::LABEL_IMPORTANT, true);
+	}
+
+	public function testImportanceRemovalUntagsTheMessage(): void {
+		$client = $this->createMock(Horde_Imap_Client_Socket::class);
+		$account = $this->createStub(Account::class);
+		$account->method('getUserId')->willReturn('user');
+		$tag = new Tag();
+		$tag->setImapLabel(Tag::LABEL_IMPORTANT);
+		$message = new Message();
+		$message->setUid(123);
+		$message->setMessageId('<abc@example.com>');
+
+		$this->imapClientFactory->method('getClient')->willReturn($client);
+		$client->method('status')->willReturn(['permflags' => ['11' => "\*"]]);
+		$this->tagMapper->method('getTagByImapLabel')->willReturn($tag);
+		$this->dbMessageMapper->method('findByUids')->willReturn([$message]);
+
+		$this->tagMapper->expects($this->once())
+			->method('untagMessage')
+			->with($tag, '<abc@example.com>');
+
+		$this->manager->flagMessage($account, 'INBOX', 123, Tag::LABEL_IMPORTANT, false);
+	}
+
+	/**
+	 * An ordinary flag must not touch tags at all.
+	 */
+	public function testSeenFlagWriteLeavesTagsAlone(): void {
+		$client = $this->createMock(Horde_Imap_Client_Socket::class);
+		$account = $this->createStub(Account::class);
+		$account->method('getUserId')->willReturn('user');
+
+		$this->imapClientFactory->method('getClient')->willReturn($client);
+		$client->method('status')->willReturn(['permflags' => ['11' => "\*"]]);
+
+		$this->tagMapper->expects($this->never())->method('getTagByImapLabel');
+		$this->tagMapper->expects($this->never())->method('tagMessage');
+		$this->tagMapper->expects($this->never())->method('untagMessage');
+
+		$this->manager->flagMessage($account, 'INBOX', 123, 'seen', true);
+	}
+
 	public function testUnsetCustomFlagWithIMAPCapabilities(): void {
 		$client = $this->createMock(Horde_Imap_Client_Socket::class);
 		$account = $this->createStub(Account::class);
+		$account->method('getUserId')->willReturn('user');
+		$this->tagMapper->method('getTagByImapLabel')
+			->willThrowException(new DoesNotExistException('no importance tag'));
 
 		$this->imapClientFactory->expects($this->any())
 			->method('getClient')

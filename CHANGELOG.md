@@ -1,3 +1,21 @@
+## 5.11.0-dev.0.ktogias.24 (2026-07-27, resource-constrained deployment fork)
+
+### Mutation Round Trips
+
+* maintain the importance tag row inside the flag write, so marking a message important or unimportant is one request instead of two — the tag endpoint opened a second IMAP connection only to rewrite keywords the flag write had already set correctly
+* report the importance tag back on both the single and batch flag responses, so a session that has not seen the tag yet still gets its id without a separate fetch
+* merge identical flag writes that are still queued behind the single in-flight mutation into one batch request, since queued requests have not been sent yet — no timer and no added latency for the first action
+
+### Section Error Recovery
+
+* stop treating a request the coordinator deliberately cancelled — offline, connectivity recovering, speculative work shed, stale request reclaimed — as a folder that could not be opened
+* retry a failed section when the Priority view is refreshed, so a transient failure heals on the next resume or pull-to-refresh instead of persisting until a full page reload
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.23 (2026-07-26, resource-constrained deployment fork)
 
 ### Flag Write Protection
