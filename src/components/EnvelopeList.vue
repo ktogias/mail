@@ -456,7 +456,7 @@ export default {
 				logger.error('could not mark selected messages as read', { error })
 				showError(t('mail', 'Could not update read status for the selected messages'))
 			})
-			this.unselectAll()
+			this.retainSelectionOfVisible()
 		},
 
 		markSelectedUnread() {
@@ -468,7 +468,7 @@ export default {
 				logger.error('could not mark selected messages as unread', { error })
 				showError(t('mail', 'Could not update read status for the selected messages'))
 			})
-			this.unselectAll()
+			this.retainSelectionOfVisible()
 		},
 
 		markSelectionImportant() {
@@ -485,7 +485,7 @@ export default {
 			// no auto-scroll to the new position: it would yank the viewport
 			// away from a batch-marking flow (and is a known anti-pattern).
 			showSuccess(t('mail', 'Marked as important'))
-			this.unselectAll()
+			this.retainSelectionOfVisible()
 		},
 
 		markSelectionUnimportant() {
@@ -496,7 +496,7 @@ export default {
 				})
 			})
 			showSuccess(t('mail', 'Marked as unimportant'))
-			this.unselectAll()
+			this.retainSelectionOfVisible()
 		},
 
 		// Shared by markSelectionJunk()/markSelectionNotJunk() below: real
@@ -540,7 +540,7 @@ export default {
 				envelopes,
 				n('mail', '{number} message marked as spam', '{number} messages marked as spam', envelopes.length, { number: envelopes.length }),
 			)
-			this.unselectAll()
+			this.retainSelectionOfVisible()
 		},
 
 		async markSelectionNotJunk() {
@@ -549,7 +549,7 @@ export default {
 				envelopes,
 				n('mail', '{number} message marked as not spam', '{number} messages marked as not spam', envelopes.length, { number: envelopes.length }),
 			)
-			this.unselectAll()
+			this.retainSelectionOfVisible()
 		},
 
 		unfavoriteAll() {
@@ -560,7 +560,7 @@ export default {
 				})
 			})
 			showSuccess(t('mail', 'Removed from favorites'))
-			this.unselectAll()
+			this.retainSelectionOfVisible()
 		},
 
 		favoriteAll() {
@@ -571,7 +571,7 @@ export default {
 				})
 			})
 			showSuccess(t('mail', 'Added to favorites'))
-			this.unselectAll()
+			this.retainSelectionOfVisible()
 		},
 
 		async deleteAllSelected() {
@@ -860,6 +860,39 @@ export default {
 				env.flags.selected = false
 			})
 			this.selection = []
+		},
+
+		/**
+		 * Keep the working set after an action that changed the messages
+		 * rather than removing them, dropping only what actually left.
+		 *
+		 * The selection is the user's working set, and marking eight messages
+		 * read is very often the first half of "…and flag them". Clearing it
+		 * meant selecting them all over again for the second action.
+		 *
+		 * The rule this follows is the one every list UI has settled on --
+		 * Gmail, Outlook, Apple Mail, Thunderbird, and every file manager:
+		 * an action that changes an item's PROPERTIES keeps the selection, an
+		 * action that changes list MEMBERSHIP (delete, move) clears it because
+		 * there is nothing left to keep.
+		 *
+		 * Membership can still change as a side effect -- marking read while
+		 * "Unread only" is active, or starring in the Priority Inbox, moves
+		 * rows out of this list -- so those ids are pruned here rather than
+		 * left dangling. Their `selected` flag is cleared too: the flag lives
+		 * on the envelope in the store, not on this list, so a row that leaves
+		 * and later returns would otherwise come back still selected.
+		 */
+		retainSelectionOfVisible() {
+			const visible = new Set(this.sortedEnvelops.map((envelope) => envelope.databaseId))
+			const departed = this.selection.filter((id) => !visible.has(id))
+			this.selection = this.selection.filter((id) => visible.has(id))
+			departed.forEach((id) => {
+				const envelope = this.mainStore.getEnvelope(id)
+				if (envelope?.flags) {
+					envelope.flags.selected = false
+				}
+			})
 		},
 
 		onOpenMoveModal() {

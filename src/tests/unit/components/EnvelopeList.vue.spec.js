@@ -57,7 +57,7 @@ describe('EnvelopeList', () => {
 	}
 
 	describe('optimistic bulk read state', () => {
-		it('sends one optimistic batch before clearing the selection', async () => {
+		it('sends one optimistic batch and keeps the working set', async () => {
 			envelopes[0].flags = { seen: false, hasUnseenInThread: true }
 			envelopes[1].flags = { seen: false, hasUnseenInThread: true }
 			store.setEnvelopesSeen = vi.fn().mockReturnValue(new Promise(() => {}))
@@ -71,6 +71,42 @@ describe('EnvelopeList', () => {
 				envelopes: [envelopes[0], envelopes[1]],
 				seen: true,
 			})
+			// Marking read changes the messages, not which messages are here,
+			// so the selection survives -- "mark these read" is very often the
+			// first half of "...and flag them", and clearing it meant
+			// selecting all of them again for the second action.
+			expect(view.vm.selection).toEqual([1, 2])
+		})
+
+		// Membership CAN still change as a side effect: with "Unread only"
+		// active, the rows that were just marked read leave this list. Those
+		// ids are dropped, and their selected flag with them -- it lives on
+		// the envelope in the store, so a row that leaves and comes back would
+		// otherwise return still selected.
+		it('drops the ids that actually left the list, and their selected flag', async () => {
+			envelopes[0].flags = { seen: false, selected: true }
+			envelopes[1].flags = { seen: false, selected: true }
+			store.setEnvelopesSeen = vi.fn().mockResolvedValue()
+			store.getEnvelope = vi.fn((id) => envelopes.find((envelope) => envelope.databaseId === id))
+			const view = mountEnvelopeList()
+			await view.setData({ selection: [1, 2] })
+
+			// The second message is no longer part of this list.
+			const departed = envelopes[1]
+			await view.setProps({ envelopes: [envelopes[0]] })
+			view.vm.retainSelectionOfVisible()
+
+			expect(view.vm.selection).toEqual([1])
+			expect(departed.flags.selected).toBe(false)
+			expect(envelopes[0].flags.selected).toBe(true)
+		})
+
+		it('still clears the selection when the messages are deleted', async () => {
+			const view = mountEnvelopeList()
+			await view.setData({ selection: [1, 2] })
+
+			view.vm.unselectAll()
+
 			expect(view.vm.selection).toEqual([])
 		})
 	})

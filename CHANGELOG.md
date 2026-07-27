@@ -1,3 +1,16 @@
+## 5.11.0-dev.0.ktogias.45 (2026-07-28, resource-constrained deployment fork)
+
+### Bulk Selection
+
+* keep the selection after a bulk action that changed the messages rather than removing them — mark read/unread, important/unimportant, spam/not spam, favourite/unfavourite. All eight cleared it, so applying a second attribute to the same messages meant selecting every one of them again
+* the rule is the one every list UI has settled on: an action that changes an item's **properties** keeps the selection, an action that changes list **membership** clears it because there is nothing left to keep. Delete, move and forward still clear it
+* prune the ids that genuinely left — marking read while "Unread only" is active, or starring in the Priority Inbox, moves rows out of the list — and clear their `selected` flag with them, since that flag lives on the envelope in the store and a row that left and came back would otherwise return still selected
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.44 (2026-07-28, resource-constrained deployment fork)
 
 ### Priority Counters
