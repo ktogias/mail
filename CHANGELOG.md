@@ -1,3 +1,17 @@
+## 5.11.0-dev.0.ktogias.46 (2026-07-28, resource-constrained deployment fork)
+
+### Priority Sections
+
+* refill a collapsed section when rows leave it, not only when they are deleted — unmarking the first two of three Important messages left the section showing one until the next background tick replaced the whole page, seconds later
+* the refill watches the **list**, not each cause. Reclassification, a message the sync reports vanished and a filter that stopped matching all leave the same hole, and the component that renders the page is the one that knows it is short
+* only collapsed manual-paginate sections: an infinitely scrolled folder still has its next page behind the scroll sentinel, and losing one row out of twenty leaves no visible gap
+* a refill that comes back empty is remembered, so a section that really is short does not buy a wasted round trip on every further removal
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.45 (2026-07-28, resource-constrained deployment fork)
 
 ### Bulk Selection

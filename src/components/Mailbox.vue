@@ -195,6 +195,10 @@ export default {
 			loadMailboxInterval: undefined,
 			expanded: false,
 			endReached: false,
+			// The list length at which a refill last came back empty. Reset
+			// with endReached, for the same reason: a different query has its
+			// own supply of older messages.
+			refillExhaustedAt: -1,
 			loadMoreRequested: false,
 			syncedMailboxes: new Set(),
 			skipListTransition: false,
@@ -358,6 +362,31 @@ export default {
 	},
 
 	watch: {
+		/**
+		 * Top a collapsed section back up when rows leave it.
+		 *
+		 * Deleting already did this, through onDelete(). Nothing else did --
+		 * so unmarking the first two of three Important messages left the
+		 * section showing one until the next background tick replaced the
+		 * whole page, seconds later. Reclassification is not the only cause
+		 * either: a sync can report a message vanished, or a filter can stop
+		 * matching it.
+		 *
+		 * Which is why this watches the LIST rather than hooking each cause.
+		 * The component that renders the page is the one that knows it is
+		 * short, and it does not need to know why.
+		 *
+		 * Only collapsed manual-paginate sections: an infinitely scrolled
+		 * folder still has its next page behind the scroll sentinel, and
+		 * losing one row out of twenty leaves no visible hole.
+		 *
+		 * @param {number} length how many envelopes the list holds now
+		 * @param {number} previousLength how many it held before
+		 */
+		'envelopes.length': function(length, previousLength) {
+			this.refillCollapsedSection(length, previousLength)
+		},
+
 		mailbox() {
 			// endReached remembers "the PREVIOUS query's list had no more
 			// pages" -- switching folders, changing the search query, or
@@ -373,6 +402,7 @@ export default {
 			// though the unfiltered mailbox has plenty more older
 			// messages to load.
 			this.endReached = false
+			this.refillExhaustedAt = -1
 			this.loadEnvelopes()
 				.then(() => {
 					logger.debug(`syncing mailbox ${this.mailbox.databaseId} (${this.query}) after folder change`)
@@ -951,6 +981,33 @@ export default {
 
 		// onDelete(id): Load more message and navigate to other message if needed
 		// id: The id of the message being delete
+		refillCollapsedSection(length, previousLength) {
+			if (length >= previousLength || this.paginate !== 'manual' || this.expanded) {
+				return
+			}
+			if (this.endReached || length >= this.initialPageSize) {
+				return
+			}
+			// A refill that came back with nothing means the section really is
+			// this short; asking again on every further removal would be one
+			// wasted round trip per click.
+			if (length <= this.refillExhaustedAt) {
+				return
+			}
+			const quantity = this.initialPageSize - length
+			this.mainStore.scheduleEnvelopeRefill({
+				mailboxId: this.mailbox.databaseId,
+				query: this.searchQuery,
+				quantity,
+			}).then((envelopes) => {
+				if (!envelopes || envelopes.length === 0) {
+					this.refillExhaustedAt = length
+				}
+			}).catch((error) => {
+				logger.debug('deferred section refill failed', { error })
+			})
+		},
+
 		onDelete(id) {
 			// Several deletes in one gesture used to issue one independent
 			// cross-account `limit=1` fan-out each. Coalesce a short burst into

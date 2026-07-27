@@ -1357,4 +1357,71 @@ describe('Mailbox', () => {
 			expect(folder.vm.skeletonLines).toBe(20)
 		})
 	})
+
+	// Deleting already topped a short section back up, through onDelete().
+	// Nothing else did -- so unmarking the first two of three Important
+	// messages left the section showing one until the next background tick
+	// replaced the whole page. This watches the LIST rather than each cause:
+	// reclassification, a vanished message and a filter that stopped matching
+	// all leave the same hole.
+	describe('collapsed section refill', () => {
+		function shrink(wrapper, from, to) {
+			return wrapper.vm.refillCollapsedSection(to, from)
+		}
+
+		it('asks for exactly the shortfall when a collapsed section loses rows', () => {
+			const wrapper = mountMailbox({ paginate: 'manual', initialPageSize: 3, isPriorityInbox: true })
+			store.scheduleEnvelopeRefill = vi.fn().mockResolvedValue([{ databaseId: 9 }])
+
+			shrink(wrapper, 3, 1)
+
+			expect(store.scheduleEnvelopeRefill).toHaveBeenCalledWith(expect.objectContaining({ quantity: 2 }))
+		})
+
+		it('leaves an infinitely scrolled folder alone', () => {
+			const wrapper = mountMailbox({ initialPageSize: 3 })
+			store.scheduleEnvelopeRefill = vi.fn()
+
+			shrink(wrapper, 3, 1)
+
+			expect(store.scheduleEnvelopeRefill).not.toHaveBeenCalled()
+		})
+
+		it('does not ask again once a refill came back empty', async () => {
+			const wrapper = mountMailbox({ paginate: 'manual', initialPageSize: 3, isPriorityInbox: true })
+			store.scheduleEnvelopeRefill = vi.fn().mockResolvedValue([])
+
+			await shrink(wrapper, 3, 2)
+			expect(store.scheduleEnvelopeRefill).toHaveBeenCalledTimes(1)
+			expect(wrapper.vm.refillExhaustedAt).toBe(2)
+
+			// The section really is that short; another removal must not buy
+			// one wasted round trip per click.
+			shrink(wrapper, 2, 1)
+			expect(store.scheduleEnvelopeRefill).toHaveBeenCalledTimes(1)
+		})
+
+		// The method is only useful if something calls it. Tests that drive the
+		// method directly cannot see a watcher that was never wired up, so the
+		// wiring is asserted on its own.
+		it('is wired to the list length', () => {
+			const wrapper = mountMailbox({ paginate: 'manual', initialPageSize: 3, isPriorityInbox: true })
+			const handler = wrapper.vm.$options.watch['envelopes.length']
+			const handlers = Array.isArray(handler) ? handler : [handler]
+			wrapper.vm.refillCollapsedSection = vi.fn()
+
+			handlers.forEach((fn) => (fn.handler ?? fn).call(wrapper.vm, 1, 3))
+
+			expect(wrapper.vm.refillCollapsedSection).toHaveBeenCalledWith(1, 3)
+		})
+
+		it('never asks while growing', () => {
+			const wrapper = mountMailbox({ paginate: 'manual', initialPageSize: 3, isPriorityInbox: true })
+			store.scheduleEnvelopeRefill = vi.fn()
+
+			shrink(wrapper, 1, 2)
+
+			expect(store.scheduleEnvelopeRefill).not.toHaveBeenCalled()
+		})
+	})
 })
