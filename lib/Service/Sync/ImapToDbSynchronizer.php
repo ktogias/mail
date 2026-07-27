@@ -89,24 +89,51 @@ class ImapToDbSynchronizer {
 	 * @throws ClientException
 	 * @throws ServiceException
 	 */
+	/**
+	 * Whether cron is supposed to keep this mailbox up to date at all.
+	 *
+	 * The INBOX is always in scope, as are trash (when a retention policy
+	 * needs it), snooze and sent; everything else is in scope only when the
+	 * user has explicitly enabled background sync for it.
+	 *
+	 * Public, and the single owner of this decision, because BackfillJob
+	 * needs exactly the same answer. It used to ask a different question --
+	 * "is this mailbox selectable and not yet fully cached" -- which on this
+	 * install put all eight of the account's out-of-scope mailboxes into its
+	 * rotation and none of the in-scope ones: 5.9M messages that the loop
+	 * below then skipped on every tick, so nothing would ever have kept the
+	 * fetched data fresh. Each rotation slot still cost one IMAP login plus
+	 * one 5000-message batch every 15 minutes against a provider that
+	 * throttles per account.
+	 */
+	public static function isInBackgroundSyncScope(Account $account, Mailbox $mailbox): bool {
+		if ($mailbox->isInbox() || $mailbox->getSyncInBackground()) {
+			return true;
+		}
+
+		$mailAccount = $account->getMailAccount();
+		if ($mailAccount->getTrashMailboxId() === $mailbox->getId()
+			&& $mailAccount->getTrashRetentionDays() !== null) {
+			return true;
+		}
+		if ($mailAccount->getSnoozeMailboxId() === $mailbox->getId()) {
+			return true;
+		}
+
+		return $mailAccount->getSentMailboxId() === $mailbox->getId()
+			|| $mailbox->isSpecialUse('sent');
+	}
+
 	public function syncAccount(Account $account,
 		LoggerInterface $logger,
 		bool $force = false,
 		int $criteria = Horde_Imap_Client::SYNC_NEWMSGSUIDS | Horde_Imap_Client::SYNC_FLAGSUIDS | Horde_Imap_Client::SYNC_VANISHEDUIDS): void {
 		$rebuildThreads = false;
-		$trashMailboxId = $account->getMailAccount()->getTrashMailboxId();
-		$snoozeMailboxId = $account->getMailAccount()->getSnoozeMailboxId();
-		$sentMailboxId = $account->getMailAccount()->getSentMailboxId();
-		$trashRetentionDays = $account->getMailAccount()->getTrashRetentionDays();
 
 		$client = $this->clientFactory->getClient($account);
 
 		foreach ($this->mailboxMapper->findAll($account) as $mailbox) {
-			$syncTrash = $trashMailboxId === $mailbox->getId() && $trashRetentionDays !== null;
-			$syncSnooze = $snoozeMailboxId === $mailbox->getId();
-			$syncSent = $sentMailboxId === $mailbox->getId() || $mailbox->isSpecialUse('sent');
-
-			if (!$syncTrash && !$mailbox->isInbox() && !$syncSnooze && !$mailbox->getSyncInBackground() && !$syncSent) {
+			if (!self::isInBackgroundSyncScope($account, $mailbox)) {
 				$logger->debug("Skipping mailbox sync for {$mailbox->getId()}");
 				continue;
 			}

@@ -1094,8 +1094,20 @@ function isRecentlyRemovedFromMailbox(envelopeId, mailboxId) {
  * returns a cached value if one exists -- exactly what reconciliation
  * must not trust here).
  *
+ * A mutation the outbox still holds is a third case, ahead of both: the
+ * operation is durably queued and connectivity recovery will replay it
+ * with the same operation id, so neither reverting nor reporting a
+ * failure is correct. Answering that here rather than at the call sites
+ * is deliberate -- setEnvelopesSeen() was the only one of the eight that
+ * ever checked, so an identical 500 was silent from the list and a red
+ * "Could not update read status" from an opened thread. Live on
+ * 2026-07-27 13:35Z: mark-on-open got a 500, the row flipped back to
+ * unread under an error toast, and the queued write landed three seconds
+ * later on replay.
+ *
  * @param {object} options
  * @param {object} options.envelope the envelope the action targeted
+ * @param {object} [options.error] the error that triggered reconciliation
  * @param {(authoritative: object|undefined) => boolean} options.hasLanded
  * given the authoritative fetch result (undefined if the message is
  * genuinely gone), decide whether the change this action wanted is
@@ -1110,7 +1122,15 @@ function isRecentlyRemovedFromMailbox(envelopeId, mailboxId) {
  * open -- safer to trust the optimistic UI than compound an already-
  * uncertain situation with a possibly-wrong revert); false if reverted.
  */
-async function reconcileOrRevert({ envelope, hasLanded, onLanded = () => {}, revert }) {
+async function reconcileOrRevert({ envelope, error, hasLanded, onLanded = () => {}, revert }) {
+	if (error?.mailMutationQueued === true) {
+		// Still in the IndexedDB outbox. Keep the optimistic state for the
+		// replay to confirm, and skip the authoritative fetch: it would only
+		// report the pre-mutation state and trigger a revert that the replay
+		// then undoes again.
+		return true
+	}
+
 	let authoritative
 	try {
 		authoritative = await fetchEnvelope(envelope.accountId, envelope.databaseId)
@@ -3957,13 +3977,16 @@ export default function mainStoreActions() {
 
 						const landed = await reconcileOrRevert({
 							envelope,
+							error,
 							hasLanded: (authoritative) => authoritative?.flags?.flagged === !oldState,
 							revert: () => {
 								this.flagEnvelopeMutation({ envelope, flag: 'flagged', value: oldState })
 								// The optimistic membership change above must
 								// roll back with the flag, through the same
 								// mutation, so the lists land back exactly
-								// where they were.
+								// where they were -- and so must the counters,
+								// which moved with the thread aggregate.
+								this.refreshThreadFlagAggregateMutation(envelope, 'flagged')
 								reclassify()
 							},
 						})
@@ -4141,6 +4164,7 @@ export default function mainStoreActions() {
 
 					const landed = await reconcileOrRevert({
 						envelope,
+						error,
 						hasLanded: (authoritative) => authoritative?.flags?.important === important,
 						revert: () => {
 							importanceCopies.forEach((copy) => this.flagEnvelopeMutation({
@@ -4252,6 +4276,7 @@ export default function mainStoreActions() {
 
 					const landed = await reconcileOrRevert({
 						envelope,
+						error,
 						hasLanded: (authoritative) => authoritative?.flags?.seen === newState,
 						onLanded: (authoritative) => {
 							if (authoritative?.flags?.hasUnseenInThread !== undefined) {
@@ -4318,17 +4343,17 @@ export default function mainStoreActions() {
 					})
 				} catch (error) {
 					logger.error('could not update selected messages seen state', { error })
-					// A response-less failure remains in the IndexedDB outbox.
-					// Keep the optimistic target while recovery replays the
-					// idempotent operation with the same operation id.
-					if (error.mailMutationQueued === true) {
-						return
-					}
-
+					// A response-less failure remains in the IndexedDB outbox;
+					// reconcileOrRevert() keeps the optimistic target while
+					// recovery replays the idempotent operation with the same
+					// operation id. That check used to live here, and only
+					// here, which is why this path was silent and every other
+					// one raised an error toast for the same 500.
 					const landed = await Promise.all(targets.map((envelope) => {
 						const oldState = oldStates.get(envelope.databaseId)
 						return reconcileOrRevert({
 							envelope,
+							error,
 							hasLanded: (authoritative) => authoritative?.flags?.seen === seen,
 							onLanded: (authoritative) => {
 								if (authoritative?.flags?.hasUnseenInThread !== undefined) {
@@ -4421,6 +4446,7 @@ export default function mainStoreActions() {
 					// itself genuinely never landed.
 					const landed = await reconcileOrRevert({
 						envelope,
+						error,
 						hasLanded: (authoritative) => authoritative?.flags?.$junk === !oldState,
 						revert: () => {
 							if (removeEnvelope) {
@@ -4468,6 +4494,15 @@ export default function mainStoreActions() {
 						flag: 'flagged',
 						value: favFlag,
 					})
+					// Favorites membership and its counter read the THREAD-wide
+					// aggregate in threaded mode, not this flag -- the same
+					// line toggleEnvelopeFlagged() carries. Missing here, this
+					// path moved the row into Favorites while leaving both
+					// sections' counters describing the state before the click.
+					// Live on 2026-07-27 13:53Z: "Άλλο 2 unread of 41.078"
+					// above an empty list, with the database reporting 0 unread
+					// in that section and 2 in Favorites.
+					this.refreshThreadFlagAggregateMutation(envelope, 'flagged')
 					reclassify()
 
 					try {
@@ -4488,6 +4523,7 @@ export default function mainStoreActions() {
 							flag: 'flagged',
 							value: oldState,
 						})
+						this.refreshThreadFlagAggregateMutation(envelope, 'flagged')
 						reclassify()
 
 						throw error
@@ -4895,6 +4931,7 @@ export default function mainStoreActions() {
 
 					const landed = await reconcileOrRevert({
 						envelope,
+						error,
 						hasLanded: (authoritative) => authoritative?.mailboxId === destMailboxId,
 						revert: () => this.addEnvelopesMutation({ envelopes: [envelope], bypassRemovalSuppression: true }),
 					})
@@ -4928,6 +4965,7 @@ export default function mainStoreActions() {
 
 					const landed = await reconcileOrRevert({
 						envelope,
+						error,
 						hasLanded: (authoritative) => authoritative?.mailboxId === destMailboxId,
 						revert: () => this.addEnvelopesMutation({ envelopes: [envelope], bypassRemovalSuppression: true }),
 					})
@@ -4962,6 +5000,7 @@ export default function mainStoreActions() {
 
 					const landed = await reconcileOrRevert({
 						envelope,
+						error,
 						hasLanded: (authoritative) => authoritative !== undefined && authoritative.mailboxId !== snoozeMailboxId,
 						revert: () => this.addEnvelopesMutation({ envelopes: [envelope], bypassRemovalSuppression: true }),
 					})
@@ -5160,6 +5199,7 @@ export default function mainStoreActions() {
 
 					const landed = await reconcileOrRevert({
 						envelope,
+						error: e,
 						hasLanded: (authoritative) => authoritative?.mailboxId === destMailboxId,
 						revert: () => this.addEnvelopesMutation({ envelopes: [envelope], bypassRemovalSuppression: true }),
 					})
@@ -5256,6 +5296,7 @@ export default function mainStoreActions() {
 
 					const landed = await reconcileOrRevert({
 						envelope,
+						error: e,
 						hasLanded: (authoritative) => authoritative?.mailboxId === destMailboxId,
 						revert: () => this.addEnvelopesMutation({ envelopes: [envelope], bypassRemovalSuppression: true }),
 					})
@@ -5281,6 +5322,7 @@ export default function mainStoreActions() {
 
 					const landed = await reconcileOrRevert({
 						envelope,
+						error: e,
 						hasLanded: (authoritative) => authoritative !== undefined && authoritative.mailboxId !== snoozeMailboxId,
 						revert: () => this.addEnvelopesMutation({ envelopes: [envelope], bypassRemovalSuppression: true }),
 					})

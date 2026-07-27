@@ -43,11 +43,17 @@ use function usort;
  * entirely if the server is already busy (SyncService::isServerBusy(),
  * the same signal the frontend's own adaptive polling already reacts to).
  *
- * Round-robins across every mailbox of the account that still isn't fully
- * cached: one batch for mailbox A this run, mailbox B the next, and so on,
- * wrapping back to the start once every incomplete mailbox has had a turn.
- * A mailbox that finishes simply stops appearing in the rotation (isCached()
- * reflects it) -- no separate bookkeeping needed for "done" mailboxes.
+ * Round-robins across every mailbox of the account that is in scope for
+ * background sync and still isn't fully cached: one batch for mailbox A this
+ * run, mailbox B the next, and so on, wrapping back to the start once every
+ * incomplete mailbox has had a turn. A mailbox that finishes simply stops
+ * appearing in the rotation (isCached() reflects it) -- no separate
+ * bookkeeping needed for "done" mailboxes.
+ *
+ * "In scope" is not this job's own judgement call: it is whatever
+ * ImapToDbSynchronizer::syncAccount() would go on to keep fresh. Finishing
+ * the initial sync of a mailbox nobody syncs afterwards buys a stale copy at
+ * full price.
  */
 class BackfillJob extends TimedJob {
 	private const INTERVAL = 15 * 60;
@@ -134,9 +140,21 @@ class BackfillJob extends TimedJob {
 			return;
 		}
 
+		// Only mailboxes cron actually keeps up to date are worth finishing:
+		// see ImapToDbSynchronizer::isInBackgroundSyncScope(), which owns this
+		// rule for both. Without the scope check this rotation consisted
+		// entirely of mailboxes syncAccount() skips -- on the account that
+		// exposed it, 5.9M messages across eight of them, led by a 3.1M-message
+		// Gmail "All Mail" that is a duplicate of every other folder by
+		// construction and can never complete. Confirmed live 2026-07-27: a
+		// tick at 13:30:24Z spent its IMAP login on that mailbox and hit the
+		// account's connection limit; interactive requests were being refused
+		// by the provider in the same window.
 		$incomplete = array_values(array_filter(
 			$this->mailboxMapper->findAll($account),
-			static fn (Mailbox $mailbox) => $mailbox->getSelectable() && !$mailbox->isCached(),
+			static fn (Mailbox $mailbox) => $mailbox->getSelectable()
+				&& !$mailbox->isCached()
+				&& ImapToDbSynchronizer::isInBackgroundSyncScope($account, $mailbox),
 		));
 		if ($incomplete === []) {
 			return;

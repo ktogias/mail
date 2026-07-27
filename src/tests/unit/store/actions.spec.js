@@ -2589,6 +2589,40 @@ describe('Vuex store actions', () => {
 			expect(store.priorityInboxStats.sections.important).toEqual({ total: 123, unread: 0 })
 		})
 
+		// The star button on a list row goes through a DIFFERENT action than
+		// the one above, and it was the one the .28 fix missed: same optimistic
+		// reclassify, no thread-aggregate refresh, so the row left Other while
+		// both counters stayed where they were. Live on 2026-07-27 13:53Z, with
+		// "Unread only" active: "Άλλο 2 unread of 41.078" above an empty list,
+		// while the database reported 0 unread there and 2 in Favorites.
+		it('moves the counters, not just the row, when a thread is starred from a list row', async () => {
+			store.preferences['layout-message-view'] = 'threaded'
+			store.preferences['sort-favorites'] = 'true'
+			store.priorityInboxStats = {
+				sections: {
+					favorite: { total: 664, unread: 0 },
+					important: { total: 120, unread: 0 },
+					other: { total: 41079, unread: 1 },
+				},
+				complete: true,
+			}
+			const envelope = seedListedEnvelope(71, {
+				seen: false,
+				hasUnseenInThread: true,
+				flagged: false,
+				hasFlaggedInThread: false,
+				important: false,
+				hasImportantInThread: false,
+			})
+			MessageService.setEnvelopeFlags.mockReturnValue(new Promise(() => {}))
+
+			store.markEnvelopeFavoriteOrUnfavorite({ envelope, favFlag: true })
+			await Promise.resolve()
+
+			expect(store.priorityInboxStats.sections.favorite).toEqual({ total: 665, unread: 1 })
+			expect(store.priorityInboxStats.sections.other).toEqual({ total: 41078, unread: 0 })
+		})
+
 		it('moves the counters when importance is removed in threaded mode', async () => {
 			store.preferences['layout-message-view'] = 'threaded'
 			store.preferences['sort-favorites'] = 'true'
@@ -7393,6 +7427,32 @@ describe('Vuex store actions', () => {
 			await store.setEnvelopesSeen({ envelopes: [envelope], seen: true })
 
 			expect(envelope.flags).toMatchObject({ seen: true, hasUnseenInThread: false })
+			expect(MessageService.fetchEnvelope).not.toHaveBeenCalled()
+		})
+
+		// The single-envelope twin of the batch case above -- the path
+		// mark-on-open uses. Until reconcileOrRevert() owned the rule, only
+		// the batch path checked it, so the identical queued 500 was silent
+		// from a list selection and, from an opened thread, reverted the row
+		// to unread under a red "Could not update read status" three seconds
+		// before the replay landed it anyway. Live on 2026-07-27 13:35Z.
+		it('keeps a single optimistic read when an ambiguous failure is queued for replay', async () => {
+			const envelope = {
+				databaseId: 37,
+				accountId: 13,
+				mailboxId: 11,
+				flags: { seen: false, hasUnseenInThread: true },
+			}
+			store.envelopes[envelope.databaseId] = envelope
+			const error = new Error('offline')
+			error.mailMutationQueued = true
+			MessageService.setEnvelopeFlags.mockRejectedValue(error)
+
+			// Resolves rather than rejecting: a queued mutation is not a
+			// failure the user should be told about.
+			await store.toggleEnvelopeSeen({ envelope, seen: true })
+
+			expect(envelope.flags.seen).toBe(true)
 			expect(MessageService.fetchEnvelope).not.toHaveBeenCalled()
 		})
 

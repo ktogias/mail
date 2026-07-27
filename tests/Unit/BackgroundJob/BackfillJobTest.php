@@ -50,10 +50,22 @@ class BackfillJobTest extends TestCase {
 	// declared methods, so createMock() can't configure them directly.
 	// Real instances with real setters, same as ImapToDbSynchronizerTest's
 	// own buildPartialSyncMailbox().
-	private function mailbox(int $id, bool $cached, bool $selectable = true): Mailbox {
+	//
+	// Background sync is on by default here because that is what makes a
+	// mailbox eligible for backfill at all -- see
+	// ImapToDbSynchronizer::isInBackgroundSyncScope().
+	private function mailbox(
+		int $id,
+		bool $cached,
+		bool $selectable = true,
+		bool $syncInBackground = true,
+		?string $name = null,
+	): Mailbox {
 		$mailbox = new Mailbox();
 		$mailbox->setId($id);
+		$mailbox->setName($name ?? "folder{$id}");
 		$mailbox->setSelectable($selectable);
+		$mailbox->setSyncInBackground($syncInBackground);
 		if ($cached) {
 			$mailbox->setSyncNewToken('token');
 			$mailbox->setSyncChangedToken('token');
@@ -460,6 +472,67 @@ class BackfillJobTest extends TestCase {
 		$this->serviceMock->getParameter('clientFactory')
 			->expects(self::never())
 			->method('getClient');
+
+		$this->job->start($this->createMock(JobList::class));
+	}
+
+	/**
+	 * Finishing the initial sync of a mailbox that syncAccount() then skips
+	 * on every tick buys a copy nothing keeps fresh, at the price of one IMAP
+	 * login and one 5000-message batch per rotation slot. On the account that
+	 * exposed this, every incomplete mailbox was of this kind -- 5.9M messages,
+	 * led by a 3.1M-message Gmail "All Mail" that can never complete.
+	 */
+	public function testSkipsMailboxesExcludedFromBackgroundSync(): void {
+		$this->serviceMock->getParameter('accountService')
+			->method('findById')
+			->willReturn($this->account());
+		$this->serviceMock->getParameter('userManager')
+			->method('get')
+			->willReturn($this->createConfiguredMock(IUser::class, ['isEnabled' => true]));
+		$this->serviceMock->getParameter('syncService')
+			->method('isServerBusy')
+			->willReturn(false);
+		$this->serviceMock->getParameter('mailboxMapper')
+			->method('findAll')
+			->willReturn([
+				$this->mailbox(1, false, true, false),
+			]);
+		$this->serviceMock->getParameter('clientFactory')
+			->expects(self::never())
+			->method('getClient');
+
+		$this->job->start($this->createMock(JobList::class));
+	}
+
+	/**
+	 * The INBOX is always in scope, whether or not the per-mailbox background
+	 * sync toggle was ever touched -- so the scope check above must not stop
+	 * the one mailbox this job most needs to finish.
+	 */
+	public function testBackfillsAnIncompleteInboxWithoutTheBackgroundSyncFlag(): void {
+		$account = $this->account();
+		$inbox = $this->mailbox(1, false, true, false, 'INBOX');
+		$this->serviceMock->getParameter('accountService')
+			->method('findById')
+			->willReturn($account);
+		$this->serviceMock->getParameter('userManager')
+			->method('get')
+			->willReturn($this->createConfiguredMock(IUser::class, ['isEnabled' => true]));
+		$this->serviceMock->getParameter('syncService')
+			->method('isServerBusy')
+			->willReturn(false);
+		$this->serviceMock->getParameter('mailboxMapper')
+			->method('findAll')
+			->willReturn([$inbox]);
+		$client = $this->createMock(Horde_Imap_Client_Socket::class);
+		$this->serviceMock->getParameter('clientFactory')
+			->method('getClient')
+			->willReturn($client);
+		$this->serviceMock->getParameter('synchronizer')
+			->expects(self::once())
+			->method('sync')
+			->with($account, $client, $inbox);
 
 		$this->job->start($this->createMock(JobList::class));
 	}
