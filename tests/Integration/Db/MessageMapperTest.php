@@ -239,6 +239,90 @@ class MessageMapperTest extends TestCase {
 		}
 	}
 
+	/**
+	 * The Priority Inbox page: the newest N of each of the three sections, in
+	 * one call.
+	 *
+	 * There was no coverage of prioritySplit at all until this was rewritten
+	 * from a window function over the whole mailbox into one bounded query per
+	 * section. The rewrite was verified against the old query on production
+	 * data (nine mailboxes, zero rows differing), but that comparison is gone
+	 * the moment the old query is; this keeps the contract.
+	 *
+	 * The singleton case matters most. "This thread carries the flag" is now
+	 * `m.flag_x OR m.thread_root_id IN (roots carrying it)`, and a message
+	 * whose thread_root_id is NULL can never be in that set -- so without the
+	 * first disjunct a flagged standalone message silently falls into Other.
+	 */
+	public function testPrioritySplitReturnsTheNewestOfEachSection(): void {
+		$mailboxId = 9;
+		$mailbox = new Mailbox();
+		$mailbox->setId($mailboxId);
+
+		// Newest last, so the expected order is easy to read off.
+		$plain = [];
+		foreach (range(1, 4) as $n) {
+			$plain[] = $this->insertPrioritySplitMessage(2000 + $n, $mailboxId, "<other-$n@example.com>", 1000 + $n, false, false);
+		}
+		$flaggedOld = $this->insertPrioritySplitMessage(2100, $mailboxId, '<fav-1@example.com>', 1100, true, false);
+		$flaggedNew = $this->insertPrioritySplitMessage(2101, $mailboxId, '<fav-2@example.com>', 1101, true, false);
+		$important = $this->insertPrioritySplitMessage(2200, $mailboxId, '<imp-1@example.com>', 1200, false, true);
+		// Flagged, and alone: no thread root at all.
+		$flaggedSingleton = $this->insertPrioritySplitMessage(2300, $mailboxId, null, 1300, true, false);
+
+		$query = new SearchQuery();
+		$query->setThreaded(true);
+
+		$ids = $this->mapper->findIdsByQuery($mailbox, $query, 'DESC', 2, null, false, true);
+
+		// Favourites: the two newest of three, newest first, and the standalone
+		// flagged message is one of them.
+		self::assertContains($flaggedSingleton, $ids, 'a flagged message with no thread root belongs to Favourites');
+		self::assertContains($flaggedNew, $ids);
+		self::assertNotContains($flaggedOld, $ids, 'only the newest two favourites fit the page');
+		// Important, and the two newest of four Other.
+		self::assertContains($important, $ids);
+		self::assertContains($plain[3], $ids);
+		self::assertContains($plain[2], $ids);
+		self::assertNotContains($plain[1], $ids, 'only the newest two others fit the page');
+		self::assertNotContains($plain[0], $ids);
+		// Six rows: 2 favourites + 1 important + 2 others, and nothing twice.
+		self::assertCount(5, $ids);
+		self::assertSame($ids, array_values(array_unique($ids)));
+		// Merged newest-first across all three sections.
+		$sorted = $ids;
+		rsort($sorted);
+		self::assertSame($sorted, $ids, 'the merged page is ordered newest first');
+	}
+
+	private function insertPrioritySplitMessage(
+		int $uid,
+		int $mailboxId,
+		?string $threadRootId,
+		int $sentAt,
+		bool $flagged,
+		bool $important,
+	): int {
+		$qb = $this->db->getQueryBuilder();
+		$qb->insert($this->mapper->getTableName())
+			->values([
+				'uid' => $qb->createNamedParameter($uid, IQueryBuilder::PARAM_INT),
+				'message_id' => $qb->createNamedParameter('<split' . $uid . '@example.com>'),
+				'thread_root_id' => $qb->createNamedParameter($threadRootId),
+				'mailbox_id' => $qb->createNamedParameter($mailboxId, IQueryBuilder::PARAM_INT),
+				'subject' => $qb->createNamedParameter('SPLIT'),
+				'sent_at' => $qb->createNamedParameter($sentAt, IQueryBuilder::PARAM_INT),
+				'in_reply_to' => $qb->createNamedParameter('<>'),
+				'flag_seen' => $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL),
+				'flag_flagged' => $qb->createNamedParameter($flagged, IQueryBuilder::PARAM_BOOL),
+				'flag_important' => $qb->createNamedParameter($important, IQueryBuilder::PARAM_BOOL),
+				'flag_deleted' => $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL),
+			]);
+		$qb->executeStatement();
+
+		return $this->db->lastInsertId($this->mapper->getTableName());
+	}
+
 	private function insertThreadMember(
 		int $uid,
 		int $mailboxId,

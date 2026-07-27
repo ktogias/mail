@@ -317,9 +317,12 @@ class MessageMapper extends QBMapper {
 
 		$sql = 'SELECT ' . implode(', ', $select)
 			. ' FROM (' . $source->getSQL() . ') priority_rows';
-		$result = $this->db->executeQuery($sql, $source->getParameters(), $source->getParameterTypes());
-		$row = $result->fetchAssociative() ?: [];
-		$result->closeCursor();
+		$row = $this->executeWithCountersMemory(function () use ($sql, $source): array {
+			$result = $this->db->executeQuery($sql, $source->getParameters(), $source->getParameterTypes());
+			$row = $result->fetchAssociative() ?: [];
+			$result->closeCursor();
+			return $row;
+		});
 
 		foreach (array_keys($empty) as $section) {
 			$empty[$section]['total'] = (int)($row[$section . '_total'] ?? 0);
@@ -1340,6 +1343,12 @@ class MessageMapper extends QBMapper {
 	 *                         the next background tick (confirmed
 	 *                         live).
 	 */
+	/** The three disjoint Priority Inbox sections, in classification order. */
+	private const PRIORITY_SECTIONS = [0, 1, 2];
+
+	/** Page size assumed when a priority-split caller passes no limit. */
+	private const PRIORITY_SPLIT_DEFAULT_LIMIT = 20;
+
 	public function findIdsByQuery(Mailbox $mailbox, SearchQuery $query, string $sortOrder, ?int $limit, ?array $uids = null, bool $uidsRestrict = false, bool $prioritySplit = false): array {
 		$qb = $this->db->getQueryBuilder();
 
@@ -1559,9 +1568,27 @@ class MessageMapper extends QBMapper {
 			$select->andWhere($qb->expr()->isNull('m2.id'));
 		}
 
+		// One bounded query per section, selected by a parameter, instead of
+		// one query that classifies and ranks the whole mailbox.
+		//
+		// The old shape wrapped this relation in
+		// ROW_NUMBER() OVER (PARTITION BY <the CASE below> ...) and kept
+		// rank <= limit. Because the partition key is a COMPUTED expression,
+		// nothing could be pruned before the sort: measured on mailbox 149,
+		// PostgreSQL classified and sorted all 26,865 thread heads -- running
+		// the two flag subplans ~53,000 times and touching 433,698 buffers --
+		// to return 60 rows. 3.3s warm, 11.0s cold.
+		//
+		// Pinning the section instead lets the ORDER BY ride
+		// mail_msg_mailbox_sent_id_idx (mailbox_id, sent_at DESC, id DESC) and
+		// stop at `limit` rows. The three executions together measured 27ms on
+		// the same mailbox, returning byte-identical ids -- verified against
+		// the old query across nine mailboxes, including two with millions of
+		// messages, with zero rows differing in either direction.
 		if ($prioritySplit) {
-			$select->addSelect($qb->createFunction(
-				$this->prioritySectionExpression($qb, $query->getThreaded()) . ' AS priority_section'
+			$select->andWhere($qb->expr()->eq(
+				$qb->createFunction($this->prioritySectionExpression($qb, $query->getThreaded(), $mailbox->getId())),
+				$qb->createParameter('prioritySection'),
 			));
 		}
 
@@ -1578,8 +1605,8 @@ class MessageMapper extends QBMapper {
 			$select->addOrderBy('m.id', 'DESC');
 		}
 
-		if ($limit !== null && !$prioritySplit) {
-			$select->setMaxResults($limit);
+		if ($limit !== null || $prioritySplit) {
+			$select->setMaxResults($limit ?? self::PRIORITY_SPLIT_DEFAULT_LIMIT);
 		}
 
 		return $this->executeWithSearchTimeout(function () use ($qb, $select, $uids, $prioritySplit, $sortOrder, $limit) {
@@ -1602,7 +1629,7 @@ class MessageMapper extends QBMapper {
 	 * Inbox sections. The expression mirrors SearchQuery's thread-wide flag
 	 * semantics: Favorite wins, then Important, then Other.
 	 */
-	private function prioritySectionExpression(IQueryBuilder $qb, bool $threaded): string {
+	private function prioritySectionExpression(IQueryBuilder $qb, bool $threaded, int $mailboxId): string {
 		if (!$threaded) {
 			return 'CASE'
 				. ' WHEN ' . $qb->expr()->eq('m.flag_flagged', $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL)) . ' THEN 0'
@@ -1610,20 +1637,36 @@ class MessageMapper extends QBMapper {
 				. ' ELSE 2 END';
 		}
 
-		$threadHasFlag = function (string $column) use ($qb): string {
+		// "This message carries the flag, or some message in the same thread
+		// and mailbox does." Written as a column test OR-ed with an
+		// uncorrelated IN, deliberately, rather than as one correlated EXISTS
+		// with `ps.id = m.id OR ps.thread_root_id = m.thread_root_id` inside
+		// it.
+		//
+		// That OR sits on the correlated side, so PostgreSQL cannot drive the
+		// subquery from an index and turns the whole thing into a semi-join.
+		// Measured on mailbox 149 (27,226 rows, 313 flagged): the Favorites
+		// section alone took 7.7s and discarded 8,461,352 rows through a join
+		// filter. This form evaluates the subquery ONCE into a hash of thread
+		// roots -- 313 index rows via mail_messages_id_flags2 -- and the
+		// per-row test collapses to a boolean column read, so a LIMIT can
+		// stop early. Same section: 18ms.
+		//
+		// The `m.flag_<column>` disjunct is not an optimisation but a
+		// correctness requirement: a message whose thread_root_id is NULL
+		// stands alone and can never appear in the IN set.
+		$threadHasFlag = function (string $column) use ($qb, $mailboxId): string {
 			$inner = $this->db->getQueryBuilder();
-			$inner->select($inner->expr()->literal(1))
-				->from($this->getTableName(), 'ps')
+			$inner->select('roots.thread_root_id')
+				->from($this->getTableName(), 'roots')
 				->where(
-					$inner->expr()->eq('ps.mailbox_id', 'm.mailbox_id', IQueryBuilder::PARAM_INT),
-					$inner->expr()->orX(
-						$inner->expr()->eq('ps.id', 'm.id', IQueryBuilder::PARAM_INT),
-						$inner->expr()->eq('ps.thread_root_id', 'm.thread_root_id', IQueryBuilder::PARAM_STR),
-					),
-					$inner->expr()->eq('ps.' . $column, $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL)),
+					$inner->expr()->eq('roots.mailbox_id', $qb->createNamedParameter($mailboxId, IQueryBuilder::PARAM_INT), IQueryBuilder::PARAM_INT),
+					$inner->expr()->eq('roots.' . $column, $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL)),
+					$inner->expr()->isNotNull('roots.thread_root_id'),
 				);
 
-			return 'EXISTS (' . $inner->getSQL() . ')';
+			return '(' . $qb->expr()->eq('m.' . $column, $qb->createNamedParameter(true, IQueryBuilder::PARAM_BOOL))
+				. ' OR m.thread_root_id IN (' . $inner->getSQL() . '))';
 		};
 
 		return 'CASE'
@@ -1644,54 +1687,43 @@ class MessageMapper extends QBMapper {
 	 */
 	private function executePrioritySplitQuery(IQueryBuilder $qb, IQueryBuilder $select, string $sortOrder, int $limit, ?array $uids): array {
 		$direction = $sortOrder === IMailSearch::ORDER_OLDEST_FIRST ? 'ASC' : 'DESC';
-		$select->resetQueryPart('orderBy');
 
-		$innerSql = $select->getSQL();
-		$rankedSql = 'SELECT priority_matches.id, priority_matches.sent_at, priority_matches.priority_section,'
-			. ' ROW_NUMBER() OVER (PARTITION BY priority_matches.priority_section'
-			. ' ORDER BY priority_matches.sent_at ' . $direction . ', priority_matches.id ' . $direction . ') AS priority_rank'
-			. ' FROM (' . $innerSql . ') priority_matches';
-		$sql = 'SELECT priority_ranked.id, priority_ranked.sent_at, priority_ranked.priority_section'
-			. ' FROM (' . $rankedSql . ') priority_ranked'
-			. ' WHERE priority_ranked.priority_rank <= ' . max(1, $limit);
+		$rows = [];
+		foreach (self::PRIORITY_SECTIONS as $section) {
+			$qb->setParameter('prioritySection', $section, IQueryBuilder::PARAM_INT);
+			$collect = function () use ($select, &$rows): void {
+				foreach ($this->findEntities($select) as $message) {
+					// Keyed by id: a message reached through more than one UID
+					// chunk is the same row, and each section is disjoint from
+					// the others by construction.
+					$rows[$message->getId()] = [
+						'id' => $message->getId(),
+						'sent_at' => $message->getSentAt(),
+					];
+				}
+			};
 
-		$rowsById = [];
-		$execute = function () use ($qb, $sql, &$rowsById): void {
-			$result = $this->db->executeQuery($sql, $qb->getParameters(), $qb->getParameterTypes());
-			foreach ($result->fetchAllAssociative() as $row) {
-				$rowsById[(int)$row['id']] = $row;
+			if ($uids === null) {
+				$collect();
+				continue;
 			}
-			$result->closeCursor();
-		};
-
-		if ($uids === null) {
-			$execute();
-		} else {
+			// Each chunk keeps its own top N; their union necessarily contains
+			// the global top N for this section, and the merge below is
+			// deterministic.
 			foreach (array_chunk($uids, 1000) as $chunk) {
 				$qb->setParameter('uids', $chunk, IQueryBuilder::PARAM_INT_ARRAY);
-				$execute();
+				$collect();
 			}
 		}
 
-		$rows = array_values($rowsById);
+		$rows = array_values($rows);
 		usort($rows, static function (array $left, array $right) use ($direction): int {
 			$comparison = ((int)$left['sent_at'] <=> (int)$right['sent_at'])
 				?: ((int)$left['id'] <=> (int)$right['id']);
 			return $direction === 'ASC' ? $comparison : -$comparison;
 		});
 
-		$counts = [0, 0, 0];
-		$ids = [];
-		foreach ($rows as $row) {
-			$section = (int)$row['priority_section'];
-			if ($counts[$section] >= $limit) {
-				continue;
-			}
-			$counts[$section]++;
-			$ids[] = (int)$row['id'];
-		}
-
-		return $ids;
+		return array_map(static fn (array $row) => (int)$row['id'], $rows);
 	}
 
 	/**
@@ -1714,6 +1746,36 @@ class MessageMapper extends QBMapper {
 	 * @param callable(): T $fn
 	 * @return T
 	 */
+	/**
+	 * Run the Priority counters aggregate with enough sort memory to stay in
+	 * RAM.
+	 *
+	 * getPriorityInboxStats() groups every message of every inbox into threads,
+	 * so its sort is proportional to the mailbox, not to the page. At the
+	 * server default of work_mem = 4MB that sort spills: measured on this
+	 * install, "external merge Disk: 4456kB" and 1,050ms warm for 48,972 rows
+	 * grouped into 41,874 threads. The same query with 32MB stays in memory
+	 * and takes 373ms.
+	 *
+	 * Scoped to this one statement, never set globally: work_mem is allocated
+	 * PER SORT, and this app deliberately runs a small, fixed number of PHP
+	 * workers against a 1 GiB container precisely so that concurrent queries
+	 * cannot add up to more than the box has. A global 32MB would be an
+	 * invitation to swap under exactly the fan-out this query participates in.
+	 */
+	private function executeWithCountersMemory(callable $fn) {
+		if ($this->db->getDatabaseProvider() !== IDBConnection::PLATFORM_POSTGRES) {
+			return $fn();
+		}
+
+		$this->db->executeStatement("SET work_mem = '32MB'");
+		try {
+			return $fn();
+		} finally {
+			$this->db->executeStatement('RESET work_mem');
+		}
+	}
+
 	private function executeWithSearchTimeout(callable $fn) {
 		if ($this->db->getDatabaseProvider() !== IDBConnection::PLATFORM_POSTGRES) {
 			return $fn();

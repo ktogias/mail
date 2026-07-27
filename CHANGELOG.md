@@ -1,3 +1,21 @@
+## 5.11.0-dev.0.ktogias.37 (2026-07-27, resource-constrained deployment fork)
+
+### Priority Page Query
+
+* run one bounded query per Priority section instead of one window function over the whole mailbox — the old `ROW_NUMBER() OVER (PARTITION BY <computed section>)` could prune nothing before its sort, so PostgreSQL classified and sorted all 26,865 thread heads, ran the two flag subplans ~53,000 times and touched 433,698 buffers, to return 60 rows
+* express "this thread carries the flag" as a column test OR-ed with an uncorrelated `IN` over thread roots, instead of a correlated `EXISTS` containing an `OR` — that `OR` blocked index-driven access and turned the Favourites section into a semi-join discarding 8,461,352 rows
+* measured on mailbox 149: **3,300 ms warm / 10,967 ms cold → 27 ms**, returning byte-identical ids (verified against the old query across nine mailboxes, zero rows differing in either direction)
+
+### Priority Counters
+
+* give the counters aggregate 32 MB of sort memory for the duration of that one statement — at the server default of 4 MB it spilled to disk ("external merge Disk: 4456kB"), 1,050 ms warm versus 373 ms in memory
+* scoped per statement, never globally: work_mem is allocated per sort, and this install sizes its worker pools against a 1 GiB container precisely so concurrent queries cannot outgrow the box
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.36 (2026-07-27, resource-constrained deployment fork)
 
 ### Loading Placeholders
