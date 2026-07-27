@@ -108,6 +108,32 @@ export function subscribePendingMutations(listener) {
 	return () => listeners.delete(listener)
 }
 
+// An operation the replay gave up on. Nobody is awaiting a replayed
+// operation -- the call that created it returned long ago -- so a definitive
+// failure here reaches no catch block and no toast, and the optimistic state
+// it left behind stays on screen describing something that never happened.
+//
+// Live on 2026-07-27: a mark-as-read got a 500 while Gmail was refusing
+// authentication under connection pressure, was retried at 14:58 and
+// cancelled, and by 14:59:50 the message row was gone, so the replay took a
+// 404 and dropped the operation. The row kept rendering as read. Nothing
+// anywhere told the user their action had been lost.
+const abandonListeners = new Set()
+
+export function subscribeAbandonedMutations(listener) {
+	abandonListeners.add(listener)
+	return () => abandonListeners.delete(listener)
+}
+
+function emitAbandoned(operation, error) {
+	abandonListeners.forEach((listener) => listener({
+		type: operation.type,
+		payload: operation.payload,
+		attempts: operation.attempts,
+		status: error?.response?.status,
+	}))
+}
+
 function isDefinitiveFailure(error) {
 	const status = error?.response?.status
 	return status >= 400
@@ -159,6 +185,7 @@ export function replayMutationOutbox(send) {
 			} catch (error) {
 				if (isDefinitiveFailure(error)) {
 					await removeOperation(operation.id)
+					emitAbandoned(operation, error)
 					continue
 				}
 				operation.lastAttemptAt = Date.now()

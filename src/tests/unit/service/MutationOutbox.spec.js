@@ -8,6 +8,7 @@ import {
 	listOperations,
 	replayMutationOutbox,
 	resetMutationOutboxForTests,
+	subscribeAbandonedMutations,
 	subscribePendingMutations,
 } from '../../../service/MutationOutbox.js'
 
@@ -61,5 +62,59 @@ describe('MutationOutbox', () => {
 
 		expect(counts).not.toContain(1)
 		unsubscribe()
+	})
+
+	// A replay has no caller left to catch anything, so a definitive failure
+	// there used to drop the operation in total silence while the optimistic
+	// state it created stayed on screen. Live on 2026-07-27: a mark-as-read
+	// that failed under IMAP connection pressure, was retried, and finally
+	// 404ed because the row was gone -- the message kept rendering as read
+	// and nothing ever said otherwise.
+	it('announces an operation the replay gives up on', async () => {
+		const networkError = new Error('Network Error')
+		await expect(executeDurableMutation({
+			type: 'set-flags',
+			payload: { id: 1471105, flags: { seen: true } },
+			send: async () => {
+				throw networkError
+			},
+		})).rejects.toMatchObject({ mailMutationQueued: true })
+
+		const abandoned = []
+		const unsubscribe = subscribeAbandonedMutations((operation) => abandoned.push(operation))
+		const gone = new Error('Not Found')
+		gone.response = { status: 404 }
+		await replayMutationOutbox(async () => {
+			throw gone
+		})
+		unsubscribe()
+
+		expect(abandoned).toEqual([expect.objectContaining({
+			type: 'set-flags',
+			payload: { id: 1471105, flags: { seen: true } },
+			status: 404,
+		})])
+		await expect(listOperations()).resolves.toEqual([])
+	})
+
+	it('stays silent when the replay merely defers an ambiguous failure', async () => {
+		const networkError = new Error('Network Error')
+		await expect(executeDurableMutation({
+			type: 'set-flags',
+			payload: { id: 42, flags: { seen: true } },
+			send: async () => {
+				throw networkError
+			},
+		})).rejects.toMatchObject({ mailMutationQueued: true })
+
+		const abandoned = []
+		const unsubscribe = subscribeAbandonedMutations((operation) => abandoned.push(operation))
+		await replayMutationOutbox(async () => {
+			throw new Error('still offline')
+		})
+		unsubscribe()
+
+		expect(abandoned).toEqual([])
+		await expect(listOperations()).resolves.toHaveLength(1)
 	})
 })

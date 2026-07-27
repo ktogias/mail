@@ -17,7 +17,7 @@ import initAfterAppCreation from './init.js'
 import logger from './logger.js'
 import { probeMailHealth } from './service/MailHealthService.js'
 import { replayQueuedMutations } from './service/MessageService.js'
-import { subscribePendingMutations } from './service/MutationOutbox.js'
+import { subscribeAbandonedMutations, subscribePendingMutations } from './service/MutationOutbox.js'
 import {
 	broadcastMailEvent,
 	onMailBroadcast,
@@ -112,6 +112,23 @@ export default {
 				this.scheduleConnectivityRecovery(undefined, 1_000)
 			}
 		})
+		// A replayed operation has no caller left to catch its failure, so
+		// without this the user's action simply disappears -- see
+		// subscribeAbandonedMutations()'s own comment for the live case.
+		// Reported once here, centrally, rather than at each action: by replay
+		// time the action that started it is long gone.
+		this.unsubscribeAbandonedMutations = subscribeAbandonedMutations((operation) => {
+			logger.error('a queued mutation was abandoned after a definitive failure', { operation })
+			showError(t('mail', 'An earlier change could not be saved and was discarded'))
+			// The optimistic state it left behind is now wrong. Re-read the
+			// view from the server so the screen stops showing it.
+			this.mainStore.refreshPriorityInboxView({
+				workClass: WorkClass.VISIBLE_REVALIDATION,
+				syncSources: true,
+			}).catch((error) => {
+				logger.debug('could not revalidate after an abandoned mutation', { error })
+			})
+		})
 		this.unsubscribeMailBroadcast = onMailBroadcast(this.onMailBroadcast)
 		window.addEventListener('online', this.onNetworkOnline)
 		// Redirect to setup page if no accounts are configured
@@ -150,6 +167,7 @@ export default {
 		releaseCrossTabLeadership('watched-mailboxes')
 		this.unsubscribeRequestCoordinator?.()
 		this.unsubscribePendingMutations?.()
+		this.unsubscribeAbandonedMutations?.()
 		this.unsubscribeMailBroadcast?.()
 		this.networkStatusElement?.remove()
 	},

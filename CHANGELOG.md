@@ -1,3 +1,21 @@
+## 5.11.0-dev.0.ktogias.34 (2026-07-27, resource-constrained deployment fork)
+
+### Source Sync Fan-Out
+
+* sync each source inbox **once** per Priority refresh instead of once per rendered section — the section predicate was carried down into the physical sync, which made every constituent non-canonical so the physical single-flight could never collapse them; three sections meant three IMAP syncs of the same mailbox within the same second
+* let a section refresh join a source sync that just settled, not only one still in flight — the concurrency limiter staggers the sections, so in-flight-only joining left most of the duplication in place
+* measured on the store with five source inboxes: two rounds of three section refreshes cost **30** physical syncs before and **5** after
+
+### Abandoned Mutations
+
+* tell the user when a queued mutation is given up on. A replayed operation has no caller left to catch its failure, so a definitive failure dropped it in silence while the optimistic state it created stayed on screen
+* revalidate the view afterwards, so the discarded change stops being displayed
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.33 (2026-07-27, resource-constrained deployment fork)
 
 ### Priority Counters

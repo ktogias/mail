@@ -4656,7 +4656,7 @@ describe('Vuex store actions', () => {
 			})
 		})
 
-		it('syncEnvelopes fans out to the real inbox mailboxes with the caller\'s own filter, not the virtual id', async () => {
+		it('syncEnvelopes fans out to the real inbox mailboxes, once each, never the virtual id', async () => {
 			MessageService.syncEnvelopes.mockResolvedValue({
 				newMessages: [],
 				changedMessages: [],
@@ -4671,11 +4671,20 @@ describe('Vuex store actions', () => {
 			expect(calledMailboxIds).toEqual([5, 10])
 			for (const call of MessageService.syncEnvelopes.mock.calls) {
 				expect(call[1]).not.toBe('priority')
-				expect(call[4]).toBe('not:starred')
+				// The section predicate is deliberately NOT carried down. A
+				// physical sync opens the mailbox and reports new/changed/
+				// vanished; that work is identical for every section, and
+				// getEnvelopes(physicalId, sectionQuery) is empty anyway because
+				// section lists live on the virtual mailbox -- so the filtered
+				// variant sent no known ids and asked the server for more work,
+				// three times over. Carrying it also made each constituent
+				// non-canonical, which is what stopped the physical single-flight
+				// from collapsing them.
+				expect(call[4]).toBeUndefined()
 			}
 		})
 
-		it('syncEnvelopes fans out across both priority queries when no filter is given', async () => {
+		it('syncEnvelopes syncs each source once when no filter is given, not once per priority bucket', async () => {
 			MessageService.syncEnvelopes.mockResolvedValue({
 				newMessages: [],
 				changedMessages: [],
@@ -4685,10 +4694,10 @@ describe('Vuex store actions', () => {
 
 			await store.syncEnvelopes({ mailboxId: 'priority' })
 
-			// 2 real mailboxes x 2 priority queries
-			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(4)
-			const calledQueries = MessageService.syncEnvelopes.mock.calls.map((call) => call[4]).sort()
-			expect(calledQueries).toEqual(['is:pi-important', 'is:pi-important', 'is:pi-other', 'is:pi-other'])
+			// 2 real mailboxes, one canonical sync each -- not 2 x 2 buckets.
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(2)
+			const calledQueries = MessageService.syncEnvelopes.mock.calls.map((call) => call[4])
+			expect(calledQueries).toEqual([undefined, undefined])
 		})
 
 		it('fetchEnvelopes fans out to the real inbox mailboxes with the caller\'s own filter, not the virtual id', async () => {
@@ -4870,7 +4879,13 @@ describe('Vuex store actions', () => {
 			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(5)
 		})
 
-		it('does NOT collapse two different buckets for the same virtual mailbox into one', async () => {
+		// The Priority sections are three VIEWS of one physical refresh, so
+		// two buckets must cost one physical sync per source, not two. This
+		// used to assert the opposite, and that is what the storm was: three
+		// rendered sections meant three IMAP syncs of every source inbox
+		// within the same second. Measured on this fixture, two rounds of
+		// three sections cost 30 physical syncs before and 5 after.
+		it('collapses two different buckets for the same virtual mailbox into one physical sync per source', async () => {
 			MessageService.syncEnvelopes.mockResolvedValue({
 				newMessages: [],
 				changedMessages: [],
@@ -4883,12 +4898,42 @@ describe('Vuex store actions', () => {
 
 			await Promise.all([important, other])
 
-			// 5 real mailboxes x 2 genuinely different buckets = 10, not
-			// deduped down to 5.
-			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(10)
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(5)
 		})
 
-		it('fires a fresh fan-out for a later call once the first has resolved', async () => {
+		// The whole storm in one number. Three rendered Priority sections
+		// refreshing twice used to cost 30 physical IMAP syncs across five
+		// source inboxes -- six per mailbox, arriving within seconds of each
+		// other against a per-account IMAP semaphore of three. Live on
+		// 2026-07-27 that produced 31 syncs in nine seconds, two
+		// "IMAP account concurrency limit reached" refusals, and finally a
+		// Gmail authentication rejection that lost a user's mark-as-read.
+		it('costs one physical sync per source inbox for a whole round of section refreshes', async () => {
+			MessageService.syncEnvelopes.mockResolvedValue({
+				newMessages: [],
+				changedMessages: [],
+				vanishedMessages: [],
+				stats: { unread: 0 },
+			})
+			const sections = [
+				'mentions:false match:allof is:starred',
+				'mentions:false match:allof not:starred is:pi-important',
+				'mentions:false match:allof not:starred is:pi-other',
+			]
+
+			for (let round = 0; round < 2; round++) {
+				await Promise.all(sections.map((query) => store.syncEnvelopes({ mailboxId: 'priority', query })))
+			}
+
+			// Five source inboxes, once each -- not five x three sections x
+			// two rounds.
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(5)
+			const perMailbox = MessageService.syncEnvelopes.mock.calls
+				.reduce((acc, call) => ({ ...acc, [call[1]]: (acc[call[1]] ?? 0) + 1 }), {})
+			expect(Object.values(perMailbox)).toEqual([1, 1, 1, 1, 1])
+		})
+
+		it('lets a later section refresh join a source sync that just settled', async () => {
 			MessageService.syncEnvelopes.mockResolvedValue({
 				newMessages: [],
 				changedMessages: [],
@@ -4899,10 +4944,12 @@ describe('Vuex store actions', () => {
 			await store.syncEnvelopes({ mailboxId: 'priority', query: 'not:starred' })
 			await store.syncEnvelopes({ mailboxId: 'priority', query: 'not:starred' })
 
-			// Unlike fetchMessage()'s cache, a sync has no "already done,
-			// never again" shortcut -- a genuinely later, separate call
-			// must still hit the network.
-			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(10)
+			// Sequential, not overlapping: the concurrency limiter staggers the
+			// sections, so joining only while a sibling is still in flight left
+			// most of the duplication in place. The join window is
+			// CANONICAL_PHYSICAL_SYNC_SETTLE_MS, and the authoritative
+			// prioritySplit page is fetched on top of it regardless.
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(5)
 		})
 
 		it('does not collapse distinct structural syncs for a real mailbox', async () => {

@@ -3472,19 +3472,50 @@ export default function mainStoreActions() {
 					// mailboxes?mailboxId=priority&filter=not:starred, every
 					// time the priority inbox's own refresh cycle ran with a
 					// favorites-split filter active.
-					const queriesToFanOut = query === undefined ? getPrioritySearchQueries() : [query]
-					return Promise.all(queriesToFanOut.map((oneQuery) => {
-						// Same bounded-fan-out reasoning as the isUnified
-						// branch above.
-						const targetMailboxes = this.getAccounts
-							.filter((account) => !account.isUnified && !isDisabled(account))
-							.flatMap((account) => this.getMailboxes(account.id).filter((mb) => mb.specialRole === mailbox.specialRole))
-						return mapWithConcurrencyLimit(targetMailboxes, ENVELOPE_FETCH_CONCURRENCY, (mb) => this.syncEnvelopes({
-							mailboxId: mb.databaseId,
-							query: oneQuery,
-							init,
-							workClass,
-						}))
+					// ONE canonical physical sync per source inbox -- not one per
+					// section. The IMAP work a physical sync performs does not
+					// depend on the section predicate at all: it opens the
+					// mailbox and reports new/changed/vanished. Carrying the
+					// section query down made each constituent non-canonical
+					// (see isCanonicalPhysicalSync above, which requires an
+					// empty query), so the physical-sync single-flight could
+					// never collapse them and three rendered sections meant
+					// three IMAP syncs of the same mailbox within the same
+					// second.
+					//
+					// Measured on the store with five source inboxes: three
+					// section refreshes cost 15 physical syncs, and two rounds
+					// cost 30 -- six per mailbox. Live on 2026-07-27 that
+					// arrived as 31 syncs in nine seconds across five inboxes,
+					// which saturates a per-account IMAP semaphore of three and
+					// left Gmail refusing authentication outright for
+					// interactive requests.
+					//
+					// This is the same conclusion syncWatchedMailboxes() already
+					// reached for the background tick ("One canonical
+					// physical-mailbox sync per tick", .27): the unfiltered
+					// response carries every row the sections need, and
+					// reclassifyFlagBucketsMutation updates each loaded section
+					// list from those envelopes -- with refreshPriorityInboxView()'s
+					// prioritySplit page as the authoritative snapshot on top.
+					// Being canonical also means repeated section refreshes now
+					// collapse into one round trip for CANONICAL_PHYSICAL_SYNC_SETTLE_MS.
+					const targetMailboxes = this.getAccounts
+						.filter((account) => !account.isUnified && !isDisabled(account))
+						.flatMap((account) => this.getMailboxes(account.id).filter((mb) => mb.specialRole === mailbox.specialRole))
+					return mapWithConcurrencyLimit(targetMailboxes, ENVELOPE_FETCH_CONCURRENCY, (mb) => this.syncEnvelopes({
+						mailboxId: mb.databaseId,
+						init,
+						workClass,
+						// Always, rather than inheriting the caller's choice.
+						// The three sections are three views of ONE physical
+						// refresh, and the concurrency limiter staggers them,
+						// so without this only strictly-overlapping calls
+						// collapse: a section that starts just after a sibling's
+						// sync settled would open its own. Measured: 26 physical
+						// syncs for two rounds of three sections, versus 10 with
+						// this on.
+						coalesceRecent: true,
 					}))
 				}
 
