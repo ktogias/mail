@@ -246,6 +246,58 @@ describe('Vuex store actions', () => {
 		expect(store.priorityInboxViewRevision).toBe(1)
 	})
 
+	// A cold Priority view must not wait for IMAP before it paints. Everything
+	// the sections render comes from the local database, which already holds
+	// the cached messages, so gating the first paint on a five-inbox IMAP
+	// fan-out buys freshness the user cannot see. Live on 2026-07-27 19:19
+	// EEST: after a reload the counters appeared immediately -- they come from
+	// the independent stats request -- above three sections reading
+	// "No messages", while the source syncs were still running at 3.7-5.9s
+	// each. The user gave up waiting and pulled to refresh.
+	it('paints a cold Priority view from the database before the source sync lands', async () => {
+		normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+		const account = { id: 13 }
+		store.addAccountMutation(account)
+		store.addMailboxMutation({
+			account,
+			mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+		})
+		store.preferences['layout-message-view'] = 'threaded'
+		store.preferences['sort-order'] = 'newest'
+		store.preferences['sort-favorites'] = 'false'
+		PriorityInboxService.fetchPriorityInboxStats.mockResolvedValue({
+			sections: {
+				favorite: { total: 0, unread: 0 },
+				important: { total: 0, unread: 0 },
+				other: { total: 0, unread: 0 },
+			},
+			complete: true,
+		})
+		MessageService.fetchEnvelopes.mockResolvedValue([])
+		// The IMAP sync never settles for the duration of this test.
+		let releaseSync
+		MessageService.syncEnvelopes.mockReturnValue(new Promise((resolve) => {
+			releaseSync = () => resolve({
+				newMessages: [],
+				changedMessages: [],
+				vanishedMessages: [],
+				stats: { unread: 0 },
+			})
+		}))
+
+		const refresh = store.refreshPriorityInboxView({ syncSources: true })
+		// Let the database read and its publication run to completion.
+		for (let tick = 0; tick < 30; tick++) {
+			await Promise.resolve()
+		}
+
+		expect(MessageService.fetchEnvelopes).toHaveBeenCalled()
+		expect(store.priorityInboxViewRevision).toBeGreaterThan(0)
+
+		releaseSync()
+		await refresh
+	})
+
 	it('refreshes a Priority head without discarding an already loaded older tail', async () => {
 		normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
 		const account = { id: 13 }

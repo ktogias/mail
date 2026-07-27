@@ -1663,7 +1663,26 @@ export default function mainStoreActions() {
 			const sectionQueries = priorityInboxSectionQueries(searchQuery, sortFavorites)
 			const baseQuery = priorityInboxBaseQuery(searchQuery)
 
-			if (syncSources) {
+			// Nothing on screen yet: the sections have never been published in
+			// this tab. Everything below reads the LOCAL DATABASE, which
+			// already holds the cached messages, so making the first paint
+			// wait for IMAP buys freshness the user cannot see and cannot use.
+			//
+			// Confirmed live on 2026-07-27 19:19 EEST: after a reload the
+			// counters appeared at once -- they come from the independent
+			// priority-inbox/stats request -- above three sections all reading
+			// "Κανένα μήνυμα", because the section pages were still queued
+			// behind a five-inbox IMAP fan-out whose slowest source is a Gmail
+			// account measured at 3.7-5.9s per sync. The user waited, saw
+			// nothing, and pulled to refresh.
+			//
+			// A warm refresh keeps the old order: something is already
+			// rendered, so there is nothing to paint early and the extra
+			// database round would be pure cost on a NAS where these queries
+			// run for seconds.
+			const sectionsAreCold = Object.values(sectionQueries)
+				.every((query) => this.getEnvelopes(UNIFIED_INBOX_ID, query).length === 0)
+			const syncSourcesNow = async () => {
 				// A Priority view is fed by every physical INBOX. Sync each
 				// source once, unfiltered; do not repeat the old two-section
 				// virtual fan-out. A contended account must not prevent the
@@ -1679,6 +1698,18 @@ export default function mainStoreActions() {
 				}).catch((error) => {
 					logger.debug('One or more Priority Inbox source syncs were deferred; publishing the available exact snapshot', { error })
 				})
+			}
+			let deferredSourceSync
+			if (syncSources) {
+				if (sectionsAreCold) {
+					// Started now, awaited after the first publish, so the
+					// IMAP round trip overlaps the database read instead of
+					// preceding it. The caller still cannot resolve before the
+					// sync has landed and been published.
+					deferredSourceSync = syncSourcesNow()
+				} else {
+					await syncSourcesNow()
+				}
 			}
 
 			if (hasTextSearchPredicate(baseQuery)) {
@@ -1811,6 +1842,19 @@ export default function mainStoreActions() {
 				.filter((envelope) => !previousVisibleIds.has(envelope.databaseId)))
 			this.markPriorityInboxViewRefreshedMutation()
 			await this.refreshPriorityInboxStats(workClass)
+
+			// The cold first paint is on screen. Now let the IMAP sync that has
+			// been running alongside it land, and republish. Bounded to exactly
+			// one extra pass: the re-entry carries syncSources: false, so it
+			// cannot start another deferred sync of its own.
+			if (deferredSourceSync !== undefined) {
+				await deferredSourceSync
+				return this.refreshPriorityInboxView({
+					searchQuery,
+					workClass,
+					syncSources: false,
+				})
+			}
 			return sectionQueries
 		},
 		async refreshPriorityInboxStats(workClass = WorkClass.ACTIVE_CONTENT) {

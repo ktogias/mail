@@ -1,3 +1,16 @@
+## 5.11.0-dev.0.ktogias.35 (2026-07-27, resource-constrained deployment fork)
+
+### Cold Start
+
+* paint a cold Priority Inbox from the local database before the source IMAP sync lands, instead of after it — the sections render entirely from cached rows, so gating the first paint on a five-inbox fan-out (3.7–5.9s per source here) bought freshness the user could not see
+* the counters were never gated, because they come from an independent stats request — which is why a reload showed correct numbers above three sections all reading "No messages"
+* a warm refresh keeps the previous order: something is already on screen, and the extra database round costs seconds on this hardware
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.34 (2026-07-27, resource-constrained deployment fork)
 
 ### Source Sync Fan-Out
