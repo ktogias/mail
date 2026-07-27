@@ -611,6 +611,18 @@ function flagPredicateTokenDefinitions() {
 		'not:starred': { matches: (flags) => flags?.flagged !== true, positive: (flags) => flags?.flagged === true },
 		[priorityImportantQuery]: { matches: (flags) => flags?.important === true },
 		[priorityOtherQuery]: { matches: (flags) => flags?.important !== true, positive: (flags) => flags?.important === true },
+		// The "Unread only" filter. Existential like is:starred: the
+		// thread belongs in the list while ANY member is unread, which is
+		// exactly what hasUnseenInThread reports and what
+		// setHasUnseenInThreadForThreadMutation() already maintains across
+		// a thread's loaded members. `matches` stays per-message for the
+		// flat view; `threadMatches` is consulted only in threaded mode
+		// (see threadStillMatchesFlagPredicate()), so reading a message
+		// whose thread still has unread siblings correctly keeps the row.
+		'flags:unread': {
+			matches: (flags) => flags?.seen !== true,
+			threadMatches: (flags) => (flags?.hasUnseenInThread ?? flags?.seen === false) === true,
+		},
 	}
 }
 
@@ -3887,6 +3899,9 @@ export default function mainStoreActions() {
 						flag: 'flagged',
 						value: !oldState,
 					})
+					// Favorites membership and its counter read the THREAD-wide
+					// aggregate in threaded mode, not this flag.
+					this.refreshThreadFlagAggregateMutation(envelope, 'flagged')
 					reclassify()
 
 					try {
@@ -4017,6 +4032,9 @@ export default function mainStoreActions() {
 					flag: 'important',
 					value: important,
 				}))
+				// Section membership and the counters read the THREAD-wide
+				// aggregate in threaded mode, not this flag.
+				importanceCopies.forEach((copy) => this.refreshThreadFlagAggregateMutation(copy, 'important'))
 
 				const importantTag = this.getImportantTag
 				const applyTagMutation = (targetImportant) => {
@@ -6268,6 +6286,19 @@ export default function mainStoreActions() {
 			// (prefer-to-over-include, the same eventually-consistent
 			// trade-off this mechanism has always made for ADDs).
 			const existentialTokens = tokens.filter((token) => knownTokenPredicates[token].positive === undefined)
+			// A token that carries its own thread-wide reading (flags:unread via
+			// hasUnseenInThread) is authoritative here and needs no sibling scan:
+			// it already answers "does the THREAD match", which is the question.
+			const threadAware = existentialTokens.filter((token) => knownTokenPredicates[token].threadMatches !== undefined)
+			if (threadAware.length > 0) {
+				if (!threadAware.every((token) => knownTokenPredicates[token].threadMatches(envelope.flags))) {
+					return false
+				}
+				const remaining = existentialTokens.filter((token) => knownTokenPredicates[token].threadMatches === undefined)
+				if (remaining.length === 0) {
+					return true
+				}
+			}
 			if (existentialTokens.every((token) => knownTokenPredicates[token].matches(envelope.flags))) {
 				return true
 			}
@@ -6506,6 +6537,44 @@ export default function mainStoreActions() {
 				.forEach((sibling) => {
 					this.flagEnvelopeMutation({ envelope: sibling, flag: 'hasUnseenInThread', value })
 				})
+		},
+		/**
+		 * The importance/star counterpart of
+		 * setHasUnseenInThreadForThreadMutation().
+		 *
+		 * hasImportantInThread and hasFlaggedInThread are thread-wide,
+		 * mailbox-scoped aggregates the server computes, and in threaded mode
+		 * they -- not the per-message flag -- decide which Priority section a
+		 * row belongs to and which counter it feeds (see prioritySection()).
+		 * Unlike hasUnseenInThread they were READ in four places and written in
+		 * none, so a user's own star/important toggle left them describing the
+		 * state before the click until a server response replaced the flags.
+		 *
+		 * Recomputed from the thread members this client knows rather than
+		 * mirroring the toggle: turning the attribute ON is proof the thread
+		 * carries it, but turning it OFF only means THIS message stopped
+		 * carrying it -- a sibling may still. Mailbox-scoped for the same
+		 * reason the unseen aggregate is: the server computes a separate value
+		 * per mailbox, so a copy of the thread in another folder is left alone.
+		 *
+		 * @param {object} envelope the envelope whose flag just changed
+		 * @param {string} flag either 'important' or 'flagged'
+		 */
+		refreshThreadFlagAggregateMutation(envelope, flag) {
+			const aggregate = flag === 'important' ? 'hasImportantInThread' : 'hasFlaggedInThread'
+			const siblings = envelope.threadRootId
+				? this.getEnvelopesByThreadRootId(envelope.accountId, envelope.threadRootId)
+						.filter((sibling) => sibling.mailboxId === envelope.mailboxId)
+				: []
+			const members = siblings.length > 0 ? siblings : [envelope]
+			const value = members.some((member) => member.flags?.[flag] === true)
+
+			members.forEach((member) => {
+				if (member.flags?.[aggregate] === value) {
+					return
+				}
+				Vue.set(member.flags, aggregate, value)
+			})
 		},
 		addTagMutation({ tag }) {
 			Vue.set(this.tags, tag.id, tag)

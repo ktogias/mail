@@ -1,3 +1,20 @@
+## 5.11.0-dev.0.ktogias.26 (2026-07-27, resource-constrained deployment fork)
+
+### Thread-wide Flag Aggregates
+
+* maintain `hasImportantInThread` and `hasFlaggedInThread` when the user toggles importance or a star — in threaded mode these, not the per-message flag, decide which Priority section a row belongs to and which counter it feeds, and they were read in four places and written in none
+* recompute them from the thread's locally known members rather than mirroring the toggle, so unmarking one message does not clear the aggregate while a sibling still carries the flag
+
+### Unread-only View
+
+* make `flags:unread` locally evaluable so a toggle moves the row immediately in the "Unread only" view instead of waiting for a server round trip
+* treat it as thread-wide via `hasUnseenInThread`, so a thread keeps its place while any member is still unread
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.25 (2026-07-27, resource-constrained deployment fork)
 
 ### Priority Section Membership

@@ -2473,6 +2473,69 @@ describe('Vuex store actions', () => {
 			expect(store.mailboxes[11].envelopeLists['mentions:false match:allof not:starred is:pi-other']).toContain(50)
 		})
 
+		it('unmarking important also clears the thread-wide aggregate the sections classify by', async () => {
+			// prioritySection() reads hasImportantInThread in threaded mode,
+			// not flags.important. The aggregate was read in four places and
+			// written in none, so it kept describing the pre-click state.
+			store.preferences['layout-message-view'] = 'threaded'
+			const envelope = seedListedEnvelope(60, { flagged: false, important: true, hasImportantInThread: true })
+			MessageService.setEnvelopeFlags.mockReturnValue(new Promise(() => {}))
+
+			store.toggleEnvelopeImportant(envelope)
+			await Promise.resolve()
+
+			expect(envelope.flags.hasImportantInThread).toBe(false)
+		})
+
+		it('keeps the thread-wide aggregate while a sibling in the same mailbox is still important', async () => {
+			store.preferences['layout-message-view'] = 'threaded'
+			const envelope = seedListedEnvelope(61, { flagged: false, important: true, hasImportantInThread: true })
+			envelope.threadRootId = 'shared-thread'
+			envelope.accountId = 13
+			const sibling = seedListedEnvelope(62, { flagged: false, important: true, hasImportantInThread: true })
+			sibling.threadRootId = 'shared-thread'
+			sibling.accountId = 13
+			MessageService.setEnvelopeFlags.mockReturnValue(new Promise(() => {}))
+
+			store.toggleEnvelopeImportant(envelope)
+			await Promise.resolve()
+
+			expect(envelope.flags.important).toBe(false)
+			expect(sibling.flags.important).toBe(true)
+			expect(envelope.flags.hasImportantInThread).toBe(true)
+		})
+
+		it('keeps a still-unread thread in the unread-only lists while moving it between sections', async () => {
+			// flags:unread is existential and thread-wide: hasUnseenInThread
+			// is the authority. Unmarking importance must move the row across
+			// sections without evicting it from the unread-filtered view.
+			store.preferences['layout-message-view'] = 'threaded'
+			const envelope = seedListedEnvelope(63, { seen: false, hasUnseenInThread: true, flagged: false, important: true })
+			store.mailboxes[11].envelopeLists['flags:unread match:allof not:starred is:pi-important'] = [63]
+			store.mailboxes[11].envelopeLists['flags:unread match:allof not:starred is:pi-other'] = []
+			MessageService.setEnvelopeFlags.mockReturnValue(new Promise(() => {}))
+
+			store.toggleEnvelopeImportant(envelope)
+			await Promise.resolve()
+
+			expect(store.mailboxes[11].envelopeLists['flags:unread match:allof not:starred is:pi-important']).not.toContain(63)
+			expect(store.mailboxes[11].envelopeLists['flags:unread match:allof not:starred is:pi-other']).toContain(63)
+		})
+
+		it('drops a fully-read thread out of the unread-only lists', async () => {
+			store.preferences['layout-message-view'] = 'threaded'
+			const envelope = seedListedEnvelope(64, { seen: true, hasUnseenInThread: false, flagged: false, important: true })
+			store.mailboxes[11].envelopeLists['flags:unread match:allof not:starred is:pi-important'] = [64]
+			store.mailboxes[11].envelopeLists['flags:unread match:allof not:starred is:pi-other'] = []
+			MessageService.setEnvelopeFlags.mockReturnValue(new Promise(() => {}))
+
+			store.toggleEnvelopeImportant(envelope)
+			await Promise.resolve()
+
+			expect(store.mailboxes[11].envelopeLists['flags:unread match:allof not:starred is:pi-important']).not.toContain(64)
+			expect(store.mailboxes[11].envelopeLists['flags:unread match:allof not:starred is:pi-other']).not.toContain(64)
+		})
+
 		it('still refuses to reclassify a list carrying a content predicate it cannot evaluate', async () => {
 			const envelope = seedListedEnvelope(51, { flagged: false, important: true })
 			store.mailboxes[11].envelopeLists['subject:invoice not:starred is:pi-important'] = [51]
