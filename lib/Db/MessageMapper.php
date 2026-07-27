@@ -279,24 +279,35 @@ class MessageMapper extends QBMapper {
 				),
 			);
 
-		// Only threads that actually contain something unread.
+		// Only threads that actually contain something unread, reached
+		// through a JOIN rather than an OR.
 		//
 		// This is the whole reason the section totals were dropped. Counting
 		// totals means visiting every message: measured across these five
 		// inboxes, 48,972 rows grouped into 41,874 threads, 373ms warm and
 		// 6,820ms cold -- and that spread, not the average, is what made the
 		// Priority Inbox feel unpredictable. Unread is naturally tiny: the
-		// same five inboxes had 13 unread threads. Restricting the scan to
-		// them costs 20ms warm and 300ms cold.
+		// same five inboxes had 13 unread threads.
 		//
-		// Row-value IN, not a correlated EXISTS with an OR inside it: that
-		// shape cannot be driven from an index and is what made the section
-		// page take seconds before .37. The mailbox id travels with the thread
-		// root deliberately -- a thread root is a message-id, and the same
-		// message can sit in two accounts' inboxes, so a set of bare roots
-		// would let one account's unread thread count in another's.
+		// .38 expressed the restriction as
+		//   (pm is itself unread) OR ((mailbox_id, thread_root_id) IN <unread roots>)
+		// which is correct but keeps an OR in the WHERE, and an OR there is
+		// what stops the planner driving the scan from anything selective:
+		// 156ms warm, 1,243ms cold. Splitting it into two branches that are
+		// each individually index-friendly -- a join for real threads, a plain
+		// scan for messages that have no thread root and therefore stand alone
+		// -- costs 21ms.
+		//
+		// A partial index on the unread rows was built and measured on
+		// production first: it changed nothing, 21ms either way, and was
+		// dropped again. The shape was the whole problem.
+		//
+		// The mailbox id travels with the thread root deliberately: a thread
+		// root is a message-id, and the same message can sit in two accounts'
+		// inboxes, so joining on the root alone would let one account's unread
+		// thread count in another's.
 		$unreadThreads = $this->db->getQueryBuilder();
-		$unreadThreads->select('u.mailbox_id', 'u.thread_root_id')
+		$unreadThreads->selectDistinct(['u.mailbox_id', 'u.thread_root_id'])
 			->from($this->getTableName(), 'u')
 			->where(
 				$unreadThreads->expr()->in(
@@ -310,10 +321,19 @@ class MessageMapper extends QBMapper {
 			);
 
 		if ($threaded) {
-			$source->andWhere($source->createFunction(
-				'((pm.flag_seen = ' . $false . ' AND pm.flag_deleted = ' . $false . ')'
-				. ' OR (pm.mailbox_id, pm.thread_root_id) IN (' . $unreadThreads->getSQL() . '))'
-			));
+			$source->innerJoin(
+				'pm',
+				$source->createFunction('(' . $unreadThreads->getSQL() . ')'),
+				'ut',
+				$source->expr()->andX(
+					$source->expr()->eq('pm.mailbox_id', 'ut.mailbox_id', IQueryBuilder::PARAM_INT),
+					$source->expr()->eq('pm.thread_root_id', 'ut.thread_root_id', IQueryBuilder::PARAM_STR),
+				),
+			);
+			// Real threads only; the standalone messages are the second branch
+			// below, because a NULL thread_root_id can never join.
+			$source->groupBy('pm.mailbox_id')
+				->addGroupBy('pm.thread_root_id');
 		} else {
 			// Every row stands for itself, so the unread rows ARE the answer.
 			$source->andWhere(
@@ -322,14 +342,30 @@ class MessageMapper extends QBMapper {
 			);
 		}
 
+		$sourceSql = $source->getSQL();
 		if ($threaded) {
-			// NULL thread roots are independent messages. The discriminator
-			// preserves that behavior while grouping real thread roots once.
-			$source->groupBy('pm.mailbox_id')
-				->addGroupBy('pm.thread_root_id')
-				->addGroupBy($source->createFunction(
-					'CASE WHEN pm.thread_root_id IS NULL THEN pm.id ELSE 0 END'
-				));
+			// Messages with no thread root stand alone and cannot be reached by
+			// the join above. Dropping them would silently lose every unread
+			// standalone message from the counters.
+			$standalone = $this->db->getQueryBuilder();
+			$standalone->select(
+				$standalone->createFunction('1 AS eligible'),
+				$standalone->createFunction('1 AS unread'),
+				$standalone->createFunction('CASE WHEN sm.flag_flagged = ' . $true . ' THEN 1 ELSE 0 END AS flagged'),
+				$standalone->createFunction('CASE WHEN sm.flag_important = ' . $true . ' THEN 1 ELSE 0 END AS important'),
+			)
+				->from($this->getTableName(), 'sm')
+				->where(
+					$standalone->expr()->in(
+						'sm.mailbox_id',
+						$source->createNamedParameter(array_values(array_unique($mailboxIds)), IQueryBuilder::PARAM_INT_ARRAY),
+						IQueryBuilder::PARAM_INT_ARRAY,
+					),
+					$standalone->expr()->isNull('sm.thread_root_id'),
+					$standalone->expr()->eq('sm.flag_seen', $false, IQueryBuilder::PARAM_BOOL),
+					$standalone->expr()->eq('sm.flag_deleted', $false, IQueryBuilder::PARAM_BOOL),
+				);
+			$sourceSql .= ' UNION ALL ' . $standalone->getSQL();
 		}
 
 		$eligible = 'priority_rows.eligible = 1';
@@ -358,7 +394,7 @@ class MessageMapper extends QBMapper {
 		}
 
 		$sql = 'SELECT ' . implode(', ', $select)
-			. ' FROM (' . $source->getSQL() . ') priority_rows';
+			. ' FROM (' . $sourceSql . ') priority_rows';
 		$row = $this->executeWithCountersMemory(function () use ($sql, $source): array {
 			$result = $this->db->executeQuery($sql, $source->getParameters(), $source->getParameterTypes());
 			$row = $result->fetchAssociative() ?: [];

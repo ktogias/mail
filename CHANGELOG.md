@@ -1,3 +1,17 @@
+## 5.11.0-dev.0.ktogias.44 (2026-07-28, resource-constrained deployment fork)
+
+### Priority Counters
+
+* reach the unread threads through a **join** instead of an `OR`, and handle messages with no thread root as a second `UNION ALL` branch — `.38`'s `(pm is unread) OR ((mailbox_id, thread_root_id) IN <unread roots>)` was correct but kept an `OR` in the `WHERE`, which stops the planner driving the scan from anything selective
+* **156 ms warm / 1,243 ms cold → 21 ms**, identical results on production data
+* no schema change: a partial index on the unread rows was built on production, measured, found to change nothing (21 ms either way) and dropped again. The query shape was the whole problem
+* the standalone branch is not an optimisation — a `NULL` thread root can never join, so without it every unread message that has no thread would silently vanish from the counters. Proven by removing it and watching the count drop
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.43 (2026-07-28, resource-constrained deployment fork)
 
 ### Priority Inbox Header
