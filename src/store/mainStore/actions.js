@@ -3689,32 +3689,10 @@ export default function mainStoreActions() {
 						// none of the three is loaded yet (nothing to
 						// refresh, or the priority inbox hasn't been opened
 						// this session).
-						const loadedPriorityQueries = Object.keys(mailbox.envelopeLists)
-							.filter((listId) => {
-								const tokens = listId.split(' ')
-								return tokens.includes(priorityImportantQuery) || tokens.includes(priorityOtherQuery) || tokens.includes('is:starred')
-							})
-						const queriesToRefresh = loadedPriorityQueries.length > 0
-							? loadedPriorityQueries
-							: [priorityImportantQuery, priorityOtherQuery]
-
-						for (const query of queriesToRefresh) {
-							logger.info("sync'ing priority inbox section", { query })
-							const list = mailbox.envelopeLists[normalizedEnvelopeListId(query)]
-							if (list === undefined) {
-								await this.fetchEnvelopes({
-									mailboxId: UNIFIED_INBOX_ID,
-									query,
-									workClass: WorkClass.MAINTENANCE,
-								})
-							}
-
-							await this.syncEnvelopes({
-								mailboxId: UNIFIED_INBOX_ID,
-								query,
-								workClass: WorkClass.MAINTENANCE,
-							})
-						}
+						await this.refreshPriorityInboxView({
+							workClass: WorkClass.MAINTENANCE,
+							syncSources: true,
+						})
 					})().catch((error) => {
 						logger.error('priority inbox refresh failed', { error })
 					})
@@ -7224,8 +7202,13 @@ export default function mainStoreActions() {
 			return this.envelopes[id]
 		},
 		getEnvelopes(mailboxId, query) {
-			const list = this.getMailbox(mailboxId).envelopeLists[normalizedEnvelopeListId(query)] || []
-			return list.map((msgId) => this.envelopes[msgId])
+			// Array.isArray, not a bare `|| []`: a truthy non-array here threw
+			// a TypeError deep inside refreshPriorityInboxView(), where the
+			// tick's catch-all swallowed it and the whole refresh silently did
+			// nothing. An accessor this widely called should degrade to "no
+			// envelopes known" rather than take a caller down.
+			const list = this.getMailbox(mailboxId).envelopeLists[normalizedEnvelopeListId(query)]
+			return Array.isArray(list) ? list.map((msgId) => this.envelopes[msgId]) : []
 		},
 		getEnvelopesByThreadRootId(accountId, threadRootId) {
 			return sortBy(

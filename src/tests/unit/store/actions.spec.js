@@ -99,6 +99,87 @@ describe('Vuex store actions', () => {
 		expect(store.mailboxes.priority.unread).toBe(6)
 	})
 
+	it('drops a server-downgraded message out of the Important section within one background tick', async () => {
+		// The regression the old per-section sync loop was written for: a
+		// message the classifier had already downgraded (flag_important false
+		// in the database hours earlier) kept showing as important
+		// indefinitely, because the compound key the screen renders never got
+		// a refresh of its own. The loop is gone; this pins the requirement
+		// against its replacement.
+		normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+		const account = { id: 13 }
+		store.addAccountMutation(account)
+		store.addMailboxMutation({
+			account,
+			mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+		})
+		store.currentViewMailboxId = 'priority'
+		store.preferences['layout-message-view'] = 'threaded'
+		store.preferences['sort-order'] = 'newest'
+		store.preferences['sort-favorites'] = 'true'
+		store.mailboxes[11].envelopeLists[''] = []
+
+		// The exact keys the Priority Inbox renders in production: the base
+		// scope tokens are present even with no user search, and it was those
+		// tokens that kept the local reclassifier away from these lists until
+		// .25.
+		store.currentPriorityInboxSearchQuery = 'mentions:false match:allof'
+		const importantQuery = 'mentions:false match:allof not:starred is:pi-important'
+		const otherQuery = 'mentions:false match:allof not:starred is:pi-other'
+		store.mailboxes[UNIFIED_INBOX_ID].envelopeLists[importantQuery] = [101]
+		store.mailboxes[UNIFIED_INBOX_ID].envelopeLists[otherQuery] = []
+
+		// The server now reports it as ordinary mail.
+		const downgraded = {
+			databaseId: 101,
+			mailboxId: 11,
+			dateInt: 10,
+			threadRootId: 'thread-101',
+			flags: {
+				seen: false,
+				hasUnseenInThread: true,
+				hasFlaggedInThread: false,
+				hasImportantInThread: false,
+				important: false,
+			},
+			tags: [],
+		}
+		// It is currently known to this client as important -- that is why it
+		// is sitting in the Important list.
+		store.envelopes[101] = {
+			...downgraded,
+			flags: { ...downgraded.flags, important: true, hasImportantInThread: true },
+		}
+		MessageService.fetchEnvelopes.mockResolvedValue([downgraded])
+		PriorityInboxService.fetchPriorityInboxStats.mockResolvedValue({
+			sections: {
+				favorite: { total: 0, unread: 0 },
+				important: { total: 0, unread: 0 },
+				other: { total: 1, unread: 1 },
+			},
+			complete: true,
+		})
+		// What a canonical sync of the physical inbox does with a changed
+		// message: it reports it, and the store updates it. That update is
+		// what reclassifies the compound section lists locally -- which only
+		// became possible in .25, when section-invariant scope tokens stopped
+		// disqualifying those keys. Before that the per-section IMAP sync was
+		// the only thing that could evict a downgraded message, which is
+		// exactly why the loop existed.
+		store.syncEnvelopes = vi.fn(async ({ mailboxId }) => {
+			if (mailboxId !== 11) {
+				return []
+			}
+			store.updateEnvelopeMutation({ envelope: downgraded })
+			return [downgraded]
+		})
+
+		await store.syncWatchedMailboxes()
+
+		expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists[importantQuery]).not.toContain(101)
+		expect(store.mailboxes[UNIFIED_INBOX_ID].envelopeLists[otherQuery]).toContain(101)
+	})
+
 	it('refreshes the exact active Priority compound lists with one priority-split request per source', async () => {
 		normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
 		const account = { id: 13 }
@@ -2978,6 +3059,24 @@ describe('Vuex store actions', () => {
 	})
 
 	describe('inbox sync', () => {
+		beforeEach(() => {
+			// The priority refresh delegates to refreshPriorityInboxView(), which
+			// calls the MessageService fetch directly. The module auto-mock
+			// resolves to undefined, which is not a shape any real fetch returns.
+			MessageService.fetchEnvelopes.mockResolvedValue([])
+			PriorityInboxService.fetchPriorityInboxStats.mockResolvedValue({
+				sections: {
+					favorite: { total: 0, unread: 0 },
+					important: { total: 0, unread: 0 },
+					other: { total: 0, unread: 0 },
+				},
+				complete: true,
+			})
+			// Spied, not stubbed: the delegation assertions below need to see
+			// the call, and the surrounding tests still need it to run.
+			vi.spyOn(store, 'refreshPriorityInboxView')
+		})
+
 		it('fetches the inbox first', async () => {
 			const account13 = {
 				id: 13,
@@ -3121,7 +3220,11 @@ describe('Vuex store actions', () => {
 			await store.syncWatchedMailboxes()
 
 			expect(store.fetchEnvelopes).not.toHaveBeenCalled()
-			expect(store.syncEnvelopes).toHaveBeenCalledTimes(4)
+			// Two watched mailboxes, then ONE canonical unified sync for the
+			// priority refresh -- not one IMAP fan-out per section key. The
+			// section lists are then reconciled from the local database by
+			// refreshPriorityInboxView()'s prioritySplit fetches.
+			expect(store.syncEnvelopes).toHaveBeenCalledTimes(3)
 			expect(store.syncEnvelopes).toHaveBeenNthCalledWith(1, {
 				mailboxId: 11,
 				query: undefined,
@@ -3136,14 +3239,10 @@ describe('Vuex store actions', () => {
 			})
 			expect(store.syncEnvelopes).toHaveBeenNthCalledWith(3, {
 				mailboxId: UNIFIED_INBOX_ID,
-				query: 'is:pi-important',
 				workClass: 'maintenance',
+				coalesceRecent: true,
 			})
-			expect(store.syncEnvelopes).toHaveBeenNthCalledWith(4, {
-				mailboxId: UNIFIED_INBOX_ID,
-				query: 'is:pi-other',
-				workClass: 'maintenance',
-			})
+			expect(store.syncEnvelopes).not.toHaveBeenCalledWith(expect.objectContaining({ query: 'is:pi-important' }))
 			// Only the genuinely unseen message is news -- the one that came
 			// back already marked seen (read elsewhere before this sync) must
 			// not be part of the notification.
@@ -3185,8 +3284,8 @@ describe('Vuex store actions', () => {
 			await store.syncWatchedMailboxes()
 
 			// New messages did arrive, so the priority inbox is still refreshed
-			// (inbox + the two priority queries) ...
-			expect(store.syncEnvelopes).toHaveBeenCalledTimes(3)
+			// (the inbox, then one canonical unified sync) ...
+			expect(store.syncEnvelopes).toHaveBeenCalledTimes(2)
 			// ... but nothing is unseen, so there is nothing to notify about.
 			expect(NotificationService.showNewMessagesNotification).not.toHaveBeenCalled()
 		})
@@ -3865,8 +3964,7 @@ describe('Vuex store actions', () => {
 
 			// The refresh fires while mailbox 21's sync is still pending.
 			await vi.waitFor(() => {
-				expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-important', workClass: 'maintenance' })
-				expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-other', workClass: 'maintenance' })
+				expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', workClass: 'maintenance', coalesceRecent: true })
 			})
 			expect(resolveSlow).toBeDefined()
 
@@ -3911,10 +4009,15 @@ describe('Vuex store actions', () => {
 
 			await store.syncWatchedMailboxes()
 
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'not:starred is:pi-important', workClass: 'maintenance' })
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'not:starred is:pi-other', workClass: 'maintenance' })
-			expect(store.syncEnvelopes).not.toHaveBeenCalledWith(expect.objectContaining({ mailboxId: 'unified', query: 'is:pi-important' }))
-			expect(store.syncEnvelopes).not.toHaveBeenCalledWith(expect.objectContaining({ mailboxId: 'unified', query: 'is:pi-other' }))
+			// The requirement is unchanged -- the compound keys the screen
+			// actually renders must be reconciled -- but it is no longer met by
+			// one IMAP fan-out per key. refreshPriorityInboxView() derives those
+			// keys from priorityInboxSectionQueries() and repopulates all three
+			// sections from the local database, so the tick issues ONE canonical
+			// unified sync and no per-section sync at all.
+			expect(store.refreshPriorityInboxView).toHaveBeenCalledWith(expect.objectContaining({ syncSources: true }))
+			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', workClass: 'maintenance', coalesceRecent: true })
+			expect(store.syncEnvelopes).not.toHaveBeenCalledWith(expect.objectContaining({ query: expect.stringContaining('is:pi-') }))
 		})
 
 		it("also refreshes the priority inbox's Favorites section (is:starred), not just Important/Other", async () => {
@@ -3949,10 +4052,14 @@ describe('Vuex store actions', () => {
 
 			await store.syncWatchedMailboxes()
 
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:starred', workClass: 'maintenance' })
+			// Favorites is one of the three sections refreshPriorityInboxView()
+			// returns from a single prioritySplit request per inbox, so it needs
+			// no is:starred IMAP sync of its own either.
+			expect(store.refreshPriorityInboxView).toHaveBeenCalledWith(expect.objectContaining({ syncSources: true }))
+			expect(store.syncEnvelopes).not.toHaveBeenCalledWith(expect.objectContaining({ query: 'is:starred' }))
 		})
 
-		it('falls back to the bare priority queries when neither the bare nor compound keys are loaded yet', async () => {
+		it('still refreshes the priority view when no section list is loaded yet', async () => {
 			// First-ever load of this session: nothing loaded on the
 			// unified mailbox yet, so there is nothing to distinguish bare
 			// from compound -- same behavior as before this fix.
@@ -3976,8 +4083,12 @@ describe('Vuex store actions', () => {
 
 			await store.syncWatchedMailboxes()
 
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-important', workClass: 'maintenance' })
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-other', workClass: 'maintenance' })
+			// The old loop needed a "fall back to the bare keys" branch when
+			// nothing was loaded. refreshPriorityInboxView() computes the keys
+			// from the current search and sort-favorites preference instead, so
+			// there is nothing to fall back to and no per-section sync either.
+			expect(store.refreshPriorityInboxView).toHaveBeenCalledWith(expect.objectContaining({ syncSources: true }))
+			expect(store.syncEnvelopes).not.toHaveBeenCalledWith(expect.objectContaining({ query: expect.stringContaining('is:pi-') }))
 		})
 
 		it('keeps refreshing an OPEN priority inbox when interaction priority activates mid-tick', async () => {
@@ -4013,8 +4124,12 @@ describe('Vuex store actions', () => {
 
 			await store.syncWatchedMailboxes()
 
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-important', workClass: 'maintenance' })
-			expect(store.syncEnvelopes).toHaveBeenCalledWith({ mailboxId: 'unified', query: 'is:pi-other', workClass: 'maintenance' })
+			// The old loop needed a "fall back to the bare keys" branch when
+			// nothing was loaded. refreshPriorityInboxView() computes the keys
+			// from the current search and sort-favorites preference instead, so
+			// there is nothing to fall back to and no per-section sync either.
+			expect(store.refreshPriorityInboxView).toHaveBeenCalledWith(expect.objectContaining({ syncSources: true }))
+			expect(store.syncEnvelopes).not.toHaveBeenCalledWith(expect.objectContaining({ query: expect.stringContaining('is:pi-') }))
 		})
 
 		it('still defers the refresh on mid-tick interaction when the priority inbox is NOT open', async () => {

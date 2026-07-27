@@ -1,3 +1,19 @@
+## 5.11.0-dev.0.ktogias.27 (2026-07-27, resource-constrained deployment fork)
+
+### Priority Refresh Fan-out
+
+* replace the background tick's per-section IMAP sync loop with one exact Priority view refresh: one canonical sync per physical inbox, then one `prioritySplit` request per inbox that returns Favorite, Important and Other together from the local database
+* removes roughly 130 of every 180 sync requests — measured live at ~5-8x more sync traffic on inboxes than the tick count, all of it pulling the same changes
+
+### Robustness
+
+* `getEnvelopes()` degrades to "no envelopes known" for any non-array list instead of throwing, which previously took down a whole Priority refresh inside a catch-all that hid it
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.26 (2026-07-27, resource-constrained deployment fork)
 
 ### Thread-wide Flag Aggregates
