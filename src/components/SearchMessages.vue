@@ -273,7 +273,7 @@
 			</NcDialog>
 		</div>
 		<!-- Filter buttons -->
-		<div v-if="showButtons" class="filter-buttons">
+		<div v-if="showButtons || persistentFilters" class="filter-buttons">
 			<NcChip
 				:text="t('mail', 'Has attachment')"
 				:no-close="true"
@@ -341,6 +341,21 @@ export default {
 		accountId: {
 			type: Number,
 			required: true,
+		},
+
+		/**
+		 * Keep the quick-filter row visible without focusing the search box.
+		 *
+		 * The Priority Inbox needs it: its unread filter used to be a separate
+		 * checkbox in the overview bar, which meant one filter with two
+		 * controls, in two widget languages, in two places -- and the checkbox
+		 * only ever delegated to setUnread() here anyway. Removing it leaves
+		 * this row as the single home for "Unread", beside its siblings
+		 * "Has attachment" and "To me", which is the point.
+		 */
+		persistentFilters: {
+			type: Boolean,
+			default: false,
 		},
 	},
 

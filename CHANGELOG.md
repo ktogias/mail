@@ -1,3 +1,24 @@
+## 5.11.0-dev.0.ktogias.39 (2026-07-27, resource-constrained deployment fork)
+
+### Priority Inbox Header
+
+* remove the `/ 0` left behind when the section totals were dropped in `.38` — a section with nothing unread rendered "0 / 0", two zeroes carrying no information
+* one number per section chip, the actionable one, and only when there is something to act on
+* a section that received new mail is marked with a dot instead of a second, competing number — "has new mail" and "is unread" are different facts, and showing both as numbers made the chip a puzzle: "2 / 10 / 4" over badges reading "+10 / +4" over a footer reading "14 new messages"
+* the exact per-section arrival count stays reachable through the chip's tooltip and accessible label; the actionable total keeps its place in the pill
+* the arrivals pill is styled as a pill and centred — it is an action, and it used to sit beside a filter control in identical blue text
+* the header collapses entirely when there is nothing new and nothing loading, which matters on a phone where it occupied a fifth of the screen
+
+### One Filter, One Control
+
+* remove the "Unread only" checkbox from the Priority overview — the same filter already exists as a chip in the search filter row beside "Has attachment" and "To me", and the checkbox only ever delegated to that chip's own `setUnread()`
+* keep that filter row open in the Priority Inbox (`persistentFilters`), so removing the checkbox takes nothing away
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.38 (2026-07-27, resource-constrained deployment fork)
 
 ### Section Counters

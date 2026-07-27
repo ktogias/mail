@@ -108,33 +108,28 @@ describe('MailboxThread', () => {
 		})
 	})
 
-	it('shares the existing SearchMessages unread filter and preserves Priority partitioning', () => {
+	it('preserves Priority partitioning when the unread filter is active', () => {
 		store.preferences['sort-favorites'] = 'true'
 		const wrapper = mountThread()
 
 		wrapper.vm.onUpdateSearchQuery('flags:unread match:allof')
 
-		expect(wrapper.vm.priorityUnreadOnly).toBe(true)
 		expect(wrapper.vm.searchQuery).toBe('flags:unread match:allof not:starred')
 		expect(wrapper.vm.appendToSearch(wrapper.vm.favoriteQuery))
 			.toBe('flags:unread match:allof is:starred')
 		expect(wrapper.vm.appendToSearch(priorityImportantQuery))
 			.toBe(`flags:unread match:allof not:starred ${priorityImportantQuery}`)
-
-		wrapper.vm.onUpdateSearchQuery('match:allof')
-		expect(wrapper.vm.priorityUnreadOnly).toBe(false)
 	})
 
-	it('drives the canonical SearchMessages unread state from the overview control', () => {
+	// One filter, one control, one place. The unread filter used to exist
+	// twice: a checkbox in the Priority overview and a chip in the search
+	// filter row, in two widget languages, with the checkbox delegating to the
+	// chip anyway. Keeping the filter row open in the Priority Inbox is what
+	// makes removing the checkbox an improvement rather than a loss.
+	it('keeps the search filter row open in the Priority Inbox', () => {
 		const wrapper = mountThread()
-		const setUnread = vi.fn()
-		Object.defineProperty(wrapper.vm.$refs, 'searchMessages', {
-			value: { setUnread },
-			configurable: true,
-		})
 
-		wrapper.vm.setPriorityUnreadOnly(true)
-		expect(setUnread).toHaveBeenCalledWith(true)
+		expect(wrapper.findComponent({ name: 'SearchMessages' }).props('persistentFilters')).toBe(true)
 	})
 
 	it("shows the 'Other' section once it actually has envelopes, even if Important is empty", () => {

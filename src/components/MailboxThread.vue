@@ -17,16 +17,15 @@
 						ref="searchMessages"
 						:mailbox="mailbox"
 						:account-id="account.accountId"
+						:persistent-filters="mailbox.isPriorityInbox"
 						@search-changed="onUpdateSearchQuery" />
 					<PriorityInboxOverview
 						v-if="mailbox.isPriorityInbox"
 						:stats="priorityInboxStats"
 						:new-counts="priorityInboxNewCounts"
 						:show-favorites="sortFavorites"
-						:unread-only="priorityUnreadOnly"
 						:loading="mainStore.priorityInboxStatsLoading"
-						@select="selectPrioritySection"
-						@set-unread="setPriorityUnreadOnly" />
+						@select="selectPrioritySection" />
 				</div>
 				<div ref="pullToRefreshIndicator" class="pull-to-refresh-indicator" aria-hidden="true">
 					<IconLoading v-if="pullToRefreshSpinning" :size="20" />
@@ -367,7 +366,6 @@ export default {
 			hasContent: false,
 			pullToRefreshTeardown: undefined,
 			pullToRefreshSpinning: false,
-			priorityUnreadOnly: false,
 			prioritySectionObserver: undefined,
 		}
 	},
@@ -881,14 +879,6 @@ export default {
 			return this.priorityInboxStats?.sections?.[section] ?? { unread: 0 }
 		},
 
-		setPriorityUnreadOnly(enabled) {
-			// SearchMessages already owns the canonical quick-filter state,
-			// serialization (`flags:unread`) and interaction with all other
-			// search controls. Reuse that implementation so the sticky
-			// overview and the existing Unread chip can never diverge.
-			this.$refs.searchMessages?.setUnread(enabled)
-		},
-
 		prioritySectionElement(section) {
 			const refName = {
 				favorite: 'prioritySectionFavorite',
@@ -1080,7 +1070,6 @@ export default {
 		},
 
 		onUpdateSearchQuery(query) {
-			this.priorityUnreadOnly = /(?:^|\s)flags:[^\s]*\bunread\b/.test(query ?? '')
 			const tokens = (query ?? '').split(/\s+/).filter(Boolean)
 			// `not:starred` is structural Priority Inbox partitioning, not a
 			// user search control, so SearchMessages correctly knows nothing
