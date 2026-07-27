@@ -1,3 +1,25 @@
+## 5.11.0-dev.0.ktogias.33 (2026-07-27, resource-constrained deployment fork)
+
+### Priority Counters
+
+* refresh the thread-wide flag aggregate when a list row's star button is used — `markEnvelopeFavoriteOrUnfavorite()` was the one flag path that never did, so in threaded mode the row moved into Favourites while both sections' counters kept describing the state before the click ("Άλλο 2 unread of 41.078" above an empty list, with the database reporting 0 unread there and 2 in Favourites)
+* roll the counters back with the flag when a star fails and is reverted, in that path and in `toggleEnvelopeFlagged()`
+
+### Queued Mutations
+
+* stop reporting a durably-queued mutation as a failure — a 5xx keeps the operation in the outbox for connectivity recovery to replay, but only the bulk path checked, so mark-on-open reverted the row to unread under a red "Could not update read status" three seconds before the replay landed the write
+* `reconcileOrRevert()` now owns that rule for every call site instead of one out of eleven
+
+### Background Sync
+
+* backfill only mailboxes that are in scope for background sync — the rotation consisted entirely of mailboxes `syncAccount()` skips (5.9M messages, led by a 3.1M-message Gmail "All Mail"), each costing one IMAP login and one 5000-message batch every 15 minutes against a provider that throttles per account
+* `ImapToDbSynchronizer::isInBackgroundSyncScope()` is now the single owner of that predicate
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.32 (2026-07-27, resource-constrained deployment fork)
 
 ### Priority Section List Keys
