@@ -1,3 +1,16 @@
+## 5.11.0-dev.0.ktogias.30 (2026-07-27, resource-constrained deployment fork)
+
+### The Rule Now Holds Everywhere
+
+* route `Envelope.vue`'s unread reading through the shared owner: it derived thread-wide state by hand, treating a missing `seen` as unread and consulting the thread aggregate even in the flat view, so a row could render bold while the counter beside it did not count it
+* route the last inline derivation in `setHasUnseenInThreadForThreadMutation()` through the same owner
+* add a guard-rail test that walks `src/` and fails on any inline derivation of thread-wide flag state outside `util/priorityInbox.js`, so the next copy fails in CI instead of on screen
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.29 (2026-07-27, resource-constrained deployment fork)
 
 ### One Priority Classifier

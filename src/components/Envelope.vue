@@ -613,6 +613,7 @@ import { FOLLOW_UP_TAG_LABEL } from '../store/constants.js'
 import useMainStore from '../store/mainStore.js'
 import { mailboxHasRights } from '../util/acl.js'
 import { isCoarsePointer } from '../util/pointerType.js'
+import { threadIsUnread } from '../util/priorityInbox.js'
 import { isScrollingRecently } from '../util/scrollActivityTracker.js'
 import { messageDateTime, shortRelativeDatetime } from '../util/shortRelativeDatetime.js'
 import { translateTagDisplayName } from '../util/tag.js'
@@ -759,10 +760,18 @@ export default {
 		// newest message), so its own `seen` flag alone isn't enough --
 		// `hasUnseenInThread` (see Message::jsonSerialize()) reflects the
 		// thread as a whole and already reduces to `!seen` for a message
-		// that isn't part of any real thread. Fall back to `!seen` only for
-		// envelope objects predating this field (e.g. a stale cache).
+		// that isn't part of any real thread.
+		//
+		// Delegated rather than re-read: this used to be written out here as
+		// `hasUnseenInThread ?? !seen`, which differed from the shared reading
+		// twice over. It treated a missing `seen` as unread where
+		// priorityStatsUnread() requires an explicit `false`, and it consulted
+		// the thread aggregate even in the FLAT view -- so a row whose sibling
+		// was unread rendered bold with a dot while the counter beside it did
+		// not count it. The same row-versus-counter disagreement .25, .26 and
+		// .28 each fixed at a different layer.
 		isThreadUnread() {
-			return this.data.flags.hasUnseenInThread ?? !this.data.flags.seen
+			return threadIsUnread(this.data.flags, this.layoutMessageViewThreaded)
 		},
 
 		messageLongDate() {

@@ -6504,7 +6504,7 @@ export default function mainStoreActions() {
 		 * @param value
 		 */
 		setHasUnseenInThreadForThreadMutation(envelope, value) {
-			const previous = envelope.flags?.hasUnseenInThread ?? envelope.flags?.seen === false
+			const previous = threadIsUnread(envelope.flags, true)
 			const section = priorityStatsSection(this, envelope)
 			if (
 				this.getPreference('layout-message-view', 'threaded') === 'threaded'
