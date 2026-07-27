@@ -1,3 +1,16 @@
+## 5.11.0-dev.0.ktogias.43 (2026-07-28, resource-constrained deployment fork)
+
+### Priority Inbox Header
+
+* centre the section chips, matching the quick-filter row directly above them — the two sit on top of each other, so a difference in alignment reads as one of them being misplaced
+* align the section info icon with its label. The 3px bottom margin was tuned when the header also carried "N unread" text; beside a bare label it made the icon look like it was sagging away from the word it belongs to
+* give that icon a 32px box instead of the 44px default, which sat oddly next to a 17px label, without shrinking its touch target
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.42 (2026-07-27, resource-constrained deployment fork)
 
 ### Priority Inbox Header

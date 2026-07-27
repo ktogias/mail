@@ -34,10 +34,12 @@ export default {
 	display: inline-block;
 }
 
+/* One child now that the count has moved to the sticky overview, so this is
+   just the label's own box -- centred, not baseline-aligned, so the icon
+   beside it in MailboxThread lines up with the text rather than its baseline. */
 .app-content-list-item {
 	display: flex;
-	align-items: baseline;
-	gap: 8px;
+	align-items: center;
 	opacity: .8;
 }
 

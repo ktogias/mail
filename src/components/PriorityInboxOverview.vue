@@ -135,8 +135,15 @@ export default {
 /* One row of content-sized chips, not a three-column grid of two-line
    cards: the label and its count belong on the same line, and the block
    used to take a fifth of a phone screen before any message appeared. */
+/* Centred and 4px-gapped, matching .filter-buttons in SearchMessages
+   exactly: the two rows sit directly on top of each other, so a difference
+   in alignment reads as one of them being misplaced. They wrap rather than
+   overflow, which is the only deliberate difference -- section labels are
+   translated and can be much longer than the filter labels. */
 .priority-overview__sections {
 	display: flex;
+	justify-content: center;
+	align-items: center;
 	flex-wrap: wrap;
 	gap: 4px;
 }

@@ -1124,14 +1124,23 @@ export default {
 	background: transparent;
 }
 
+/* The section header is a label and, next to it, an info affordance. It has
+   to be laid out as one row: the 3px bottom margin below was tuned when the
+   header also carried "N unread" text, and with a bare label the icon read as
+   sagging below the word it belongs to. */
 .app-content-list-item {
+	display: flex;
 	flex: 0;
+	align-items: center;
+	gap: 2px;
 }
 
 .button {
 	background-color: var(--color-main-background);
-	margin-bottom: 3px;
-	inset-inline-end: 2px;
+
+	/* Smaller box, unchanged touch target: the 44px default sat next to a
+	   17px label and looked detached from it. */
+	--default-clickable-area: 32px;
 
 	&:hover,
 	&:focus {
