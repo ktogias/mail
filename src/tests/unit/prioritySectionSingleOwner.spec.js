@@ -32,6 +32,17 @@ const FORBIDDEN = [
 		pattern: /has(?:Unseen|Flagged|Important)InThread\s*\?\?/,
 		reason: 'derives thread-wide state inline; call threadCarriesFlag()/threadIsUnread() instead',
 	},
+	{
+		// The other half of the same rule: which LIST KEY a section reads.
+		// appendToSearch() concatenates the token onto the search query and
+		// omits the `not:starred` partition that priorityInboxSectionQueries()
+		// adds when favourites are sorted separately, so a component composing
+		// its own key reads a list nothing publishes into. Live on
+		// 2026-07-27: Important rendered "No messages" under a header reading
+		// "2 unread of 130".
+		pattern: /appendToSearch\(\s*(?:this\.)?(?:priorityImportantQuery|priorityOtherQuery|favoriteQuery)\s*\)/,
+		reason: 'composes a Priority section list key by hand; use priorityInboxSectionQueries() instead',
+	},
 ]
 
 /**

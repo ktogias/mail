@@ -89,7 +89,7 @@
 							:load-more-label="t('mail', 'Load more favorites')"
 							:account="account"
 							:mailbox="mailbox"
-							:search-query="appendToSearch(favoriteQuery)"
+							:search-query="prioritySectionQueries.favorite"
 							paginate="manual"
 							:is-priority-inbox="true"
 							:initial-page-size="favoriteInitialPageSize"
@@ -147,7 +147,7 @@
 							:load-more-label="t('mail', 'Load more favorites')"
 							:account="unifiedAccount"
 							:mailbox="unifiedInbox"
-							:search-query="appendToSearch(favoriteQuery)"
+							:search-query="prioritySectionQueries.favorite"
 							skip-initial-load
 							paginate="manual"
 							:is-priority-inbox="true"
@@ -218,7 +218,7 @@
 							:load-more-label="t('mail', 'Load more important messages')"
 							:account="unifiedAccount"
 							:mailbox="unifiedInbox"
-							:search-query="appendToSearch(priorityImportantQuery)"
+							:search-query="prioritySectionQueries.important"
 							skip-initial-load
 							paginate="manual"
 							:is-priority-inbox="true"
@@ -239,7 +239,7 @@
 							:load-more-label="t('mail', 'Load more other messages')"
 							:account="unifiedAccount"
 							:mailbox="unifiedInbox"
-							:search-query="appendToSearch(priorityOtherQuery)"
+							:search-query="prioritySectionQueries.other"
 							skip-initial-load
 							:is-priority-inbox="true"
 							:bus="bus" />
@@ -294,6 +294,7 @@ import useMainStore from '../store/mainStore.js'
 import { groupEnvelopesByDate } from '../util/groupedEnvelopes.js'
 import {
 	priorityImportantQuery,
+	priorityInboxSectionQueries,
 	priorityOtherQuery,
 } from '../util/priorityInbox.js'
 import { enablePullToRefresh } from '../util/pullToRefresh.js'
@@ -419,8 +420,8 @@ export default {
 
 		hasEnvelopes() {
 			if (this.mailbox.isPriorityInbox) {
-				return this.mainStore.getEnvelopes(this.mailbox.databaseId, this.appendToSearch(priorityImportantQuery)).length > 0
-					|| this.mainStore.getEnvelopes(this.mailbox.databaseId, this.appendToSearch(priorityOtherQuery)).length > 0
+				return this.mainStore.getEnvelopes(this.mailbox.databaseId, this.prioritySectionQueries.important).length > 0
+					|| this.mainStore.getEnvelopes(this.mailbox.databaseId, this.prioritySectionQueries.other).length > 0
 			}
 			return this.mainStore.getEnvelopes(this.mailbox.databaseId, this.query).length > 0
 		},
@@ -435,7 +436,7 @@ export default {
 			if (this.prioritySectionStats('important').total > 0) {
 				return true
 			}
-			const query = this.appendToSearch(this.priorityImportantQuery)
+			const query = this.prioritySectionQueries.important
 			if (this.mainStore.isFetchingEnvelopes(this.unifiedInbox.databaseId, query)) {
 				return true
 			}
@@ -448,7 +449,7 @@ export default {
 			if (this.prioritySectionStats('other').total > 0) {
 				return true
 			}
-			const query = this.appendToSearch(this.priorityOtherQuery)
+			const query = this.prioritySectionQueries.other
 			if (this.mainStore.isFetchingEnvelopes(this.unifiedInbox.databaseId, query)) {
 				return true
 			}
@@ -461,6 +462,33 @@ export default {
 			return this.mainStore.getPreference('sort-favorites', 'false') === 'true' && this.$route.params.filter !== 'starred'
 		},
 
+		/**
+		 * The exact envelope-list keys this view renders.
+		 *
+		 * Built by the shared utility rather than by appendToSearch(), which
+		 * simply concatenates the section token onto the search query and so
+		 * omits the `not:starred` partition that priorityInboxSectionQueries()
+		 * adds to Important and Other when favourites are sorted separately.
+		 *
+		 * That divergence made refreshPriorityInboxView() publish into
+		 * "... not:starred is:pi-important" while this component read
+		 * "... is:pi-important". Confirmed live on 2026-07-27 with
+		 * sort-favorites enabled: Important rendered "No messages" beside a
+		 * header reading "2 unread of 130", and the database agreed with the
+		 * header. Favourites was unaffected because its key happens to be
+		 * identical in both compositions.
+		 *
+		 * It only became visible in .27, which made that publish the single
+		 * population path -- the per-section sync loop it replaced iterated
+		 * over the keys that were ALREADY loaded, so it kept refreshing
+		 * whatever this component had created, mismatch and all.
+		 *
+		 * @return {object} the favorite/important/other list keys
+		 */
+		prioritySectionQueries() {
+			return priorityInboxSectionQueries(this.searchQuery, this.sortFavorites)
+		},
+
 		hasFavoriteEnvelopes() {
 			if (!this.sortFavorites) {
 				return false
@@ -469,7 +497,7 @@ export default {
 				return true
 			}
 			const mailbox = this.mailbox.isPriorityInbox ? this.unifiedInbox : this.mailbox
-			const query = this.appendToSearch(this.favoriteQuery)
+			const query = this.prioritySectionQueries.favorite
 			if (this.mainStore.isFetchingEnvelopes(mailbox.databaseId, query)) {
 				// See hasImportantEnvelopes() -- pending fetch counts as
 				// "has" so the section's loading skeleton is visible.

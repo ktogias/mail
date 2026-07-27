@@ -1,3 +1,15 @@
+## 5.11.0-dev.0.ktogias.32 (2026-07-27, resource-constrained deployment fork)
+
+### Priority Section List Keys
+
+* build the Priority section list keys from `priorityInboxSectionQueries()` in `MailboxThread.vue` instead of composing them by hand — with favourites sorted separately the store published into `… not:starred is:pi-important` while the component read `… is:pi-important`, so Important and Other rendered empty beside correct counters
+* extend the single-owner guard so any file composing a section key by hand fails in CI
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.31 (2026-07-27, resource-constrained deployment fork)
 
 ### Infinite Scroll Holes
