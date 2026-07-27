@@ -1,3 +1,17 @@
+## 5.11.0-dev.0.ktogias.40 (2026-07-27, resource-constrained deployment fork)
+
+### Priority Inbox Header
+
+* one row of content-sized chips, label and count on the same line — the three-column grid of two-line cards took a fifth of a phone screen before any message appeared
+* remove the aggregate "N new messages · View" pill entirely. It counted unseen messages that entered the list since the last refresh: a **subset** of unread, never its sum. Correct, and impossible to verify from the screen — reported live as "11 new messages" beside chips reading 2 and 11, where the obvious reading (2 + 11 = 13) is simply not what it means
+* dropping the per-section badges in `.39` had left that number with no visible referent at all, which moved the confusion rather than removing it
+* where new mail landed is still shown, as the dot, with no number to reconcile; the exact per-section count stays in the chip's title and accessible label
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.39 (2026-07-27, resource-constrained deployment fork)
 
 ### Priority Inbox Header

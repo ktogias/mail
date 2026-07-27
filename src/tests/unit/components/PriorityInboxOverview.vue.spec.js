@@ -12,15 +12,15 @@ localVue.mixin(Nextcloud)
 
 const stats = {
 	sections: {
-		favorite: { total: 7, unread: 2 },
-		important: { total: 11, unread: 3 },
-		other: { total: 19, unread: 5 },
+		favorite: { unread: 2 },
+		important: { unread: 3 },
+		other: { unread: 5 },
 	},
 	complete: true,
 }
 
 describe('PriorityInboxOverview', () => {
-	it('shows exact unread/total counts and emits section navigation', async () => {
+	it('shows the unread count per section and emits section navigation', async () => {
 		const wrapper = shallowMount(PriorityInboxOverview, {
 			localVue,
 			propsData: {
@@ -34,12 +34,27 @@ describe('PriorityInboxOverview', () => {
 		expect(wrapper.vm.visibleSections[1]).toEqual(expect.objectContaining({
 			id: 'important',
 			unread: 3,
-			total: 11,
 		}))
-		expect(wrapper.find('.priority-overview__new-message').exists()).toBe(true)
 
 		await sections.at(1).trigger('click')
 		expect(wrapper.emitted('select')).toEqual([['important']])
+	})
+
+	// A number nobody can check invites the reader to check it anyway. The
+	// arrivals pill counted unseen messages that entered the list since the
+	// last refresh -- a subset of unread, never its sum -- so with the
+	// per-section badges gone it had no visible referent at all. Reported
+	// live: "11 new messages" beside chips reading 2 and 11, and the obvious
+	// reading (2 + 11 = 13) is simply not what it means.
+	it('carries no aggregate arrivals count', () => {
+		const wrapper = shallowMount(PriorityInboxOverview, {
+			localVue,
+			propsData: { stats, newCounts: { favorite: 0, important: 1, other: 4 } },
+		})
+
+		expect(wrapper.find('.priority-overview__new-message').exists()).toBe(false)
+		// Where new mail landed is still shown, without a number to reconcile.
+		expect(wrapper.findAll('.priority-overview__new-dot')).toHaveLength(2)
 	})
 
 	// The unread filter belongs in the search filter row with its siblings
@@ -88,9 +103,13 @@ describe('PriorityInboxOverview', () => {
 
 		expect(wrapper.findAll('.priority-overview__new-dot')).toHaveLength(2)
 		expect(wrapper.text()).not.toContain('+10')
-		// The number itself stays reachable, and stays in the one place that
-		// carries an action.
-		expect(wrapper.find('.priority-overview__new-message').text()).toContain('14')
+		// The exact per-section arrival count is still carried, and the chip
+		// exposes it through its title/aria label rather than on its face.
+		// (The count itself is asserted here rather than the rendered string:
+		// t()/n() are not localised in this environment.)
+		expect(wrapper.vm.visibleSections[1].newCount).toBe(10)
+		expect(wrapper.findAll('.priority-overview__section').at(1).attributes('title'))
+			.toBeTruthy()
 	})
 
 	it('omits Favorites when the navigation preference disables that section', () => {
