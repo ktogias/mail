@@ -223,11 +223,14 @@ class MessageMapperTest extends TestCase {
 				$expectedUnread = $case[$key]['unread'] ? 1 : 0;
 
 				foreach (['favorite', 'important', 'other'] as $section) {
-					$expectedTotal = $section === $expectedSection ? 1 : 0;
-					self::assertSame(
-						$expectedTotal,
-						$stats[$section]['total'],
-						"{$case['name']} [$key]: expected total $expectedTotal in $section",
+					// Only unread is reported now. A read thread contributes
+					// nothing anywhere, which is exactly what lets the query
+					// skip the rest of the mailbox -- so the classification is
+					// still asserted, but only where it is observable.
+					self::assertArrayNotHasKey(
+						'total',
+						$stats[$section],
+						"{$case['name']} [$key]: section totals are no longer reported",
 					);
 					self::assertSame(
 						$section === $expectedSection ? $expectedUnread : 0,
@@ -414,27 +417,27 @@ class MessageMapperTest extends TestCase {
 		}
 
 		self::assertSame([
-			'favorite' => ['total' => 1, 'unread' => 1],
-			'important' => ['total' => 2, 'unread' => 2],
-			'other' => ['total' => 2, 'unread' => 0],
+			'favorite' => ['unread' => 1],
+			'important' => ['unread' => 2],
+			'other' => ['unread' => 0],
 		], $this->mapper->getPriorityInboxStats([1], true, true));
 
 		self::assertSame([
-			'favorite' => ['total' => 1, 'unread' => 0],
-			'important' => ['total' => 3, 'unread' => 3],
-			'other' => ['total' => 2, 'unread' => 0],
+			'favorite' => ['unread' => 0],
+			'important' => ['unread' => 3],
+			'other' => ['unread' => 0],
 		], $this->mapper->getPriorityInboxStats([1], false, true));
 
 		self::assertSame([
-			'favorite' => ['total' => 0, 'unread' => 0],
-			'important' => ['total' => 3, 'unread' => 3],
-			'other' => ['total' => 2, 'unread' => 0],
+			'favorite' => ['unread' => 0],
+			'important' => ['unread' => 3],
+			'other' => ['unread' => 0],
 		], $this->mapper->getPriorityInboxStats([1], true, false));
 
 		self::assertSame([
-			'favorite' => ['total' => 0, 'unread' => 0],
-			'important' => ['total' => 0, 'unread' => 0],
-			'other' => ['total' => 0, 'unread' => 0],
+			'favorite' => ['unread' => 0],
+			'important' => ['unread' => 0],
+			'other' => ['unread' => 0],
 		], $this->mapper->getPriorityInboxStats([], true, true));
 	}
 

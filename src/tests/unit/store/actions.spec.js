@@ -82,9 +82,9 @@ describe('Vuex store actions', () => {
 	it('keeps Priority Inbox section and navigation counters on one authoritative snapshot', async () => {
 		const stats = {
 			sections: {
-				favorite: { total: 2, unread: 1 },
-				important: { total: 5, unread: 2 },
-				other: { total: 9, unread: 3 },
+				favorite: { unread: 1 },
+				important: { unread: 2 },
+				other: { unread: 3 },
 			},
 			complete: true,
 		}
@@ -153,9 +153,9 @@ describe('Vuex store actions', () => {
 		MessageService.fetchEnvelopes.mockResolvedValue([downgraded])
 		PriorityInboxService.fetchPriorityInboxStats.mockResolvedValue({
 			sections: {
-				favorite: { total: 0, unread: 0 },
-				important: { total: 0, unread: 0 },
-				other: { total: 1, unread: 1 },
+				favorite: { unread: 0 },
+				important: { unread: 0 },
+				other: { unread: 1 },
 			},
 			complete: true,
 		})
@@ -212,9 +212,9 @@ describe('Vuex store actions', () => {
 		MessageService.fetchEnvelopes.mockResolvedValue([newOther])
 		PriorityInboxService.fetchPriorityInboxStats.mockResolvedValue({
 			sections: {
-				favorite: { total: 0, unread: 0 },
-				important: { total: 0, unread: 0 },
-				other: { total: 1, unread: 1 },
+				favorite: { unread: 0 },
+				important: { unread: 0 },
+				other: { unread: 1 },
 			},
 			complete: true,
 		})
@@ -267,9 +267,9 @@ describe('Vuex store actions', () => {
 		store.preferences['sort-favorites'] = 'false'
 		PriorityInboxService.fetchPriorityInboxStats.mockResolvedValue({
 			sections: {
-				favorite: { total: 0, unread: 0 },
-				important: { total: 0, unread: 0 },
-				other: { total: 0, unread: 0 },
+				favorite: { unread: 0 },
+				important: { unread: 0 },
+				other: { unread: 0 },
 			},
 			complete: true,
 		})
@@ -593,9 +593,9 @@ describe('Vuex store actions', () => {
 		store.mailboxes[11] = { databaseId: 11, specialRole: 'inbox', unread: 1 }
 		store.priorityInboxStats = {
 			sections: {
-				favorite: { total: 0, unread: 0 },
-				important: { total: 1, unread: 1 },
-				other: { total: 0, unread: 0 },
+				favorite: { unread: 0 },
+				important: { unread: 1 },
+				other: { unread: 0 },
 			},
 			complete: true,
 		}
@@ -620,11 +620,11 @@ describe('Vuex store actions', () => {
 
 		store.setHasUnseenInThreadForThreadMutation(envelope, true)
 		store.beginPendingRemoval([101])
-		expect(store.priorityInboxStats.sections.important).toEqual({ total: 0, unread: 0 })
+		expect(store.priorityInboxStats.sections.important).toEqual({ unread: 0 })
 
 		// Ending while the envelope still exists is Undo/failure.
 		store.endPendingRemoval([101])
-		expect(store.priorityInboxStats.sections.important).toEqual({ total: 1, unread: 1 })
+		expect(store.priorityInboxStats.sections.important).toEqual({ unread: 1 })
 	})
 
 	it('keeps a read marked while the counter snapshot was in flight, instead of letting the snapshot revert it', async () => {
@@ -637,9 +637,9 @@ describe('Vuex store actions', () => {
 		store.mailboxes[11] = { databaseId: 11, specialRole: 'inbox', unread: 1 }
 		store.priorityInboxStats = {
 			sections: {
-				favorite: { total: 0, unread: 0 },
-				important: { total: 1, unread: 1 },
-				other: { total: 0, unread: 0 },
+				favorite: { unread: 0 },
+				important: { unread: 1 },
+				other: { unread: 0 },
 			},
 			complete: true,
 		}
@@ -663,9 +663,9 @@ describe('Vuex store actions', () => {
 
 		resolveStats({
 			sections: {
-				favorite: { total: 0, unread: 0 },
-				important: { total: 1, unread: 1 },
-				other: { total: 0, unread: 0 },
+				favorite: { unread: 0 },
+				important: { unread: 1 },
+				other: { unread: 0 },
 			},
 			complete: true,
 		})
@@ -684,9 +684,9 @@ describe('Vuex store actions', () => {
 		store.mailboxes[11] = { databaseId: 11, specialRole: 'inbox', unread: 1 }
 		store.priorityInboxStats = {
 			sections: {
-				favorite: { total: 0, unread: 0 },
-				important: { total: 1, unread: 1 },
-				other: { total: 0, unread: 0 },
+				favorite: { unread: 0 },
+				important: { unread: 1 },
+				other: { unread: 0 },
 			},
 			complete: true,
 		}
@@ -702,9 +702,9 @@ describe('Vuex store actions', () => {
 
 		PriorityInboxService.fetchPriorityInboxStats.mockResolvedValueOnce({
 			sections: {
-				favorite: { total: 0, unread: 0 },
-				important: { total: 1, unread: 0 },
-				other: { total: 0, unread: 0 },
+				favorite: { unread: 0 },
+				important: { unread: 0 },
+				other: { unread: 0 },
 			},
 			complete: true,
 		})
@@ -2618,9 +2618,9 @@ describe('Vuex store actions', () => {
 			store.preferences['sort-favorites'] = 'true'
 			store.priorityInboxStats = {
 				sections: {
-					favorite: { total: 664, unread: 0 },
-					important: { total: 124, unread: 1 },
-					other: { total: 41113, unread: 49 },
+					favorite: { unread: 0 },
+					important: { unread: 1 },
+					other: { unread: 49 },
 				},
 				complete: true,
 			}
@@ -2637,8 +2637,8 @@ describe('Vuex store actions', () => {
 			store.toggleEnvelopeFlagged(envelope)
 			await Promise.resolve()
 
-			expect(store.priorityInboxStats.sections.favorite).toEqual({ total: 665, unread: 1 })
-			expect(store.priorityInboxStats.sections.important).toEqual({ total: 123, unread: 0 })
+			expect(store.priorityInboxStats.sections.favorite).toEqual({ unread: 1 })
+			expect(store.priorityInboxStats.sections.important).toEqual({ unread: 0 })
 		})
 
 		// The star button on a list row goes through a DIFFERENT action than
@@ -2652,9 +2652,9 @@ describe('Vuex store actions', () => {
 			store.preferences['sort-favorites'] = 'true'
 			store.priorityInboxStats = {
 				sections: {
-					favorite: { total: 664, unread: 0 },
-					important: { total: 120, unread: 0 },
-					other: { total: 41079, unread: 1 },
+					favorite: { unread: 0 },
+					important: { unread: 0 },
+					other: { unread: 1 },
 				},
 				complete: true,
 			}
@@ -2671,8 +2671,8 @@ describe('Vuex store actions', () => {
 			store.markEnvelopeFavoriteOrUnfavorite({ envelope, favFlag: true })
 			await Promise.resolve()
 
-			expect(store.priorityInboxStats.sections.favorite).toEqual({ total: 665, unread: 1 })
-			expect(store.priorityInboxStats.sections.other).toEqual({ total: 41078, unread: 0 })
+			expect(store.priorityInboxStats.sections.favorite).toEqual({ unread: 1 })
+			expect(store.priorityInboxStats.sections.other).toEqual({ unread: 0 })
 		})
 
 		it('moves the counters when importance is removed in threaded mode', async () => {
@@ -2680,9 +2680,9 @@ describe('Vuex store actions', () => {
 			store.preferences['sort-favorites'] = 'true'
 			store.priorityInboxStats = {
 				sections: {
-					favorite: { total: 664, unread: 0 },
-					important: { total: 124, unread: 1 },
-					other: { total: 41113, unread: 49 },
+					favorite: { unread: 0 },
+					important: { unread: 1 },
+					other: { unread: 49 },
 				},
 				complete: true,
 			}
@@ -2699,8 +2699,8 @@ describe('Vuex store actions', () => {
 			store.toggleEnvelopeImportant(envelope)
 			await Promise.resolve()
 
-			expect(store.priorityInboxStats.sections.important).toEqual({ total: 123, unread: 0 })
-			expect(store.priorityInboxStats.sections.other).toEqual({ total: 41114, unread: 50 })
+			expect(store.priorityInboxStats.sections.important).toEqual({ unread: 0 })
+			expect(store.priorityInboxStats.sections.other).toEqual({ unread: 50 })
 		})
 
 		it('unmarking important also clears the thread-wide aggregate the sections classify by', async () => {
@@ -3264,9 +3264,9 @@ describe('Vuex store actions', () => {
 			MessageService.fetchEnvelopes.mockResolvedValue([])
 			PriorityInboxService.fetchPriorityInboxStats.mockResolvedValue({
 				sections: {
-					favorite: { total: 0, unread: 0 },
-					important: { total: 0, unread: 0 },
-					other: { total: 0, unread: 0 },
+					favorite: { unread: 0 },
+					important: { unread: 0 },
+					other: { unread: 0 },
 				},
 				complete: true,
 			})

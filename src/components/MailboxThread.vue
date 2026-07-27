@@ -123,7 +123,6 @@
 								class="section-title"
 								:name="t('mail', 'Favorites')"
 								:unread-count="prioritySectionStats('favorite').unread"
-								:total-count="prioritySectionStats('favorite').total"
 								:complete="priorityStatsComplete" />
 							<NcPopover trigger="hover focus">
 								<template #trigger>
@@ -194,7 +193,6 @@
 								class="section-title important"
 								:name="t('mail', 'Important')"
 								:unread-count="prioritySectionStats('important').unread"
-								:total-count="prioritySectionStats('important').total"
 								:complete="priorityStatsComplete" />
 							<NcPopover trigger="hover focus">
 								<template #trigger>
@@ -231,7 +229,6 @@
 							class="app-content-list-item section-title other"
 							:name="t('mail', 'Other')"
 							:unread-count="prioritySectionStats('other').unread"
-							:total-count="prioritySectionStats('other').total"
 							:complete="priorityStatsComplete" />
 						<Mailbox
 							v-show="hasOtherEnvelopes"
@@ -433,6 +430,12 @@ export default {
 		// hidden at once -- the user typed a term and stared at a blank
 		// white list until the results landed.
 		//
+		// The unread count replaced the section total here when the totals were
+		// dropped: a section with unread messages is worth showing before its
+		// rows arrive. A section whose messages are all read is shown by the
+		// rows themselves once they land, and by priorityViewIsLoading until
+		// they do -- which is why dropping the total does not leave a gap.
+		//
 		// priorityInboxViewLoading is the same signal for the page-level
 		// refresh, which owns the request the sections themselves never make
 		// (they render Mailbox with skip-initial-load). Without it a cold
@@ -445,7 +448,7 @@ export default {
 			if (this.priorityViewIsLoading) {
 				return true
 			}
-			if (this.prioritySectionStats('important').total > 0) {
+			if (this.prioritySectionStats('important').unread > 0) {
 				return true
 			}
 			const query = this.prioritySectionQueries.important
@@ -461,7 +464,7 @@ export default {
 			if (this.priorityViewIsLoading) {
 				return true
 			}
-			if (this.prioritySectionStats('other').total > 0) {
+			if (this.prioritySectionStats('other').unread > 0) {
 				return true
 			}
 			const query = this.prioritySectionQueries.other
@@ -511,7 +514,7 @@ export default {
 			if (this.mailbox.isPriorityInbox && this.priorityViewIsLoading) {
 				return true
 			}
-			if (this.mailbox.isPriorityInbox && this.prioritySectionStats('favorite').total > 0) {
+			if (this.mailbox.isPriorityInbox && this.prioritySectionStats('favorite').unread > 0) {
 				return true
 			}
 			const mailbox = this.mailbox.isPriorityInbox ? this.unifiedInbox : this.mailbox
@@ -875,7 +878,7 @@ export default {
 		},
 
 		prioritySectionStats(section) {
-			return this.priorityInboxStats?.sections?.[section] ?? { unread: 0, total: 0 }
+			return this.priorityInboxStats?.sections?.[section] ?? { unread: 0 }
 		},
 
 		setPriorityUnreadOnly(enabled) {

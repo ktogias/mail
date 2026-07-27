@@ -277,12 +277,16 @@ function incompleteFannedOutPageError() {
 	return error
 }
 
-function adjustPriorityInboxStats(store, section, totalDelta = 0, unreadDelta = 0) {
+// Only unread is tracked. The section totals were dropped because reporting
+// them forced the counters query to visit every message of every inbox --
+// 373ms warm and 6,820ms cold, versus 20ms and 300ms once the query could be
+// driven from the (naturally tiny) unread set. A total is also the one number
+// here a user can neither act on nor read at a glance.
+function adjustPriorityInboxStats(store, section, unreadDelta = 0) {
 	const counters = store.priorityInboxStats?.sections?.[section]
 	if (!counters) {
 		return
 	}
-	Vue.set(counters, 'total', Math.max(0, (counters.total ?? 0) + totalDelta))
 	Vue.set(counters, 'unread', Math.max(0, (counters.unread ?? 0) + unreadDelta))
 	const priorityMailbox = store.mailboxes[PRIORITY_INBOX_ID]
 	if (priorityMailbox) {
@@ -316,13 +320,12 @@ let priorityStatsAdjustmentRevision = 0
 let priorityStatsAdjustmentLog = []
 const PRIORITY_STATS_ADJUSTMENT_LOG_LIMIT = 200
 
-function adjustAndRecordPriorityInboxStats(store, section, totalDelta = 0, unreadDelta = 0) {
-	adjustPriorityInboxStats(store, section, totalDelta, unreadDelta)
+function adjustAndRecordPriorityInboxStats(store, section, unreadDelta = 0) {
+	adjustPriorityInboxStats(store, section, unreadDelta)
 	priorityStatsAdjustmentRevision++
 	priorityStatsAdjustmentLog.push({
 		revision: priorityStatsAdjustmentRevision,
 		section,
-		totalDelta,
 		unreadDelta,
 	})
 	if (priorityStatsAdjustmentLog.length > PRIORITY_STATS_ADJUSTMENT_LOG_LIMIT) {
@@ -333,7 +336,7 @@ function adjustAndRecordPriorityInboxStats(store, section, totalDelta = 0, unrea
 function replayPriorityInboxStatsAdjustmentsSince(store, revision) {
 	priorityStatsAdjustmentLog.forEach((entry) => {
 		if (entry.revision > revision) {
-			adjustPriorityInboxStats(store, entry.section, entry.totalDelta, entry.unreadDelta)
+			adjustPriorityInboxStats(store, entry.section, entry.unreadDelta)
 		}
 	})
 }
@@ -1897,7 +1900,6 @@ export default function mainStoreActions() {
 						adjustPriorityInboxStats(
 							this,
 							contribution.section,
-							-1,
 							contribution.unread ? -1 : 0,
 						)
 					})
@@ -6650,12 +6652,12 @@ export default function mainStoreActions() {
 			}
 			if (!threaded && previousValue !== value) {
 				if (flag === 'seen' && previousSection !== undefined) {
-					adjustAndRecordPriorityInboxStats(this, previousSection, 0, value ? -1 : 1)
+					adjustAndRecordPriorityInboxStats(this, previousSection, value ? -1 : 1)
 				} else if ((flag === 'flagged' || flag === 'important') && previousSection !== undefined) {
 					const nextSection = priorityStatsSection(this, envelope)
 					if (nextSection !== previousSection) {
-						adjustAndRecordPriorityInboxStats(this, previousSection, -1, previousUnread ? -1 : 0)
-						adjustAndRecordPriorityInboxStats(this, nextSection, 1, previousUnread ? 1 : 0)
+						adjustAndRecordPriorityInboxStats(this, previousSection, previousUnread ? -1 : 0)
+						adjustAndRecordPriorityInboxStats(this, nextSection, previousUnread ? 1 : 0)
 					}
 				}
 			}
@@ -6694,7 +6696,7 @@ export default function mainStoreActions() {
 				&& previous !== value
 				&& section !== undefined
 			) {
-				adjustAndRecordPriorityInboxStats(this, section, 0, value ? 1 : -1)
+				adjustAndRecordPriorityInboxStats(this, section, value ? 1 : -1)
 			}
 			if (!envelope.threadRootId) {
 				this.flagEnvelopeMutation({ envelope, flag: 'hasUnseenInThread', value })
@@ -6770,8 +6772,8 @@ export default function mainStoreActions() {
 			if (nextSection === undefined || nextSection === previousSection) {
 				return
 			}
-			adjustAndRecordPriorityInboxStats(this, previousSection, -1, previousUnread ? -1 : 0)
-			adjustAndRecordPriorityInboxStats(this, nextSection, 1, previousUnread ? 1 : 0)
+			adjustAndRecordPriorityInboxStats(this, previousSection, previousUnread ? -1 : 0)
+			adjustAndRecordPriorityInboxStats(this, nextSection, previousUnread ? 1 : 0)
 		},
 		addTagMutation({ tag }) {
 			Vue.set(this.tags, tag.id, tag)
@@ -7294,7 +7296,7 @@ export default function mainStoreActions() {
 					ids: [...ids],
 				}
 				Vue.set(this.priorityInboxPendingRemovalStats, key, contribution)
-				adjustPriorityInboxStats(this, section, -1, contribution.unread ? -1 : 0)
+				adjustPriorityInboxStats(this, section, contribution.unread ? -1 : 0)
 			})
 		},
 		endPendingRemoval(ids) {
@@ -7306,7 +7308,7 @@ export default function mainStoreActions() {
 				// Undo/failure leaves at least one original envelope in the
 				// store; a successful deferred move/delete removed them.
 				if (contribution.ids.some((id) => this.envelopes[id] !== undefined)) {
-					adjustPriorityInboxStats(this, contribution.section, 1, contribution.unread ? 1 : 0)
+					adjustPriorityInboxStats(this, contribution.section, contribution.unread ? 1 : 0)
 				}
 				Vue.delete(this.priorityInboxPendingRemovalStats, key)
 			})
