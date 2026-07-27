@@ -127,11 +127,14 @@ import {
 import * as ThreadService from '../../service/ThreadService.js'
 import { normalizedEnvelopeListId } from '../../util/normalization.js'
 import {
+	classifyPrioritySection,
 	getPrioritySearchQueries,
 	priorityImportantQuery,
 	priorityInboxBaseQuery,
 	priorityInboxSectionQueries,
 	priorityOtherQuery,
+	threadCarriesFlag,
+	threadIsUnread,
 } from '../../util/priorityInbox.js'
 import { wait } from '../../util/wait.js'
 import {
@@ -231,14 +234,11 @@ function progressiveSearchWindows(query, sortOrder, upperBound) {
 	]
 }
 
+// Kept as a thin alias: the progressive-paging helpers below classify with a
+// favourites section regardless of the preference, because they only need the
+// three-way split to cap each rendered section.
 function prioritySection(envelope, threaded) {
-	const flags = envelope.flags ?? {}
-	const flagged = threaded ? (flags.hasFlaggedInThread ?? flags.flagged === true) : flags.flagged === true
-	const important = threaded ? (flags.hasImportantInThread ?? flags.important === true) : flags.important === true
-	if (flagged) {
-		return 'favorite'
-	}
-	return important ? 'important' : 'other'
+	return classifyPrioritySection(envelope, { threaded, sortFavorites: true })
 }
 
 function priorityStatsSection(store, envelope) {
@@ -246,23 +246,17 @@ function priorityStatsSection(store, envelope) {
 	if (!envelope || mailbox?.specialRole !== 'inbox' || mailbox.isUnified || mailbox.isPriorityInbox) {
 		return undefined
 	}
-	const threaded = store.getPreference('layout-message-view', 'threaded') === 'threaded'
-	let section = prioritySection(envelope, threaded)
-	if (section === 'favorite' && store.getPreference('sort-favorites', 'false') !== 'true') {
-		const flags = envelope.flags ?? {}
-		const important = threaded
-			? (flags.hasImportantInThread ?? flags.important === true)
-			: flags.important === true
-		section = important ? 'important' : 'other'
-	}
-	return section
+	return classifyPrioritySection(envelope, {
+		threaded: store.getPreference('layout-message-view', 'threaded') === 'threaded',
+		sortFavorites: store.getPreference('sort-favorites', 'false') === 'true',
+	})
 }
 
 function priorityStatsUnread(store, envelope) {
-	const flags = envelope?.flags ?? {}
-	return store.getPreference('layout-message-view', 'threaded') === 'threaded'
-		? (flags.hasUnseenInThread ?? flags.seen === false)
-		: flags.seen === false
+	return threadIsUnread(
+		envelope?.flags,
+		store.getPreference('layout-message-view', 'threaded') === 'threaded',
+	)
 }
 
 function adjustPriorityInboxStats(store, section, totalDelta = 0, unreadDelta = 0) {
@@ -609,11 +603,16 @@ const MAX_CONCURRENT_SPECULATIVE_THREAD_FETCHES = 2
 // reclassifyFlagBucketsMutation() and addEnvelopesMutation()'s own add-time
 // thread-wide guard so the two can never drift apart.
 function flagPredicateTokenDefinitions() {
+	// Per-message readings deliberately: threadStillMatchesFlagPredicate()
+	// applies the thread-wide semantics itself, using partition tokens as
+	// proofs and existential tokens as evidence. The shared primitive is used
+	// where a thread-wide answer IS the question (threadMatches below), so the
+	// two notions cannot drift apart.
 	return {
-		'is:starred': { matches: (flags) => flags?.flagged === true },
-		'not:starred': { matches: (flags) => flags?.flagged !== true, positive: (flags) => flags?.flagged === true },
-		[priorityImportantQuery]: { matches: (flags) => flags?.important === true },
-		[priorityOtherQuery]: { matches: (flags) => flags?.important !== true, positive: (flags) => flags?.important === true },
+		'is:starred': { matches: (flags) => threadCarriesFlag(flags, 'flagged', false) },
+		'not:starred': { matches: (flags) => !threadCarriesFlag(flags, 'flagged', false), positive: (flags) => threadCarriesFlag(flags, 'flagged', false) },
+		[priorityImportantQuery]: { matches: (flags) => threadCarriesFlag(flags, 'important', false) },
+		[priorityOtherQuery]: { matches: (flags) => !threadCarriesFlag(flags, 'important', false), positive: (flags) => threadCarriesFlag(flags, 'important', false) },
 		// The "Unread only" filter. Existential like is:starred: the
 		// thread belongs in the list while ANY member is unread, which is
 		// exactly what hasUnseenInThread reports and what
@@ -623,8 +622,8 @@ function flagPredicateTokenDefinitions() {
 		// (see threadStillMatchesFlagPredicate()), so reading a message
 		// whose thread still has unread siblings correctly keeps the row.
 		'flags:unread': {
-			matches: (flags) => flags?.seen !== true,
-			threadMatches: (flags) => (flags?.hasUnseenInThread ?? flags?.seen === false) === true,
+			matches: (flags) => threadIsUnread(flags, false),
+			threadMatches: (flags) => threadIsUnread(flags, true),
 		},
 	}
 }
@@ -696,12 +695,8 @@ function sharedContentSearchDescriptor(query) {
 
 function envelopeMatchesSharedSearchSection(envelope, flagTokens, threaded) {
 	const flags = envelope.flags ?? {}
-	const flagged = threaded
-		? (flags.hasFlaggedInThread ?? flags.flagged === true)
-		: flags.flagged === true
-	const important = threaded
-		? (flags.hasImportantInThread ?? flags.important === true)
-		: flags.important === true
+	const flagged = threadCarriesFlag(flags, 'flagged', threaded)
+	const important = threadCarriesFlag(flags, 'important', threaded)
 
 	return flagTokens.every((token) => {
 		switch (token) {
@@ -1865,14 +1860,7 @@ export default function mainStoreActions() {
 				if (!message || mailbox?.specialRole !== 'inbox' || message.flags?.seen !== false) {
 					return
 				}
-				let section = prioritySection(message, threaded)
-				if (!sortFavorites && section === 'favorite') {
-					const flags = message.flags ?? {}
-					const important = threaded
-						? (flags.hasImportantInThread ?? flags.important === true)
-						: flags.important === true
-					section = important ? 'important' : 'other'
-				}
+				const section = classifyPrioritySection(message, { threaded, sortFavorites })
 				Vue.set(this.priorityInboxNewMessageIds[section], message.databaseId, true)
 			})
 		},

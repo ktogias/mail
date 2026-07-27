@@ -1,0 +1,108 @@
+{
+	"_comment": [
+		"Shared contract between MessageMapper::getPriorityInboxStats() (SQL, thread",
+		"rollup) and classifyPrioritySection() (JS, util/priorityInbox.js). Both",
+		"implementations must bucket the same thread into the same section.",
+		"",
+		"This exists because the same decision lives on both sides of a network and",
+		"language boundary, which no amount of deduplication removes -- so it is",
+		"pinned by a fixture instead. Three releases in a row (.25 list membership,",
+		".26 thread aggregates, .28 counters) fixed one decision at a different",
+		"layer, each found only when a screenshot exposed it.",
+		"",
+		"Each case is ONE thread in one inbox. `messages` are its members with their",
+		"per-message flags; the JS side derives the thread aggregates the server",
+		"sends (any-member semantics, matching the SQL MAX), the PHP side inserts",
+		"the rows and runs the real aggregate query."
+	],
+	"cases": [
+		{
+			"name": "plain read message",
+			"messages": [{ "seen": true, "flagged": false, "important": false }],
+			"sortFavorites": { "section": "other", "unread": false },
+			"plain": { "section": "other", "unread": false }
+		},
+		{
+			"name": "plain unread message",
+			"messages": [{ "seen": false, "flagged": false, "important": false }],
+			"sortFavorites": { "section": "other", "unread": true },
+			"plain": { "section": "other", "unread": true }
+		},
+		{
+			"name": "important and unread",
+			"messages": [{ "seen": false, "flagged": false, "important": true }],
+			"sortFavorites": { "section": "important", "unread": true },
+			"plain": { "section": "important", "unread": true }
+		},
+		{
+			"name": "important and read",
+			"messages": [{ "seen": true, "flagged": false, "important": true }],
+			"sortFavorites": { "section": "important", "unread": false },
+			"plain": { "section": "important", "unread": false }
+		},
+		{
+			"name": "starred but not important: favourite only when favourites are sorted separately",
+			"messages": [{ "seen": false, "flagged": true, "important": false }],
+			"sortFavorites": { "section": "favorite", "unread": true },
+			"plain": { "section": "other", "unread": true }
+		},
+		{
+			"name": "starred and important: favourite wins, otherwise important",
+			"messages": [{ "seen": false, "flagged": true, "important": true }],
+			"sortFavorites": { "section": "favorite", "unread": true },
+			"plain": { "section": "important", "unread": true }
+		},
+		{
+			"name": "starred and read",
+			"messages": [{ "seen": true, "flagged": true, "important": false }],
+			"sortFavorites": { "section": "favorite", "unread": false },
+			"plain": { "section": "other", "unread": false }
+		},
+		{
+			"name": "thread where importance and unread sit on DIFFERENT members",
+			"messages": [
+				{ "seen": true, "flagged": false, "important": true },
+				{ "seen": false, "flagged": false, "important": false }
+			],
+			"sortFavorites": { "section": "important", "unread": true },
+			"plain": { "section": "important", "unread": true }
+		},
+		{
+			"name": "thread where the star sits on a read member and another is unread",
+			"messages": [
+				{ "seen": true, "flagged": true, "important": false },
+				{ "seen": false, "flagged": false, "important": false }
+			],
+			"sortFavorites": { "section": "favorite", "unread": true },
+			"plain": { "section": "other", "unread": true }
+		},
+		{
+			"name": "thread with a star on one member and importance on another",
+			"messages": [
+				{ "seen": true, "flagged": true, "important": false },
+				{ "seen": true, "flagged": false, "important": true }
+			],
+			"sortFavorites": { "section": "favorite", "unread": false },
+			"plain": { "section": "important", "unread": false }
+		},
+		{
+			"name": "fully read multi-member thread",
+			"messages": [
+				{ "seen": true, "flagged": false, "important": false },
+				{ "seen": true, "flagged": false, "important": false }
+			],
+			"sortFavorites": { "section": "other", "unread": false },
+			"plain": { "section": "other", "unread": false }
+		},
+		{
+			"name": "multi-member thread with one unread member",
+			"messages": [
+				{ "seen": true, "flagged": false, "important": false },
+				{ "seen": false, "flagged": false, "important": false },
+				{ "seen": true, "flagged": false, "important": false }
+			],
+			"sortFavorites": { "section": "other", "unread": true },
+			"plain": { "section": "other", "unread": true }
+		}
+	]
+}

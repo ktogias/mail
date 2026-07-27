@@ -182,6 +182,89 @@ class MessageMapperTest extends TestCase {
 		$this->db->getQueryBuilder()->delete('mail_tags')->executeStatement();
 	}
 
+	/**
+	 * The PHP half of the Priority-section contract.
+	 *
+	 * The same fixture drives src/tests/unit/util/prioritySectionContract.spec.js.
+	 * The decision "which section does this thread belong to" necessarily exists
+	 * on both sides of the network boundary -- the client cannot classify
+	 * optimistically without its own copy -- so it is pinned by a shared fixture
+	 * instead of being deduplicated away. Three releases in a row corrected that
+	 * one decision at a different layer, each time only after a screenshot
+	 * exposed the disagreement.
+	 */
+	public function testPrioritySectionContract(): void {
+		$fixture = json_decode(
+			file_get_contents(__DIR__ . '/../../fixtures/priority-section-contract.json'),
+			true,
+			512,
+			JSON_THROW_ON_ERROR,
+		);
+		$mailboxId = 7;
+
+		foreach ($fixture['cases'] as $index => $case) {
+			$this->db->getQueryBuilder()->delete($this->mapper->getTableName())->executeStatement();
+
+			$threadRoot = '<contract-' . $index . '@example.com>';
+			foreach ($case['messages'] as $position => $message) {
+				$this->insertThreadMember(
+					1000 + ($index * 100) + $position,
+					$mailboxId,
+					$threadRoot,
+					$message['seen'],
+					$message['flagged'],
+					$message['important'],
+				);
+			}
+
+			foreach ([['sortFavorites', true], ['plain', false]] as [$key, $sortFavorites]) {
+				$stats = $this->mapper->getPriorityInboxStats([$mailboxId], true, $sortFavorites);
+				$expectedSection = $case[$key]['section'];
+				$expectedUnread = $case[$key]['unread'] ? 1 : 0;
+
+				foreach (['favorite', 'important', 'other'] as $section) {
+					$expectedTotal = $section === $expectedSection ? 1 : 0;
+					self::assertSame(
+						$expectedTotal,
+						$stats[$section]['total'],
+						"{$case['name']} [$key]: expected total $expectedTotal in $section",
+					);
+					self::assertSame(
+						$section === $expectedSection ? $expectedUnread : 0,
+						$stats[$section]['unread'],
+						"{$case['name']} [$key]: unexpected unread count in $section",
+					);
+				}
+			}
+		}
+	}
+
+	private function insertThreadMember(
+		int $uid,
+		int $mailboxId,
+		string $threadRootId,
+		bool $seen,
+		bool $flagged,
+		bool $important,
+	): void {
+		$qb = $this->db->getQueryBuilder();
+		$qb->insert($this->mapper->getTableName())
+			->values([
+				'uid' => $qb->createNamedParameter($uid, IQueryBuilder::PARAM_INT),
+				'message_id' => $qb->createNamedParameter('<contract' . $uid . '@example.com>'),
+				'thread_root_id' => $qb->createNamedParameter($threadRootId),
+				'mailbox_id' => $qb->createNamedParameter($mailboxId, IQueryBuilder::PARAM_INT),
+				'subject' => $qb->createNamedParameter('CONTRACT'),
+				'sent_at' => $qb->createNamedParameter($this->time->getTime(), IQueryBuilder::PARAM_INT),
+				'in_reply_to' => $qb->createNamedParameter('<>'),
+				'flag_seen' => $qb->createNamedParameter($seen, IQueryBuilder::PARAM_BOOL),
+				'flag_flagged' => $qb->createNamedParameter($flagged, IQueryBuilder::PARAM_BOOL),
+				'flag_important' => $qb->createNamedParameter($important, IQueryBuilder::PARAM_BOOL),
+				'flag_deleted' => $qb->createNamedParameter(false, IQueryBuilder::PARAM_BOOL),
+			]);
+		$qb->executeStatement();
+	}
+
 	private function insertMessage(int $uid, int $mailbox_id): void {
 		$qb = $this->db->getQueryBuilder();
 		$insert = $qb->insert($this->mapper->getTableName())

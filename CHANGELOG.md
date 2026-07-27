@@ -1,3 +1,20 @@
+## 5.11.0-dev.0.ktogias.29 (2026-07-27, resource-constrained deployment fork)
+
+### One Priority Classifier
+
+* move the "which Priority section does this belong to" decision into a single exported `classifyPrioritySection()`, with `threadCarriesFlag()` and `threadIsUnread()` as its only readings of thread-wide state
+* route all four client classifiers through it — the same expression had been written out verbatim four times in one file, beside four separate implementations
+
+### Cross-language Contract
+
+* pin the client classifier against `MessageMapper::getPriorityInboxStats()` with a shared fixture both sides read, covering the `sortFavorites` branch and threads whose flag and unread state sit on different members
+* the duplication across the network boundary is necessary for optimistic classification; the fixture is what keeps the two implementations from drifting
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.28 (2026-07-27, resource-constrained deployment fork)
 
 ### Priority Counters Follow the Row
