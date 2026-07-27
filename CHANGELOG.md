@@ -1,3 +1,16 @@
+## 5.11.0-dev.0.ktogias.31 (2026-07-27, resource-constrained deployment fork)
+
+### Infinite Scroll Holes
+
+* stop publishing a fanned-out "load more" page assembled without a constituent source the request coordinator cancelled — the surviving sources' oldest messages were appended in its place, so the list jumped from today to May and skipped everything between
+* stop treating such a page as the end of the list, which ended scrolling permanently until the component was recreated
+* keep a genuinely empty page meaning what it always meant: no older messages
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.30 (2026-07-27, resource-constrained deployment fork)
 
 ### The Rule Now Holds Everywhere

@@ -259,6 +259,24 @@ function priorityStatsUnread(store, envelope) {
 	)
 }
 
+// A fanned-out "load more" that could not be assembled from every source.
+// Distinct from an empty page: an empty page means the list has no older
+// messages, these mean we do not know yet. loadMore() must not mark the list
+// exhausted on either.
+function cancelledFannedOutPageError() {
+	const error = new Error('Fanned-out next page was cancelled before every source answered')
+	error.name = 'CanceledError'
+	error.code = 'ERR_CANCELED'
+	error.mailPageIncomplete = true
+	return error
+}
+
+function incompleteFannedOutPageError() {
+	const error = new Error('Fanned-out next page could not be assembled from every source')
+	error.mailPageIncomplete = true
+	return error
+}
+
 function adjustPriorityInboxStats(store, section, totalDelta = 0, unreadDelta = 0) {
 	const counters = store.priorityInboxStats?.sections?.[section]
 	if (!counters) {
@@ -3087,6 +3105,23 @@ export default function mainStoreActions() {
 					// "Load more" tap inside a priority-inbox section,
 					// 403ing every time and silently never loading more
 					// messages (the tap just did nothing, repeatably).
+					// A constituent fetch that the request coordinator cancelled
+					// is not evidence about the list. Publishing a page
+					// assembled without it opens a HOLE -- the messages that
+					// belong between the cursor and whatever the surviving
+					// sources still had locally are simply skipped, and the
+					// list jumps.
+					//
+					// Confirmed live on 2026-07-27: a 504 on the Gmail folder
+					// list stalled the UI, repeated pull-ups then had
+					// `messages mb=149` and `mb=39` cancelled (both logged
+					// 499) while the two tiny inboxes answered instantly from
+					// local data. Their oldest messages are from May, so the
+					// page went straight from today to May 22 -- and because
+					// it came back short, loadMore() marked the list
+					// exhausted and scrolling stopped.
+					let cancelledConstituent = false
+					let failedConstituent = false
 					const fetchNextFannedOutPage = async (query, allowRecursiveFetch = rec) => {
 						const getIndivisualLists = curry((query, m) => this.getEnvelopes(m.databaseId, query))
 						const individualCursor = curry((query, m) => last(this.getEnvelopes(m.databaseId, query)))
@@ -3168,6 +3203,12 @@ export default function mainStoreActions() {
 									addToUnifiedMailboxes: false,
 									workClass,
 								}).catch((error) => {
+									if (error?.code === 'ERR_CANCELED') {
+										cancelledConstituent = true
+										logger.debug(`Next-page fetch for constituent mailbox ${mb.databaseId} was cancelled`, { error })
+										return []
+									}
+									failedConstituent = true
 									logger.error(`Failed to fetch next envelopes for fanned-out constituent mailbox ${mb.databaseId}: ${error}`, { error })
 									return []
 								})),
@@ -3177,6 +3218,19 @@ export default function mainStoreActions() {
 						}
 
 						const envelopes = nextLocalEnvelopes(this.getAccounts)
+
+						// Do not publish a page a cancelled source was meant to
+						// contribute to, and never let one look like the end of
+						// the list. The successful sources kept whatever they
+						// fetched in their own lists, so nothing is lost; the
+						// next attempt assembles the page properly.
+						if (cancelledConstituent) {
+							throw cancelledFannedOutPageError()
+						}
+						if (envelopes.length === 0 && failedConstituent) {
+							throw incompleteFannedOutPageError()
+						}
+
 						logger.debug('next fanned-out page can be built locally and consists of ' + envelopes.length + ' envelopes', { addToUnifiedMailboxes })
 						this.addEnvelopesMutation({
 							query,

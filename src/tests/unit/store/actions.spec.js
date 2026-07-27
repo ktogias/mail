@@ -3017,6 +3017,55 @@ describe('Vuex store actions', () => {
 		].map((e) => e.databaseId).sort())
 	})
 
+	it('refuses to publish a fanned-out page when a constituent fetch was cancelled', async () => {
+		// Live on 2026-07-27: a 504 on the Gmail folder list stalled the UI,
+		// repeated pull-ups had the two large inboxes' page fetches cancelled
+		// (both logged 499) while a tiny inbox answered instantly from local
+		// data. Its oldest messages are from May, so the assembled page went
+		// straight from today to May 22 -- a hole, not a page -- and because
+		// it came back short the list was marked exhausted and stopped
+		// scrolling.
+		const recent = reverse(range(30, 35))
+		const ancient = reverse(range(1, 4))
+
+		const account13 = { id: 13 }
+		const account26 = { id: 26 }
+		store.preferences['sort-order'] = 'newest'
+		store.preferences['layout-message-view'] = 'threaded'
+		store.addAccountMutation(account13)
+		store.addAccountMutation(account26)
+		store.addMailboxMutation({
+			account: account13,
+			mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+		})
+		store.addMailboxMutation({
+			account: account26,
+			mailbox: { name: 'INBOX', databaseId: 21, specialRole: 'inbox' },
+		})
+		store.addEnvelopesMutation({ envelopes: recent.map(mockEnvelope(11)) })
+		store.addEnvelopesMutation({ envelopes: ancient.map(mockEnvelope(21)) })
+
+		const before = store.getEnvelopes(UNIFIED_INBOX_ID, undefined).map((e) => e.databaseId)
+
+		MessageService.fetchEnvelopes.mockImplementation(async (accountId, mailboxId) => {
+			if (mailboxId === 11) {
+				const error = new Error('shed under foreground pressure')
+				error.name = 'CanceledError'
+				error.code = 'ERR_CANCELED'
+				throw error
+			}
+			return []
+		})
+
+		await expect(store.fetchNextEnvelopePage({
+			mailboxId: UNIFIED_INBOX_ID,
+			quantity: PAGE_SIZE,
+		})).rejects.toMatchObject({ mailPageIncomplete: true })
+
+		// No hole was appended.
+		expect(store.getEnvelopes(UNIFIED_INBOX_ID, undefined).map((e) => e.databaseId)).toEqual(before)
+	})
+
 	it('builds the next unified page with partial fetch', async () => {
 		const page1 = reverse(range(30, 35))
 		const page2 = reverse(range(25, 30))

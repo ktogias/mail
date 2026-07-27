@@ -598,7 +598,24 @@ export default {
 					this.endReached = true
 				}
 			} catch (error) {
-				logger.error('could not fetch next envelope page', { error })
+				// An incomplete fan-out is not evidence about the list: a
+				// source was cancelled or failed, so we do not know whether
+				// older messages exist. Marking the list exhausted here ended
+				// scrolling permanently until the component was recreated.
+				//
+				// Confirmed live on 2026-07-27: during a stall two constituent
+				// page fetches were cancelled, the assembled page jumped from
+				// today straight to May, and the list would not scroll again.
+				if (error?.mailPageIncomplete) {
+					// Deliberately NOT re-queued here: the finally block below
+					// re-runs loadMore() whenever loadMoreRequested is set, so
+					// retrying from this catch spins on a persistent failure
+					// with no backoff at all. Leaving endReached false is
+					// enough -- the next scroll or "Load more" tap tries again.
+					logger.debug('next envelope page was incomplete; not treating it as the end of the list', { error })
+				} else {
+					logger.error('could not fetch next envelope page', { error })
+				}
 			} finally {
 				this.loadingMore = false
 				if (this.loadMoreRequested) {

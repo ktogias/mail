@@ -215,6 +215,36 @@ describe('Mailbox', () => {
 			return error
 		}
 
+		it('does not mark the list exhausted when a fanned-out page came back incomplete', async () => {
+			// A constituent source was cancelled or failed, so an empty page
+			// says nothing about whether older messages exist. Treating it as
+			// the end stopped scrolling permanently until the component was
+			// recreated.
+			//
+			// Confirmed live on 2026-07-27: a 504 on the Gmail folder list
+			// stalled the UI, two constituent page fetches were cancelled
+			// (logged 499), the assembled page jumped from today to May 22,
+			// and the list would not scroll again.
+			const incomplete = new Error('incomplete fan-out')
+			incomplete.mailPageIncomplete = true
+			store.fetchNextEnvelopePage = vi.fn().mockRejectedValue(incomplete)
+
+			const view = mountMailbox()
+			await view.vm.loadMore()
+
+			expect(view.vm.endReached).toBe(false)
+			expect(view.vm.loadingMore).toBe(false)
+		})
+
+		it('still marks the list exhausted on a genuinely empty page', async () => {
+			store.fetchNextEnvelopePage = vi.fn().mockResolvedValue([])
+
+			const view = mountMailbox()
+			await view.vm.loadMore()
+
+			expect(view.vm.endReached).toBe(true)
+		})
+
 		it('does not put the folder into an error state', async () => {
 			store.fetchEnvelopes = vi.fn().mockRejectedValue(cancellation())
 
