@@ -120,9 +120,7 @@
 							class="app-content-list-item">
 							<SectionTitle
 								class="section-title"
-								:name="t('mail', 'Favorites')"
-								:unread-count="prioritySectionStats('favorite').unread"
-								:complete="priorityStatsComplete" />
+								:name="t('mail', 'Favorites')" />
 							<NcPopover trigger="hover focus">
 								<template #trigger>
 									<ButtonVue
@@ -190,9 +188,7 @@
 						<div v-show="hasImportantEnvelopes" ref="prioritySectionImportant" class="app-content-list-item">
 							<SectionTitle
 								class="section-title important"
-								:name="t('mail', 'Important')"
-								:unread-count="prioritySectionStats('important').unread"
-								:complete="priorityStatsComplete" />
+								:name="t('mail', 'Important')" />
 							<NcPopover trigger="hover focus">
 								<template #trigger>
 									<ButtonVue
@@ -226,9 +222,7 @@
 							v-show="hasOtherEnvelopes"
 							ref="prioritySectionOther"
 							class="app-content-list-item section-title other"
-							:name="t('mail', 'Other')"
-							:unread-count="prioritySectionStats('other').unread"
-							:complete="priorityStatsComplete" />
+							:name="t('mail', 'Other')" />
 						<Mailbox
 							v-show="hasOtherEnvelopes"
 							class="nameother"

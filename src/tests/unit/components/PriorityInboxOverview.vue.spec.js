@@ -86,7 +86,12 @@ describe('PriorityInboxOverview', () => {
 
 		expect(wrapper.text()).not.toContain('/')
 		expect(wrapper.text()).not.toContain('0')
-		expect(wrapper.findAllComponents({ name: 'NcCounterBubble' })).toHaveLength(2)
+		// A plain number inside the chip, not a badge inside a badge: the
+		// bubble's min-width and padding were what stopped three Greek labels
+		// fitting on one row.
+		expect(wrapper.findComponent({ name: 'NcCounterBubble' }).exists()).toBe(false)
+		const counts = wrapper.findAll('.priority-overview__count').wrappers.map((w) => w.text())
+		expect(counts).toEqual(['2', '', '4'])
 	})
 
 	// "Has new mail" and "is unread" are different facts. Showing both as

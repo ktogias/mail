@@ -1,3 +1,16 @@
+## 5.11.0-dev.0.ktogias.41 (2026-07-27, resource-constrained deployment fork)
+
+### Priority Inbox Header
+
+* the unread count moves out of the section headers and lives only in the sticky overview — the two showed the same number about forty pixels apart, and only one of them stays on screen while the list scrolls
+* the overview chips use a plain number instead of a counter bubble: the chip is already the container, and the bubble's `min-width` plus padding was what pushed "Άλλο" onto a second row with Greek labels
+* tighter padding and gaps throughout the strip
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.40 (2026-07-27, resource-constrained deployment fork)
 
 ### Priority Inbox Header

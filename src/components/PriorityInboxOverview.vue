@@ -24,10 +24,12 @@
 				     is a dot: it says WHERE without adding an arithmetic
 				     puzzle. -->
 				<span class="priority-overview__count">
-					<CounterBubble v-if="hasStats && section.unread > 0">
-						{{ formatted(section.unread) }}{{ complete ? '' : '+' }}
-					</CounterBubble>
-					<span v-else-if="!hasStats" aria-hidden="true">…</span>
+					<!-- A plain number, not a counter bubble. The chip is
+					     already the container; a badge inside a badge carried
+					     no extra meaning and its min-width plus padding was
+					     what stopped three Greek labels fitting one row. -->
+					<template v-if="hasStats">{{ section.unread > 0 ? formatted(section.unread) + (complete ? '' : '+') : '' }}</template>
+					<span v-else aria-hidden="true">…</span>
 				</span>
 				<span
 					v-if="section.newCount > 0"
@@ -39,14 +41,8 @@
 </template>
 
 <script>
-import { NcCounterBubble as CounterBubble } from '@nextcloud/vue'
-
 export default {
 	name: 'PriorityInboxOverview',
-
-	components: {
-		CounterBubble,
-	},
 
 	props: {
 		stats: {
@@ -131,7 +127,7 @@ export default {
 
 <style lang="scss" scoped>
 .priority-overview {
-	padding: 0 var(--default-grid-baseline) var(--default-grid-baseline);
+	padding: 0 var(--default-grid-baseline) 4px;
 	border-bottom: 1px solid var(--color-border);
 	background: var(--color-main-background);
 }
@@ -142,15 +138,15 @@ export default {
 .priority-overview__sections {
 	display: flex;
 	flex-wrap: wrap;
-	gap: var(--default-grid-baseline);
+	gap: 4px;
 }
 
 .priority-overview__section {
 	display: inline-flex;
-	align-items: center;
-	gap: 6px;
+	align-items: baseline;
+	gap: 5px;
 	min-width: 0;
-	padding: 3px 10px;
+	padding: 2px 8px;
 	border: 0;
 	border-radius: var(--border-radius-element, 8px);
 	background: var(--color-background-hover);
@@ -177,19 +173,11 @@ export default {
 }
 
 .priority-overview__count {
-	font-size: 0.9rem;
+	font-size: 0.82rem;
+	font-weight: 600;
 
 	&:empty {
 		display: none;
-	}
-
-	:deep(.counter-bubble__counter) {
-		display: inline-flex;
-		min-width: 20px;
-		height: 20px;
-		align-items: center;
-		justify-content: center;
-		vertical-align: middle;
 	}
 }
 
@@ -197,8 +185,8 @@ export default {
    used to sit outside the border and read as a second, competing count. */
 .priority-overview__new-dot {
 	display: inline-block;
-	width: 6px;
-	height: 6px;
+	width: 5px;
+	height: 5px;
 	border-radius: 50%;
 	background: var(--color-primary-element);
 	vertical-align: middle;
@@ -207,6 +195,10 @@ export default {
 @media (max-width: 420px) {
 	.priority-overview__label {
 		font-size: 0.72rem;
+	}
+
+	.priority-overview__count {
+		font-size: 0.78rem;
 	}
 }
 </style>
