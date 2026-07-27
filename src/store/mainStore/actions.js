@@ -614,6 +614,30 @@ function flagPredicateTokenDefinitions() {
 	}
 }
 
+// Section-invariant tokens: they scope what the SERVER searches, but they are
+// identical across Favorite/Important/Other, so they cannot decide which
+// section an envelope belongs to and carry no local predicate at all.
+//
+// They still made local reclassification impossible. Section list keys are
+// built as [...baseTokens, 'not:starred', <section token>] (see
+// priorityInboxSectionQueries()), and the Priority Inbox sends
+// "mentions:false match:allof" as its base even with no user search, so every
+// rendered section key contained a token reclassifyFlagBucketsMutation() did
+// not recognise -- and its "every token must be locally verifiable" guard then
+// skipped the list entirely. The guard is right about content predicates
+// (subject:/body:/from: cannot be evaluated here); these two are not content
+// predicates.
+//
+// Confirmed live on 2026-07-27: three messages were unmarked as important, the
+// database cleared flag_important on every member of all three threads, the
+// batched request returned 200 -- and all three rows stayed in the Important
+// section wearing the outline badge, which exists precisely to explain a row
+// whose thread matched the section while the message itself does not.
+const SECTION_INVARIANT_TOKENS = new Set([
+	'mentions:false',
+	'match:allof',
+])
+
 const sharedSearchFlagTokens = new Set([
 	'is:starred',
 	'not:starred',
@@ -6080,8 +6104,16 @@ export default function mainStoreActions() {
 					if (listId === '' || listId === excludeListId) {
 						continue
 					}
-					const tokens = listId.split(' ').filter(Boolean)
-					if (!tokens.every((token) => token in knownTokenPredicates)) {
+					// Drop section-invariant scope tokens before deciding
+					// whether this list can be maintained locally -- they are
+					// the same in every section and have no bearing on which
+					// one an envelope belongs to. Anything left that is still
+					// unrecognised (a content predicate) keeps the list out of
+					// local reclassification, as before.
+					const tokens = listId.split(' ')
+						.filter(Boolean)
+						.filter((token) => !SECTION_INVARIANT_TOKENS.has(token))
+					if (tokens.length === 0 || !tokens.every((token) => token in knownTokenPredicates)) {
 						continue
 					}
 					if (tokens.some((token) => inboxOnlyTokens.has(token)) && sourceMailbox.specialRole !== 'inbox') {

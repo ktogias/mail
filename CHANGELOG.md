@@ -1,3 +1,15 @@
+## 5.11.0-dev.0.ktogias.25 (2026-07-27, resource-constrained deployment fork)
+
+### Priority Section Membership
+
+* let a user's own star/important toggle move the row out of a Priority section immediately, by ignoring section-invariant scope tokens (`mentions:false`, `match:allof`) when deciding whether a section list can be maintained locally
+* keep refusing to reclassify any list carrying a content predicate the client cannot evaluate, unchanged
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.24 (2026-07-27, resource-constrained deployment fork)
 
 ### Mutation Round Trips

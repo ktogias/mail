@@ -2450,6 +2450,40 @@ describe('Vuex store actions', () => {
 			expect(store.mailboxes[11].envelopeLists['not:starred is:pi-other']).not.toContain(42)
 		})
 
+		it('unmarking important leaves the real Priority section key, which carries the base search scope', async () => {
+			// The list keys the Priority Inbox actually renders are
+			// [...baseTokens, 'not:starred', <section token>], and the base
+			// is "mentions:false match:allof" even with no user search. Those
+			// two tokens are identical in every section, but they used to
+			// make the whole key unrecognisable to the local reclassifier,
+			// which then skipped it -- so a user's own toggle never moved the
+			// row and it sat in Important wearing the outline badge.
+			//
+			// Confirmed live on 2026-07-27 with three messages whose
+			// flag_important was cleared on every thread member server-side.
+			const envelope = seedListedEnvelope(50, { flagged: false, important: true })
+			store.mailboxes[11].envelopeLists['mentions:false match:allof not:starred is:pi-important'] = [50]
+			store.mailboxes[11].envelopeLists['mentions:false match:allof not:starred is:pi-other'] = []
+			MessageService.setEnvelopeFlags.mockReturnValue(new Promise(() => {}))
+
+			store.toggleEnvelopeImportant(envelope)
+			await Promise.resolve()
+
+			expect(store.mailboxes[11].envelopeLists['mentions:false match:allof not:starred is:pi-important']).not.toContain(50)
+			expect(store.mailboxes[11].envelopeLists['mentions:false match:allof not:starred is:pi-other']).toContain(50)
+		})
+
+		it('still refuses to reclassify a list carrying a content predicate it cannot evaluate', async () => {
+			const envelope = seedListedEnvelope(51, { flagged: false, important: true })
+			store.mailboxes[11].envelopeLists['subject:invoice not:starred is:pi-important'] = [51]
+			MessageService.setEnvelopeFlags.mockReturnValue(new Promise(() => {}))
+
+			store.toggleEnvelopeImportant(envelope)
+			await Promise.resolve()
+
+			expect(store.mailboxes[11].envelopeLists['subject:invoice not:starred is:pi-important']).toContain(51)
+		})
+
 		it('unstarring removes from is:starred synchronously, even when the thread\'s other members are not locally known', async () => {
 			// threadRootId is set and no envelope.thread member list is
 			// cached -- the exact case where a SYNC-driven reading must
