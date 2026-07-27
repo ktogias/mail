@@ -432,7 +432,19 @@ export default {
 		// loading skeletons inside their Mailbox components) used to be
 		// hidden at once -- the user typed a term and stared at a blank
 		// white list until the results landed.
+		//
+		// priorityInboxViewLoading is the same signal for the page-level
+		// refresh, which owns the request the sections themselves never make
+		// (they render Mailbox with skip-initial-load). Without it a cold
+		// reload showed the page-level "No messages" instead of skeletons.
+		priorityViewIsLoading() {
+			return this.mainStore.priorityInboxViewLoading
+		},
+
 		hasImportantEnvelopes() {
+			if (this.priorityViewIsLoading) {
+				return true
+			}
 			if (this.prioritySectionStats('important').total > 0) {
 				return true
 			}
@@ -446,6 +458,9 @@ export default {
 		},
 
 		hasOtherEnvelopes() {
+			if (this.priorityViewIsLoading) {
+				return true
+			}
 			if (this.prioritySectionStats('other').total > 0) {
 				return true
 			}
@@ -492,6 +507,9 @@ export default {
 		hasFavoriteEnvelopes() {
 			if (!this.sortFavorites) {
 				return false
+			}
+			if (this.mailbox.isPriorityInbox && this.priorityViewIsLoading) {
+				return true
 			}
 			if (this.mailbox.isPriorityInbox && this.prioritySectionStats('favorite').total > 0) {
 				return true

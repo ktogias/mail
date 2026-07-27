@@ -1315,4 +1315,46 @@ describe('Mailbox', () => {
 			expect(view.vm.envelopesToShow).toHaveLength(12)
 		})
 	})
+
+	// A Priority section renders with skip-initial-load, so it never fetches
+	// and its own loadingEnvelopes stays false for its whole life. The
+	// page-level refresh owns the request, so without reading its flag the
+	// section falls straight through to the empty state and claims
+	// "No messages" while the rows are still on their way. Reported live on
+	// 2026-07-27: five to six seconds of that on every reload, with the counts
+	// already filled in beside it from the independent stats request.
+	describe('loading state of a Priority section', () => {
+		it('shows the skeleton while the page-level Priority refresh is running', () => {
+			store.priorityInboxViewLoading = true
+			const wrapper = mountMailbox({ isPriorityInbox: true })
+
+			expect(wrapper.vm.isLoadingList).toBe(true)
+			expect(wrapper.findComponent({ name: 'LoadingSkeleton' }).exists()).toBe(true)
+			expect(wrapper.findComponent({ name: 'EmptyMailboxSection' }).exists()).toBe(false)
+		})
+
+		it('shows the empty state once the refresh has finished with nothing', () => {
+			store.priorityInboxViewLoading = false
+			const wrapper = mountMailbox({ isPriorityInbox: true })
+
+			expect(wrapper.vm.isLoadingList).toBe(false)
+			expect(wrapper.findComponent({ name: 'LoadingSkeleton' }).exists()).toBe(false)
+			expect(wrapper.findComponent({ name: 'EmptyMailboxSection' }).exists()).toBe(true)
+		})
+
+		it('does not follow the Priority flag in an ordinary folder', () => {
+			store.priorityInboxViewLoading = true
+			const wrapper = mountMailbox()
+
+			expect(wrapper.vm.isLoadingList).toBe(false)
+		})
+
+		it('draws a section-sized skeleton, not a page-sized one', () => {
+			const section = mountMailbox({ isPriorityInbox: true })
+			const folder = mountMailbox()
+
+			expect(section.vm.skeletonLines).toBe(3)
+			expect(folder.vm.skeletonLines).toBe(20)
+		})
+	})
 })

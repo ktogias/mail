@@ -97,6 +97,16 @@ export default defineStore('main', {
 			// IntersectionObserver sentinel: neither mailbox/query/sort
 			// changes when a same-query refresh publishes a new first page.
 			priorityInboxViewRevision: 0,
+			// True while refreshPriorityInboxView() is assembling the section
+			// pages. The sections cannot infer this themselves: they render
+			// Mailbox components with skip-initial-load, so those components
+			// never fetch and their own loadingEnvelopes stays false. Without
+			// this flag a cold Priority Inbox showed "No messages" under every
+			// section header for the whole load -- reported live on
+			// 2026-07-27 as "5-6 seconds of nothing, why not a placeholder".
+			// A header count is not enough to distinguish the two states: it
+			// comes from an independent request and arrives first.
+			priorityInboxViewLoading: false,
 			// The envelope id of the currently open thread/message (the
 			// route's own :threadId, mirrored the same way
 			// currentViewMailboxId is -- see Thread.vue's own route

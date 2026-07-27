@@ -6,7 +6,7 @@
 <template>
 	<div
 		class="mailbox"
-		:class="{ 'empty-content': (!hasMessages && !loadingEnvelopes) || error }">
+		:class="{ 'empty-content': (!hasMessages && !isLoadingList) || error }">
 		<div
 			v-if="deepSearchState"
 			class="deep-search-banner"
@@ -27,7 +27,7 @@
 		     constituent inbox answers. Keep the full skeleton only until
 		     the first useful rows arrive; once they do, render them at once
 		     while the slower accounts continue filling the list. -->
-		<LoadingSkeleton v-else-if="loadingEnvelopes && !hasMessages" :number-of-lines="20" />
+		<LoadingSkeleton v-else-if="isLoadingList && !hasMessages" :number-of-lines="skeletonLines" />
 		<Loading
 			v-else-if="loadingCacheInitialization"
 			:hint="t('mail', 'Loading messages …')"
@@ -210,6 +210,38 @@ export default {
 		...mapStores(useMainStore),
 		sortOrder() {
 			return this.mainStore.getPreference('sort-order', 'newest')
+		},
+
+		/**
+		 * Whether this list is waiting for rows it does not yet have.
+		 *
+		 * A Priority section cannot answer that from `loadingEnvelopes`: it is
+		 * rendered with skip-initial-load, so this component never fetches and
+		 * that flag stays false for its whole life. The page-level refresh in
+		 * refreshPriorityInboxView() owns the request, so the section has to
+		 * read its flag -- otherwise it falls straight through to the empty
+		 * state and claims "No messages" while the fetch is still running.
+		 *
+		 * Reported live on 2026-07-27: five to six seconds of "Κανένα μήνυμα"
+		 * under every section header on each reload, with the counts already
+		 * filled in beside them from the independent stats request.
+		 *
+		 * @return {boolean} true while rows are still on their way
+		 */
+		isLoadingList() {
+			return this.loadingEnvelopes
+				|| (this.isPriorityInbox && this.mainStore.priorityInboxViewLoading)
+		},
+
+		/**
+		 * A Priority section occupies a slice of one screen, not a whole one.
+		 * Twenty skeleton rows per section pushed the sections below it out of
+		 * sight and made the page jump when the real rows replaced them.
+		 *
+		 * @return {number} how many skeleton rows to draw
+		 */
+		skeletonLines() {
+			return this.isPriorityInbox ? 3 : 20
 		},
 
 		deepSearchState() {

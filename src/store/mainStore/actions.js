@@ -1649,7 +1649,19 @@ export default function mainStoreActions() {
 		 *                                     sync per physical inbox.
 		 * @return {Promise<object>}
 		 */
-		async refreshPriorityInboxView({
+		// Thin wrapper whose only job is the loading flag, so that every exit
+		// -- the text-search branch, the deferred-sync re-entry, the normal
+		// return and any throw -- clears it exactly once. A flag left stuck
+		// true would pin the sections to a skeleton forever.
+		async refreshPriorityInboxView(options = {}) {
+			this.priorityInboxViewLoading = true
+			try {
+				return await this.refreshPriorityInboxViewInner(options)
+			} finally {
+				this.priorityInboxViewLoading = false
+			}
+		},
+		async refreshPriorityInboxViewInner({
 			searchQuery = this.currentPriorityInboxSearchQuery,
 			workClass = WorkClass.ACTIVE_CONTENT,
 			syncSources = false,

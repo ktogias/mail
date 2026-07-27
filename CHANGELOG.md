@@ -1,3 +1,16 @@
+## 5.11.0-dev.0.ktogias.36 (2026-07-27, resource-constrained deployment fork)
+
+### Loading Placeholders
+
+* show loading skeletons in the Priority sections while the page-level refresh is running, instead of "No messages" — a section renders its list with `skip-initial-load`, so it never fetches and its own `loadingEnvelopes` stays false; it had no way to tell "still loading" from "genuinely empty"
+* a section header count is not that signal either: it comes from an independent stats request and arrives first, which is why the counts were already filled in beside the false empty state
+* three skeleton rows per section rather than twenty, so the sections below stay in view and the page does not jump when the real rows land
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.35 (2026-07-27, resource-constrained deployment fork)
 
 ### Cold Start
