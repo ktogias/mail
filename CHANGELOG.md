@@ -1,3 +1,16 @@
+## 5.11.0-dev.0.ktogias.42 (2026-07-27, resource-constrained deployment fork)
+
+### Priority Inbox Header
+
+* give the section chips the same rhythm as the quick-filter chips directly above them — pill radius, same height, same type scale — so the header reads as one system instead of two arbitrary ones
+* keep the difference in colour alone, deliberately: the filters are toggles that change what the list contains and light up when active, the sections are navigation with no state. Identical styling would promise that clicking "Favorites" filters to favourites, which it does not
+* the count is now full-contrast and bold against a muted label, so it stands out without moving in front of it — the label is the constant you learn the position of, the count is the variable you glance at
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.41 (2026-07-27, resource-constrained deployment fork)
 
 ### Priority Inbox Header

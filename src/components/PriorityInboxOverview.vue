@@ -141,16 +141,25 @@ export default {
 	gap: 4px;
 }
 
+/* Same rhythm as the quick-filter chips directly above -- pill radius, the
+   same height and type scale -- so the header reads as one system rather
+   than two arbitrary ones.
+   The difference is carried by COLOUR alone, and deliberately: those chips
+   are toggles that change what the list contains and light up when active,
+   these are navigation with no state at all. Giving two behaviours identical
+   styling would promise that clicking "Favorites" filters to favourites,
+   which it does not -- it scrolls there. Neutral = passive, tinted =
+   selectable is the encoding. */
 .priority-overview__section {
 	display: inline-flex;
-	align-items: baseline;
-	gap: 5px;
+	align-items: center;
+	gap: 6px;
 	min-width: 0;
-	padding: 2px 8px;
+	min-height: 32px;
+	padding: 0 12px;
 	border: 0;
-	border-radius: var(--border-radius-element, 8px);
+	border-radius: var(--border-radius-pill, 16px);
 	background: var(--color-background-hover);
-	color: var(--color-main-text);
 	text-align: start;
 	cursor: pointer;
 
@@ -167,14 +176,23 @@ export default {
 	white-space: nowrap;
 }
 
+/* The label is the constant, the count is the variable. Keeping the label
+   first is the pattern this widget has settled on everywhere it exists
+   (GitHub's "Open 12", Gmail's tabs, Linear, Jira): the labels form a stable
+   set you learn the positions of, and the eye lands on the number that
+   changed. Leading with the digit would start every chip with a numeral and
+   force a second read to find out whose it is -- and would break the row's
+   alignment the moment a section has nothing unread.
+   So the count earns attention through weight and contrast instead. */
 .priority-overview__label {
-	font-size: 0.78rem;
+	font-size: 0.87rem;
 	color: var(--color-text-maxcontrast);
 }
 
 .priority-overview__count {
-	font-size: 0.82rem;
-	font-weight: 600;
+	font-size: 0.87rem;
+	font-weight: 700;
+	color: var(--color-main-text);
 
 	&:empty {
 		display: none;
@@ -194,11 +212,11 @@ export default {
 
 @media (max-width: 420px) {
 	.priority-overview__label {
-		font-size: 0.72rem;
+		font-size: 0.8rem;
 	}
 
 	.priority-overview__count {
-		font-size: 0.78rem;
+		font-size: 0.8rem;
 	}
 }
 </style>
