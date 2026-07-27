@@ -3,7 +3,8 @@
 ### Section Counters
 
 * report only unread per Priority section — the totals were a number the user could neither act on nor read at a glance ("41.078"), and asking for them forced the counters query to visit **every message of every inbox**
-* drive the counters query from the unread set instead: 48,972 rows grouped into 41,874 threads becomes **13 threads**, and 373 ms warm / 6,820 ms cold becomes **20 ms / 300 ms**
+* drive the counters query from the unread set instead: 48,972 rows grouped into 41,874 threads becomes **13 threads**, and 373 ms warm / 6,820 ms cold becomes **156 ms / 1,243 ms** as deployed
+* the 20 ms / 300 ms measured while prototyping came from a join-driven variant that dropped messages with no thread root; the shipped predicate keeps them via its first disjunct, and that `OR` costs a wider scan. Splitting it into a `UNION` of two index-friendly branches would recover the difference and is the obvious next step
 * restrict by `(mailbox_id, thread_root_id)` row-value `IN`, not a correlated `EXISTS` with an `OR` inside it — the mailbox id travels with the thread root deliberately, because a thread root is a message-id and the same message can sit in two accounts' inboxes
 * section visibility now follows unread, loading state or loaded rows, since it used to lean on the total being greater than zero
 
