@@ -1,3 +1,15 @@
+## 5.11.0-dev.0.ktogias.28 (2026-07-27, resource-constrained deployment fork)
+
+### Priority Counters Follow the Row
+
+* adjust the section counters when a star or importance toggle moves a thread in threaded mode — the existing adjustment sat behind a flat-view-only branch, so in the default view the row moved instantly while the numbers waited for a server snapshot
+* retry a counter refresh once when the request coordinator cancels it, instead of leaving the last snapshot in place indefinitely
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.27 (2026-07-27, resource-constrained deployment fork)
 
 ### Priority Refresh Fan-out

@@ -297,6 +297,9 @@ function adjustPriorityInboxStats(store, section, totalDelta = 0, unreadDelta = 
 // than it: only adjustments made AFTER a snapshot's request started are
 // replayed onto it. An adjustment older than the request is one the server
 // query had every opportunity to see, so replaying it would double-count.
+// A cancelled counter refresh is rescheduled once, not abandoned.
+const PRIORITY_INBOX_STATS_RETRY_MS = 5000
+let priorityInboxStatsRetryTimeout
 let priorityStatsAdjustmentRevision = 0
 let priorityStatsAdjustmentLog = []
 const PRIORITY_STATS_ADJUSTMENT_LOG_LIMIT = 200
@@ -1823,6 +1826,22 @@ export default function mainStoreActions() {
 					// Retain the last successful snapshot. Counts that are a
 					// little stale are more useful than an overview that
 					// disappears whenever the user changes networks.
+					if (error?.code === 'ERR_CANCELED') {
+						// Not a failure: the coordinator declined to run this
+						// refresh. Nothing retried it, though, and this is the
+						// one request that decides whether the numbers on
+						// screen are current -- live on 2026-07-27 two
+						// cancellations in a row (both logged 499) left the
+						// header six minutes stale. One bounded retry, far
+						// enough out that it cannot itself become the pressure
+						// that gets it shed again.
+						logger.debug('Priority Inbox counter refresh was cancelled; retrying once', { error })
+						clearTimeout(priorityInboxStatsRetryTimeout)
+						priorityInboxStatsRetryTimeout = setTimeout(() => {
+							this.refreshPriorityInboxStats(workClass).catch(() => {})
+						}, PRIORITY_INBOX_STATS_RETRY_MS)
+						throw error
+					}
 					this.priorityInboxStatsError = true
 					logger.warn('Could not refresh Priority Inbox counters', { error })
 					throw error
@@ -6547,12 +6566,41 @@ export default function mainStoreActions() {
 			const members = siblings.length > 0 ? siblings : [envelope]
 			const value = members.some((member) => member.flags?.[flag] === true)
 
+			// Captured before the aggregate moves, because prioritySection()
+			// reads it. flagEnvelopeMutation() only adjusts the counters in
+			// the FLAT view -- its important/flagged branch sits behind
+			// `if (!threaded ...)` -- so in threaded mode nothing adjusted
+			// them at all and the numbers waited for a server snapshot.
+			//
+			// Confirmed live on 2026-07-27: unmarking an unread important
+			// message moved the row out of the section immediately, while the
+			// header kept reading "1 unread of 124". The database agreed with
+			// the header, and the correcting snapshot did not arrive for six
+			// minutes because two priority-inbox/stats requests in a row were
+			// cancelled (both logged 499).
+			const threaded = this.getPreference('layout-message-view', 'threaded') === 'threaded'
+			const previousSection = threaded ? priorityStatsSection(this, envelope) : undefined
+			const previousUnread = threaded ? priorityStatsUnread(this, envelope) : false
+
 			members.forEach((member) => {
 				if (member.flags?.[aggregate] === value) {
 					return
 				}
 				Vue.set(member.flags, aggregate, value)
 			})
+
+			// Once per call, not once per member: the counters count a thread
+			// once per mailbox, and this function is already invoked for each
+			// loaded copy of the message in its own mailbox.
+			if (previousSection === undefined) {
+				return
+			}
+			const nextSection = priorityStatsSection(this, envelope)
+			if (nextSection === undefined || nextSection === previousSection) {
+				return
+			}
+			adjustAndRecordPriorityInboxStats(this, previousSection, -1, previousUnread ? -1 : 0)
+			adjustAndRecordPriorityInboxStats(this, nextSection, 1, previousUnread ? 1 : 0)
 		},
 		addTagMutation({ tag }) {
 			Vue.set(this.tags, tag.id, tag)

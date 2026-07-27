@@ -2554,6 +2554,69 @@ describe('Vuex store actions', () => {
 			expect(store.mailboxes[11].envelopeLists['mentions:false match:allof not:starred is:pi-other']).toContain(50)
 		})
 
+		it('moves the counters, not just the row, when a thread is starred in threaded mode', async () => {
+			// Confirmed live on 2026-07-27: an unread important message was
+			// starred, the row moved into Favorites, and the header kept
+			// reading "Αγαπημένα 0 / 664" next to "Σημαντικό 1 / 124".
+			// flagEnvelopeMutation() only adjusts the counters in the flat
+			// view -- its important/flagged branch sits behind
+			// `if (!threaded ...)` -- so in threaded mode nothing adjusted
+			// them and they waited for a server snapshot.
+			store.preferences['layout-message-view'] = 'threaded'
+			store.preferences['sort-favorites'] = 'true'
+			store.priorityInboxStats = {
+				sections: {
+					favorite: { total: 664, unread: 0 },
+					important: { total: 124, unread: 1 },
+					other: { total: 41113, unread: 49 },
+				},
+				complete: true,
+			}
+			const envelope = seedListedEnvelope(70, {
+				seen: false,
+				hasUnseenInThread: true,
+				flagged: false,
+				hasFlaggedInThread: false,
+				important: true,
+				hasImportantInThread: true,
+			})
+			MessageService.setEnvelopeFlags.mockReturnValue(new Promise(() => {}))
+
+			store.toggleEnvelopeFlagged(envelope)
+			await Promise.resolve()
+
+			expect(store.priorityInboxStats.sections.favorite).toEqual({ total: 665, unread: 1 })
+			expect(store.priorityInboxStats.sections.important).toEqual({ total: 123, unread: 0 })
+		})
+
+		it('moves the counters when importance is removed in threaded mode', async () => {
+			store.preferences['layout-message-view'] = 'threaded'
+			store.preferences['sort-favorites'] = 'true'
+			store.priorityInboxStats = {
+				sections: {
+					favorite: { total: 664, unread: 0 },
+					important: { total: 124, unread: 1 },
+					other: { total: 41113, unread: 49 },
+				},
+				complete: true,
+			}
+			const envelope = seedListedEnvelope(71, {
+				seen: false,
+				hasUnseenInThread: true,
+				flagged: false,
+				hasFlaggedInThread: false,
+				important: true,
+				hasImportantInThread: true,
+			})
+			MessageService.setEnvelopeFlags.mockReturnValue(new Promise(() => {}))
+
+			store.toggleEnvelopeImportant(envelope)
+			await Promise.resolve()
+
+			expect(store.priorityInboxStats.sections.important).toEqual({ total: 123, unread: 0 })
+			expect(store.priorityInboxStats.sections.other).toEqual({ total: 41114, unread: 50 })
+		})
+
 		it('unmarking important also clears the thread-wide aggregate the sections classify by', async () => {
 			// prioritySection() reads hasImportantInThread in threaded mode,
 			// not flags.important. The aggregate was read in four places and
