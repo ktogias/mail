@@ -60,6 +60,20 @@ class AccountSynchronizedThreadUpdaterListener implements IEventListener {
 			return;
 		}
 
+		// Never in a browser request. This pass loads every message of the
+		// account -- 274MB and ~6s here -- and the only reason it still exists
+		// is ThreadBuilder's step 5, subject-only merges that no closure can
+		// reach. Nobody should wait on that while opening a mailbox.
+		//
+		// Account-wide syncs come from SyncJob on cron and from occ; the web
+		// path syncs one mailbox at a time and dispatches with the flag unset.
+		// So this costs cron nothing it was not already paying, and adds no
+		// queue and no new way to fail.
+		if (!$event->isBackgroundSync()) {
+			$event->getLogger()->debug('Skipping full thread rebuild outside a background sync');
+			return;
+		}
+
 		$accountId = $event->getAccount()->getId();
 
 		// This is now the RECONCILIATION pass, not the hot path.

@@ -114,9 +114,14 @@ class ImapToDbSynchronizerTest extends TestCase {
 			->with($this->callback(fn (Mailbox $mb) => $mb->getSyncNewToken() === 'dG9rZW5XaXRoSA=='
 					&& $mb->getSyncChangedToken() === 'dG9rZW5XaXRoSA=='
 					&& $mb->getSyncVanishedToken() === 'dG9rZW5XaXRoSA=='));
+		// backgroundSync must be false here: this is the per-mailbox path a
+		// browser takes, and it is what decides whether the full thread
+		// reconciliation -- 274MB and ~6s on a large account -- is allowed to
+		// run inside the request. See
+		// AccountSynchronizedThreadUpdaterListener.
 		$this->dispatcher->expects($this->once())
 			->method('dispatchTyped')
-			->with($this->isInstanceOf(SynchronizationEvent::class));
+			->with($this->callback(static fn (SynchronizationEvent $event): bool => !$event->isBackgroundSync()));
 		$this->synchronizer->sync(
 			$account,
 			$initialClient,
@@ -236,9 +241,15 @@ class ImapToDbSynchronizerTest extends TestCase {
 		// The other mailbox's own sync still ran (proven by $rebuildThreads
 		// making it true, from that call's own return value) and
 		// syncAccount() itself didn't throw or abort early.
+		// backgroundSync must be true: syncAccount() is only reached from
+		// SyncJob on cron and from occ, and it is the ONLY path allowed to run
+		// the full thread reconciliation. Drop the flag here and the
+		// subject-only merges of ThreadBuilder step 5 stop being reconciled
+		// anywhere, silently.
 		$this->dispatcher->expects($this->once())
 			->method('dispatchTyped')
-			->with($this->callback(fn (SynchronizationEvent $event) => $event->isRebuildThreads()));
+			->with($this->callback(static fn (SynchronizationEvent $event): bool => $event->isRebuildThreads()
+				&& $event->isBackgroundSync()));
 
 		$synchronizer->syncAccount($account, $this->createStub(LoggerInterface::class));
 	}

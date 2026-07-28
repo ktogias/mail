@@ -126,7 +126,7 @@ class RepairSyncJob extends TimedJob {
 		}
 
 		$this->dispatcher->dispatchTyped(
-			new SynchronizationEvent($account, $this->logger, $rebuildThreads),
+			new SynchronizationEvent($account, $this->logger, $rebuildThreads, true),
 		);
 	}
 

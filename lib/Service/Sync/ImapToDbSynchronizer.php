@@ -190,6 +190,10 @@ class ImapToDbSynchronizer {
 				$account,
 				$logger,
 				$rebuildThreads,
+				// Account-wide, and only ever reached from SyncJob on cron or
+				// from occ -- never from a browser. The full thread
+				// reconciliation is allowed to run here and nowhere else.
+				true,
 			)
 		);
 	}

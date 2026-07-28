@@ -1,3 +1,23 @@
+## 5.11.0-dev.0.ktogias.64 (2026-07-29, resource-constrained deployment fork)
+
+### Threading
+
+* **the full reconciliation never runs in a browser request now.** `.62` cut it from every sync to once a day, but the day's one run still landed in whichever request happened to trigger it — 274 MB and ~6 s of loading every message of the account, while someone waited
+* `SynchronizationEvent` carries where it came from. `syncAccount()` — reached only from `SyncJob` on cron and from `occ` — marks itself; the web path syncs one mailbox at a time and does not. The listener requires the flag
+* no queue and no new way to fail: cron was already running `SyncJob`, so this costs it nothing it was not already paying, and the reconciliation's reliability is unchanged
+* both dispatch sites are pinned by tests, because losing either is silent — drop the flag on `syncAccount()` and the subject-only merges of `ThreadBuilder` step 5 stop being reconciled anywhere at all
+
+### Tests
+
+* the suite reported **nine errors** for as long as the container harness existed. One was real: `PriorityInboxStatsServiceTest` mocked `Mailbox::getId()`, which does not physically exist — `Entity` declares it `@method` and serves it through `__call()`. It builds a real entity now and so exercises the real `isInbox()`/`isCached()` derivation
+* the other eight were the harness's: the avatar tests need the prefixed `OCA\Mail\Vendor\*` that composer builds into `lib/Vendor/`, absent from a plain checkout. Excluded with a printed notice — a suite that always reports the same few errors teaches everyone to ignore the error count, and that is where a real regression hides
+* **1595 tests, 0 errors, 0 failures**
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.63 (2026-07-29, resource-constrained deployment fork)
 
 ### Tests only — no runtime change from `.62`

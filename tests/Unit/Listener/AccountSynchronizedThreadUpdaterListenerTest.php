@@ -79,8 +79,19 @@ class AccountSynchronizedThreadUpdaterListenerTest extends TestCase {
 		$this->account = new Account($mailAccount);
 	}
 
-	private function event(): SynchronizationEvent {
-		return new SynchronizationEvent($this->account, new NullLogger(), true);
+	private function event(bool $backgroundSync = true): SynchronizationEvent {
+		return new SynchronizationEvent($this->account, new NullLogger(), true, $backgroundSync);
+	}
+
+	public function testNeverRebuildsInsideABrowserRequest(): void {
+		// The web path syncs one mailbox at a time and dispatches without the
+		// flag. Loading every message of the account there is what put 274MB
+		// and ~6s inside a request someone was waiting on.
+		$this->config->method('getAppValue')->willReturn('0');
+		$this->mapper->expects(self::never())->method('findThreadingData');
+		$this->config->expects(self::never())->method('setAppValue');
+
+		$this->listener->handle($this->event(false));
 	}
 
 	public function testSkipsTheRebuildWhenItReconciledRecently(): void {
