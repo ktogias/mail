@@ -1,3 +1,21 @@
+## 5.11.0-dev.0.ktogias.60 (2026-07-28, resource-constrained deployment fork)
+
+### Marking as Spam
+
+* **a message that has already left the mailbox is no longer reported as a failure.** Marking a thread as spam showed *"Could not update spam status"* for messages that had in fact been filed as spam
+* the chain, from the live logs: `PUT .../flags` answered **404** `Flagged message is not cached`, and the reconciliation's own `GET .../messages/<id>` answered **403**. `fetchEnvelope()` deliberately turns 403/404 into `undefined` rather than throwing — so `reconcileOrRevert()`'s catch, which exists precisely to fail open, never saw it. Every `hasLanded()` predicate then read a flag off `undefined`, concluded the write had not landed, reverted the optimistic state and rethrew
+* "gone" is not evidence of failure. For an action whose whole purpose is to move the message out of this mailbox it is the strongest evidence of success — and for a plain flag toggle there is nothing left to revert onto, since the envelope is no longer there to carry the restored flag
+* three existing tests turned out to pass only because the auto-mocked `fetchEnvelope` returned `undefined`; their setups now say explicitly that the message is still present, which is the situation they describe
+
+### Syncing
+
+* the incomplete-initial-sync path counted cached messages with `count(findAllUids())` — pulling **every UID of the mailbox into a PHP array to take its length**. On this deployment's largest INBOX that is 27,262 rows materialised for a number the database can produce itself, on a path already under memory pressure (`Request used 273.7 MB of memory. Memory limit: 512M` on `mailboxes/149/sync`). It uses `countByMailbox()` now
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.59 (2026-07-28, resource-constrained deployment fork)
 
 ### Resuming a Backgrounded Tab

@@ -2477,6 +2477,10 @@ describe('Vuex store actions', () => {
 			MessageService.setEnvelopeFlags.mockRejectedValue(new Error('network error'))
 			store.mailboxes[11].envelopeLists['is:starred'] = []
 			const envelope = { databaseId: 1, mailboxId: 11, flags: { flagged: false } }
+			// The message is still there and still unflagged: the write really
+			// did not land. Stated explicitly, because an absent envelope now
+			// means "gone", which reconcileOrRevert() reads as success.
+			MessageService.fetchEnvelope.mockResolvedValue({ databaseId: 1, mailboxId: 11, flags: { flagged: false } })
 
 			await expect(store.toggleEnvelopeFlagged(envelope)).rejects.toThrow('network error')
 
@@ -7553,9 +7557,39 @@ describe('Vuex store actions', () => {
 			expect(MessageService.moveMessage).not.toHaveBeenCalled()
 		})
 
+		// Reported live on 2026-07-28: marking a thread as spam showed "Could
+		// not update spam status" for messages that had in fact been filed as
+		// spam. PUT .../flags answered 404 "Flagged message is not cached" and
+		// the reconciliation's own GET .../messages/<id> answered 403.
+		//
+		// fetchEnvelope() deliberately turns 403/404 into undefined rather
+		// than throwing, so reconcileOrRevert()'s catch -- which exists to
+		// fail open -- never saw it. Every hasLanded() predicate then read a
+		// flag off undefined, concluded the write had not landed, reverted the
+		// optimistic state and rethrew.
+		//
+		// A message that is gone is not evidence of failure. For an action
+		// whose whole purpose is to move the message out of this mailbox it is
+		// the strongest evidence of success.
+		it('does not report failure when the message has already left the mailbox', async () => {
+			MessageService.setEnvelopeFlags.mockRejectedValue(new Error('Request failed with status code 404'))
+			MessageService.fetchEnvelope.mockResolvedValue(undefined)
+			const envelope = envelopeInInbox()
+
+			await expect(store.toggleEnvelopeJunk({ envelope, removeEnvelope: true })).resolves.not.toThrow()
+
+			// And the optimistic state stands: reverting would put a junk flag
+			// back on a message that is no longer there.
+			expect(envelope.flags.$junk).toBe(true)
+		})
+
 		it('reverts flags AND re-adds the envelope when the flag request itself fails', async () => {
 			MessageService.setEnvelopeFlags.mockRejectedValue(new Error('network error'))
 			const envelope = envelopeInInbox()
+			// Still in the mailbox and still not junk -- the write did not
+			// land. Without saying so the reconciliation sees no message at
+			// all, which now means the action succeeded.
+			MessageService.fetchEnvelope.mockResolvedValue(envelopeInInbox())
 
 			await expect(store.toggleEnvelopeJunk({ envelope, removeEnvelope: true })).rejects.toThrow('network error')
 
@@ -7573,6 +7607,9 @@ describe('Vuex store actions', () => {
 			MessageService.moveMessage.mockRejectedValue(new Error('move failed'))
 			const envelope = envelopeInInbox()
 			store.envelopes[envelope.databaseId] = envelope
+			// The move failed, so the message is still in the inbox and the
+			// flag never took either.
+			MessageService.fetchEnvelope.mockResolvedValue(envelopeInInbox())
 
 			await expect(store.toggleEnvelopeJunk({ envelope, removeEnvelope: true })).rejects.toThrow('move failed')
 

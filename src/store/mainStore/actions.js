@@ -1160,6 +1160,25 @@ async function reconcileOrRevert({ envelope, error, hasLanded, onLanded = () => 
 		logger.debug('could not reconcile after a failed action -- trusting the optimistic state', { error })
 		return true
 	}
+	if (authoritative === undefined) {
+		// The message no longer exists. fetchEnvelope() turns the server's
+		// 403/404 into undefined rather than throwing, so the catch above --
+		// which exists precisely to fail open -- never sees this case, and
+		// every hasLanded() predicate then reads a flag off undefined, says
+		// "did not land", and reverts.
+		//
+		// "Gone" is not evidence of failure. For an action that moves a
+		// message out of its mailbox it is the strongest evidence of success:
+		// reported live on 2026-07-28, marking a thread as spam showed "Could
+		// not update spam status" for messages that had in fact been filed as
+		// spam. PUT .../flags answered 404 "Flagged message is not cached" and
+		// the reconciliation's own GET .../messages/<id> answered 403.
+		//
+		// And for a plain flag toggle there is nothing left to revert onto: the
+		// envelope is not there to carry the restored flag.
+		logger.debug('reconciliation found the message gone -- trusting the optimistic state')
+		return true
+	}
 	if (hasLanded(authoritative)) {
 		onLanded(authoritative)
 		return true

@@ -423,8 +423,14 @@ class ImapToDbSynchronizer {
 				// We might need more attempts to fill the cache
 				$loggingMailboxId = $account->getId() . ':' . $mailbox->getName();
 				$total = $imapMessages['total'];
-				$cached = count($this->dbMapper->findAllUids($mailbox));
-				$perf->step('find number of cached UIDs');
+				// countByMailbox(), not count(findAllUids()): the latter pulls
+				// every UID of the mailbox into a PHP array only to take its
+				// length. On this deployment's largest INBOX that is 27k rows
+				// materialised for a number the database can produce itself,
+				// on the very path -- an incomplete initial sync -- that is
+				// already under memory pressure.
+				$cached = $this->dbMapper->countByMailbox($mailbox);
+				$perf->step('count cached UIDs');
 
 				$perf->end();
 				throw new IncompleteSyncException("Initial sync is not complete for $loggingMailboxId ($cached of $total messages cached).");
