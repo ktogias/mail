@@ -1723,6 +1723,31 @@ export default {
 }
 
 .envelope {
+	/* Off-screen rows stop contributing display items.
+	 *
+	 * The list renders every loaded row as real DOM -- no virtualisation --
+	 * so after a few pages of scrolling the display list holds hundreds of
+	 * rows, each with several mask-based icons. Firefox rebuilds that list
+	 * whenever anything in it changes, and the 2026-07-28 profiles measured
+	 * 42 rebuilds per second at 2.08ms each on an i7-1360P: 6.9s of paint
+	 * CPU in 79s, with SVGUtils::DetermineMaskUsage the single hottest
+	 * rendering leaf because it is consulted per element per rebuild.
+	 *
+	 * content-visibility lets the browser skip layout and paint for rows
+	 * outside the viewport entirely, which is where nearly all of them are.
+	 *
+	 * The `auto` in contain-intrinsic-size is load-bearing: once a row has
+	 * been rendered the browser remembers its real height, so the scrollbar
+	 * and any scroll restoration stay honest. 69px is only the estimate for
+	 * a row that has never been on screen.
+	 *
+	 * Safe against the paint containment this implies: the row's actions
+	 * menu is a floating-vue popover, which defaults to `container: "body"`
+	 * and is therefore not a descendant that could be clipped.
+	 */
+	content-visibility: auto;
+	contain-intrinsic-size: auto 69px;
+
 	.app-content-list-item-icon {
 		height: 40px; // To prevent some unexpected spacing below the avatar
 	}

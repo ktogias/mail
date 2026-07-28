@@ -1,3 +1,22 @@
+## 5.11.0-dev.0.ktogias.58 (2026-07-28, resource-constrained deployment fork)
+
+### Envelope List
+
+* **off-screen rows no longer contribute display items.** The list renders every loaded row as real DOM — there is no virtualisation and no containment anywhere — so after a few pages of scrolling the display list holds hundreds of rows, each with several mask-based icons. Firefox rebuilds that list whenever anything in it changes
+* measured on 2026-07-28, on an **i7-1360P with Iris Xe** (the rendering machine is not the NAS): **42 display-list rebuilds per second at 2.08 ms each** — 6.9 s of paint CPU in a 79 s capture, ~24% of a core, with `SVGUtils::DetermineMaskUsage` the single hottest rendering leaf because it is consulted per element per rebuild
+* `content-visibility: auto` lets the browser skip layout and paint for rows outside the viewport, which is where nearly all of them are
+* the `auto` in `contain-intrinsic-size: auto 69px` is load-bearing: once a row has been rendered the browser remembers its real height, so the scrollbar and scroll restoration stay honest. The 69px is only the estimate for a row that has never been on screen
+* safe against the paint containment this implies: the row's actions menu is a floating-vue popover, which defaults to `container: "body"` and so is not a descendant that could be clipped
+
+### Stated plainly
+
+* this is a **hypothesis under test**, not a proven fix. Three earlier explanations for the paint cost — the PDF viewer, scrolling, and the blurred theming background — were each disproved by a controlled profile. What supports this one is that the cost is display-list *building* rather than rasterization, that it is independent of every input signal measured, and that nothing bounds how much of the list is in that display list. The next profile decides
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.57 (2026-07-28, resource-constrained deployment fork)
 
 ### Syncing
