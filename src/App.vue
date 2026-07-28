@@ -161,6 +161,8 @@ export default {
 		window.removeEventListener('keydown', this.onUserActivity)
 		window.removeEventListener('touchstart', this.onUserActivity)
 		document.removeEventListener('visibilitychange', this.onVisibilityChange)
+		window.removeEventListener('pageshow', this.onPageShow)
+		document.removeEventListener('resume', this.onPageResume)
 		window.removeEventListener('online', this.onNetworkOnline)
 		window.removeEventListener('focus', this.onWindowFocus)
 		window.removeEventListener('blur', this.onWindowBlur)
@@ -349,32 +351,68 @@ export default {
 					this.lastActivity = now
 				}
 			}
+			/**
+			 * One resume transaction, however the browser chooses to tell us
+			 * the tab is back.
+			 *
+			 * visibilitychange is not the only signal and is not guaranteed to
+			 * arrive: a tab restored from bfcache reports `pageshow` with
+			 * persisted=true, and one thawed from the frozen lifecycle state
+			 * reports `resume`. Miss those and nothing restarts the poller --
+			 * the tab simply never syncs again.
+			 *
+			 * Firefox Android delivers several of these back to back after a
+			 * thaw, and only the first is a real resume: clearing hiddenAt
+			 * below is what makes the rest cheap, since they then see no long
+			 * absence and take the plain-tick path instead of opening a second
+			 * recovery transaction. No extra de-duplication is needed, and a
+			 * timestamp guard added here first could not be shown to change
+			 * any observable behaviour, so it is not present.
+			 *
+			 * @param {string} source which event reported the resume
+			 */
+			const resumeFromBackground = (source) => {
+				logger.debug(`tab resumed (${source})`)
+				const returnedAfterLongAbsence = this.hiddenAt !== undefined
+					&& Date.now() - this.hiddenAt >= 60_000
+				if (returnedAfterLongAbsence) {
+					this.lastLongResumeAt = Date.now()
+				}
+				this.hiddenAt = undefined
+				this.lastActivity = Date.now()
+				this.mainStore.resetNotificationEngagementMutation()
+				if (this.networkState === 'healthy' && !returnedAfterLongAbsence) {
+					// Full tick right away: list, badges and the open
+					// thread must be consistent the moment the user looks.
+					this.rescheduleTickNow(tick)
+				} else {
+					// A long-thawed tab gets one ordered active-view
+					// recovery. Do not immediately follow it with a full
+					// watched-mailbox fan-out; the normal jittered timer
+					// will reconcile background mailboxes afterwards.
+					this.recoverConnectivity().finally(rescheduleTickNormally)
+				}
+			}
 			this.onVisibilityChange = () => {
 				if (document.visibilityState === 'visible') {
-					const returnedAfterLongAbsence = this.hiddenAt !== undefined
-						&& Date.now() - this.hiddenAt >= 60_000
-					if (returnedAfterLongAbsence) {
-						this.lastLongResumeAt = Date.now()
-					}
-					this.hiddenAt = undefined
-					this.lastActivity = Date.now()
-					this.mainStore.resetNotificationEngagementMutation()
-					if (this.networkState === 'healthy' && !returnedAfterLongAbsence) {
-						// Full tick right away: list, badges and the open
-						// thread must be consistent the moment the user looks.
-						this.rescheduleTickNow(tick)
-					} else {
-						// A long-thawed tab gets one ordered active-view
-						// recovery. Do not immediately follow it with a full
-						// watched-mailbox fan-out; the normal jittered timer
-						// will reconcile background mailboxes afterwards.
-						this.recoverConnectivity().finally(rescheduleTickNormally)
-					}
+					resumeFromBackground('visibilitychange')
 				} else {
 					this.hiddenAt = Date.now()
 					releaseCrossTabLeadership('watched-mailboxes')
 				}
 			}
+			// Restored from bfcache. persisted=false is an ordinary load, which
+			// mounted() already covers.
+			this.onPageShow = (event) => {
+				if (event.persisted) {
+					resumeFromBackground('pageshow')
+				}
+			}
+			// Page Lifecycle: the tab was frozen to save memory and has been
+			// thawed. Reported live on 2026-07-28 as a mail tab that rendered
+			// and scrolled but answered no button and issued no request for
+			// seventeen minutes.
+			this.onPageResume = () => resumeFromBackground('resume')
 			this.onWindowFocus = () => {
 				this.lastActivity = Date.now()
 				this.mainStore.resetNotificationEngagementMutation()
@@ -406,6 +444,8 @@ export default {
 			window.addEventListener('keydown', this.onUserActivity, { passive: true })
 			window.addEventListener('touchstart', this.onUserActivity, { passive: true })
 			document.addEventListener('visibilitychange', this.onVisibilityChange)
+			window.addEventListener('pageshow', this.onPageShow)
+			document.addEventListener('resume', this.onPageResume)
 			window.addEventListener('focus', this.onWindowFocus)
 			window.addEventListener('blur', this.onWindowBlur)
 		},

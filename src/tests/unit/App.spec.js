@@ -187,6 +187,76 @@ describe('App', () => {
 			random.mockRestore()
 		})
 
+		// Reported live on 2026-07-28: a mail tab on Firefox Android rendered
+		// and scrolled but answered no button and issued no request for
+		// seventeen minutes after the screen came back on. visibilitychange is
+		// not the only way a browser reports that a tab is in front of the
+		// user again, and it is not guaranteed to arrive -- miss the others and
+		// nothing ever restarts the poller.
+		it('restarts the poller when the tab is restored from bfcache', () => {
+			vi.useFakeTimers()
+			store.syncWatchedMailboxes = vi.fn().mockResolvedValue()
+			setVisibility('hidden')
+
+			view.vm.startWatchedMailboxSync()
+			expect(store.syncWatchedMailboxes).not.toHaveBeenCalled()
+
+			setVisibility('visible')
+			window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true }))
+			vi.advanceTimersByTime(1)
+
+			expect(store.syncWatchedMailboxes).toHaveBeenCalledTimes(1)
+		})
+
+		it('ignores an ordinary pageshow, which is just a page load', () => {
+			// persisted=false is a normal navigation; mounted() already owns it.
+			vi.useFakeTimers()
+			store.syncWatchedMailboxes = vi.fn().mockResolvedValue()
+			setVisibility('hidden')
+
+			view.vm.startWatchedMailboxSync()
+			window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: false }))
+			vi.advanceTimersByTime(1)
+
+			expect(store.syncWatchedMailboxes).not.toHaveBeenCalled()
+		})
+
+		it('restarts the poller when a frozen tab is thawed', () => {
+			vi.useFakeTimers()
+			store.syncWatchedMailboxes = vi.fn().mockResolvedValue()
+			setVisibility('hidden')
+
+			view.vm.startWatchedMailboxSync()
+			expect(store.syncWatchedMailboxes).not.toHaveBeenCalled()
+
+			setVisibility('visible')
+			document.dispatchEvent(new Event('resume'))
+			vi.advanceTimersByTime(1)
+
+			expect(store.syncWatchedMailboxes).toHaveBeenCalledTimes(1)
+		})
+
+		it('runs one resume transaction when the browser reports several at once', () => {
+			// Firefox Android delivers these back to back after a thaw. Only
+			// the first is a real resume, because it clears hiddenAt and the
+			// rest then see no long absence -- that reset is the thing being
+			// pinned here. Counted on recoverConnectivity() rather than on the
+			// tick: rescheduling a timer three times still leaves one timer,
+			// so a tick count would pass either way.
+			vi.useFakeTimers()
+			store.syncWatchedMailboxes = vi.fn().mockResolvedValue()
+			view.vm.recoverConnectivity = vi.fn().mockResolvedValue()
+			view.vm.startWatchedMailboxSync()
+			view.vm.hiddenAt = Date.now() - 60_001
+
+			setVisibility('visible')
+			document.dispatchEvent(new Event('resume'))
+			window.dispatchEvent(Object.assign(new Event('pageshow'), { persisted: true }))
+			document.dispatchEvent(new Event('visibilitychange'))
+
+			expect(view.vm.recoverConnectivity).toHaveBeenCalledTimes(1)
+		})
+
 		it('returns to the normal cadence instead of bursting after focus recovery', async () => {
 			vi.useFakeTimers()
 			const random = vi.spyOn(Math, 'random').mockReturnValue(0)

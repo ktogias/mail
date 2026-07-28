@@ -1,3 +1,21 @@
+## 5.11.0-dev.0.ktogias.59 (2026-07-28, resource-constrained deployment fork)
+
+### Resuming a Backgrounded Tab
+
+* **`visibilitychange` is no longer the only signal that the tab is back.** A tab restored from bfcache reports `pageshow` with `persisted=true`, and one thawed from the frozen Page Lifecycle state reports `resume`. Neither was listened for, so on a browser that thaws without also firing `visibilitychange`, nothing ever restarted the poller and the tab simply never synced again
+* all three now run one shared resume transaction. Clearing `hiddenAt` is what keeps a burst of signals cheap — Firefox Android delivers several back to back, and after the first they see no long absence and take the plain-tick path instead of opening a second recovery
+
+### About the incident that prompted it
+
+* reported live on 2026-07-28: a mail tab on Firefox Android rendered correctly and scrolled normally, but answered no button — back, next/previous, the actions menu — while links inside the message body still worked. The server saw **zero requests from that tab for seventeen minutes**, with no page reload and, notably, **no CSRF `412` and no `/csrftoken` fetch**, which rules out the resume self-deadlock recorded on 2026-07-25
+* every symptom follows from the tab's JavaScript not executing at all: the DOM is retained and composited, scrolling is compositor-driven, and the message body is an `iframe` whose own document handles its links without the parent's JS
+* **this release would not have fixed that**: no listener fires when no script runs. It closes the neighbouring gap, where the script does resume and is simply never told
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.58 (2026-07-28, resource-constrained deployment fork)
 
 ### Envelope List
