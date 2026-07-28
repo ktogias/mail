@@ -1128,7 +1128,20 @@ export default {
 			// use.
 			this.prefetchListNeighborhood(this.threadId)
 
-			this.expandedThreads = [this.initiallyExpandedEnvelopeId()]
+			// Provisional: at this point the store usually knows only the
+			// envelope that was clicked, because the thread listing has not
+			// been fetched yet. initiallyExpandedEnvelopeId() therefore looks
+			// for "the oldest unread" in a collection of one, and settles on
+			// the clicked message -- the newest, since that is what a list row
+			// stands for. Older unread replies in the same thread never got a
+			// say, which is exactly the reported symptom: the thread opens on
+			// the newest message while older unread ones sit above it.
+			//
+			// Kept as a first guess rather than deferred entirely, because it
+			// gives the body fetch below a head start; the answer is revised
+			// once the thread resolves.
+			const provisionallyExpanded = this.initiallyExpandedEnvelopeId()
+			this.expandedThreads = [provisionallyExpanded]
 			this.errorMessage = ''
 			this.errorTitle = ''
 			if (this.mainStore.getPreference('layout-message-view', 'threaded') === 'threaded') {
@@ -1148,6 +1161,25 @@ export default {
 				// instead of firing a second request.
 				this.mainStore.fetchMessage(this.threadId).catch(() => {})
 				await this.fetchThread()
+
+				// The siblings are known now, so ask again. Only when the
+				// guess above is still exactly what is expanded: the fetch can
+				// take a while on this hardware, and a user who has already
+				// opened something else in the meantime must not have it
+				// closed under them.
+				if (
+					this.expandedThreads.length === 1
+					&& this.expandedThreads[0] === provisionallyExpanded
+				) {
+					const oldestUnread = this.initiallyExpandedEnvelopeId()
+					if (oldestUnread !== provisionallyExpanded) {
+						logger.debug('expanding the oldest unread message in the thread instead of the clicked one', {
+							clicked: provisionallyExpanded,
+							oldestUnread,
+						})
+						this.expandedThreads = [oldestUnread]
+					}
+				}
 			}
 			this.updateSummary()
 			this.loadedThreads = 0

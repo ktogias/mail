@@ -515,6 +515,79 @@ describe('Thread', () => {
 		})
 	})
 
+	// The rule -- open on the oldest unread -- was already right. What was
+	// wrong is WHEN it was asked. At mount the store usually knows only the
+	// envelope that was clicked, because the thread listing has not been
+	// fetched yet, so "the oldest unread" was chosen from a collection of one
+	// and always came out as the clicked message: the newest, since that is
+	// what a list row stands for. Reported live: the thread opens on the most
+	// recent message while older unread replies sit above it.
+	// The rule -- open on the oldest unread -- was already right. What was
+	// wrong is WHEN it was asked. At mount the store usually knows only the
+	// envelope that was clicked, because the thread listing has not been
+	// fetched yet, so "the oldest unread" was chosen from a collection of one
+	// and always came out as the clicked message: the newest, since that is
+	// what a list row stands for. Reported live: the thread opens on the most
+	// recent message while older unread replies sit above it.
+	//
+	// These assert the ORDER rather than the resulting render: `thread` is a
+	// cached computed over store getters that are plain mocks here, so it has
+	// no reactive dependency to invalidate and would never recompute in a test
+	// however the data is arranged. What the fix changes is that the question
+	// is asked a second time, after the answer can be right.
+	describe('revising the expanded message once the thread arrives', () => {
+		function mountLateThread() {
+			store.getEnvelope = vi.fn().mockReturnValue({
+				databaseId: 6003, accountId: 900, threadRootId: 'late', mailboxId: 90,
+			})
+			store.getEnvelopesByThreadRootId = vi.fn().mockReturnValue([])
+			store.getMailbox = vi.fn().mockReturnValue({ databaseId: 90, specialRole: 'inbox' })
+			store.getMailboxes = vi.fn().mockReturnValue([{ databaseId: 90, specialRole: 'inbox' }])
+			store.getPreference = vi.fn().mockImplementation((key, fallback) => (
+				key === 'layout-message-view' ? 'threaded' : fallback
+			))
+			store.setInteractionPriorityMutation = vi.fn()
+			store.cancelSpeculativeFetchesExcept = vi.fn()
+			store.prefetchListNeighborhood = vi.fn()
+			store.fetchMessage = vi.fn().mockResolvedValue({})
+			store.fetchThread = vi.fn().mockResolvedValue([])
+			return shallowMount(Thread, {
+				mocks: { $route: { params: { threadId: 6003 } } },
+				store,
+				localVue,
+			})
+		}
+
+		it('asks again once the thread has been fetched, and expands the answer', async () => {
+			const view = mountLateThread()
+			// Before the fetch only the clicked message is known; afterwards the
+			// oldest unread reply is.
+			const answers = [6003, 6001]
+			view.vm.initiallyExpandedEnvelopeId = vi.fn(() => answers.shift() ?? 6001)
+
+			await view.vm.resetThread()
+
+			expect(view.vm.initiallyExpandedEnvelopeId).toHaveBeenCalledTimes(2)
+			expect(view.vm.expandedThreads).toEqual([6001])
+		})
+
+		it('leaves a message the user opened in the meantime alone', async () => {
+			const view = mountLateThread()
+			const answers = [6003, 6001]
+			view.vm.initiallyExpandedEnvelopeId = vi.fn(() => answers.shift() ?? 6001)
+			// The fetch takes a while on this hardware; whatever the user opened
+			// while waiting must not be closed under them.
+			store.fetchThread = vi.fn().mockImplementation(async () => {
+				view.vm.expandedThreads = [6002]
+				return []
+			})
+
+			await view.vm.resetThread()
+
+			expect(view.vm.expandedThreads).toEqual([6002])
+		})
+	})
+
 	describe('stale fetchThread() rejections', () => {
 		// The store's fetchThread() action has no caching/dedup at all
 		// (unlike fetchMessage()), so hover-prefetch (Envelope.vue) firing

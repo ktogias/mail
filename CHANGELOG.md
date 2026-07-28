@@ -1,3 +1,16 @@
+## 5.11.0-dev.0.ktogias.50 (2026-07-28, resource-constrained deployment fork)
+
+### Opening a Thread
+
+* ask **again** which message to expand once the thread listing has arrived. The rule — open on the oldest unread, like Gmail — was already right; it was asked too early. At that point the store usually knows only the envelope that was clicked, so "the oldest unread" was chosen from a collection of one and always came out as the clicked message: the newest, since that is what a list row stands for
+* reported live as the thread opening on the most recent message while older unread replies sit above it
+* the first guess is kept, because it gives the body fetch a head start, and is revised only when it is still exactly what is expanded — a user who opened something else while the fetch was in flight keeps it
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.49 (2026-07-28, resource-constrained deployment fork)
 
 ### Calendar Import
