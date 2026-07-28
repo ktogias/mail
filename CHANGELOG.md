@@ -1,3 +1,27 @@
+## 5.11.0-dev.0.ktogias.56 (2026-07-28, resource-constrained deployment fork)
+
+### Envelope List
+
+* **the row fade is unchanged; what it costs is not.** Given no `duration`, Vue has to find out how long an animation runs, and the only way it can is to read a computed style off the element — which forces a **synchronous style flush**, once per transitioning element, from inside a `requestAnimationFrame` callback:
+
+  ```js
+  if (isValidDuration(explicitEnterDuration)) { setTimeout(cb, explicitEnterDuration) }
+  else { whenTransitionEnds(el, type, cb) }   // -> getTransitionInfo -> getComputedStyle
+  ```
+
+* that `else` branch was **12.0 of the 14.1 seconds** of style flushing measured on 2026-07-28, and the reason the tab's main thread sat at ~100% for twelve seconds straight. Handing Vue the number takes the branch out entirely
+* the duration still comes from `--animation-slow`, so the theme stays authoritative and the CSS and the JS cannot drift apart — but it is read **once for the lifetime of the page** instead of once per element per frame
+* the animation itself is untouched: same classes, same properties, same timing
+
+### Still open
+
+* the `hasMove` probe in transition-group's `updated` hook (2.0s of the 14.1) is unaffected — it runs on every update whatever the transition's name is, and `.55` only removes it when animation is off entirely. Killing it for short animated lists means not rendering a transition-group at all, which is a separate decision
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.55 (2026-07-28, resource-constrained deployment fork)
 
 ### Envelope List

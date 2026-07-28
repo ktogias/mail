@@ -546,11 +546,21 @@ describe('EnvelopeList', () => {
 			expect(view.html()).not.toContain('transition-group')
 		})
 
-		it('renders a real transition-group while the list is still animated', () => {
+		// Given no `duration`, Vue has to find out how long the animation runs,
+		// and the only way it can is to read a computed style off the element
+		// -- a synchronous style flush, once per transitioning element, from
+		// inside a requestAnimationFrame callback. That was 12.0 of the 14.1
+		// seconds measured on 2026-07-28. Handing it the number removes the
+		// branch and leaves the CSS animation exactly as it was.
+		it('hands the transition-group an explicit duration instead of letting it measure one', () => {
 			const view = mountEnvelopeList({ envelopes: manyEnvelopes(200) })
 
 			expect(view.vm.listWrapper).toBe('transition-group')
-			expect(view.vm.listWrapperProps).toEqual({ name: 'list' })
+			expect(view.vm.listWrapperProps.name).toBe('list')
+			// isValidDuration() accepts a real number and nothing else; a NaN
+			// or a string would send Vue straight back to sniffing.
+			expect(typeof view.vm.listWrapperProps.duration).toBe('number')
+			expect(view.vm.listWrapperProps.duration).toBeGreaterThan(0)
 		})
 
 		it('keeps the transition name off a plain span, where it is a stray attribute', () => {

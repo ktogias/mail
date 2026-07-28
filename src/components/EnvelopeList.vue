@@ -209,6 +209,7 @@ import logger from '../logger.js'
 import UndoableActionMixin from '../mixins/UndoableActionMixin.js'
 import { ENVELOPE_LIST_MAX_ANIMATED_SIZE } from '../store/constants.js'
 import useMainStore from '../store/mainStore.js'
+import { listTransitionDurationMs } from '../util/listTransitionDuration.js'
 
 export default {
 	name: 'EnvelopeList',
@@ -439,7 +440,22 @@ export default {
 		listWrapperProps() {
 			// `name` is a transition-group prop; on a plain <span> it would
 			// land in the DOM as a stray attribute.
-			return this.listAnimated ? { name: this.listTransitionName } : {}
+			//
+			// `duration` is the expensive part made cheap. Without it Vue has
+			// to find out how long the animation runs, and the only way it can
+			// is to read a computed style off the element -- which forces a
+			// synchronous style flush, once per transitioning element, from
+			// inside a requestAnimationFrame callback:
+			//
+			//   if (isValidDuration(explicitEnterDuration)) { setTimeout(cb, explicitEnterDuration) }
+			//   else { whenTransitionEnds(el, type, cb) }
+			//
+			// That else branch was 12.0 of the 14.1 seconds of style flushing
+			// measured on 2026-07-28. Handing Vue the number removes the
+			// branch entirely and leaves the CSS animation exactly as it was.
+			return this.listAnimated
+				? { name: this.listTransitionName, duration: listTransitionDurationMs() }
+				: {}
 		},
 	},
 
