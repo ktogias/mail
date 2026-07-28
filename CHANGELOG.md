@@ -1,3 +1,18 @@
+## 5.11.0-dev.0.ktogias.53 (2026-07-28, resource-constrained deployment fork)
+
+### Calendars and Files
+
+* **every WebDAV call was failing after a successful response.** `src/dav/client.js` patched `webdav`'s internal `request` with axios itself — correct up to webdav 4, where the patched call was axios-compatible. webdav 5 is built on fetch and reads `.ok` and `await response.text()` off whatever that call resolves with; an axios response has neither and carries `.data`, so a perfectly good 207 became `TypeError: response.text is not a function`
+* reported live as **"Could not load your calendars"** with the PROPFIND sitting right there in the network panel at `207 / 24.98 kB` — the request had succeeded and the client threw on it
+* `getUserCalendars()` was only the visible half: `FileService`'s `getFileSize()` / `getFileData()` go through the same client and failed the same way
+* axios is kept — it is what carries the session, the CSRF token and `OC.registerXHRForErrorProcessing`. What is new is a small fetch-shaped adapter around it, with the body read as an `ArrayBuffer` and decoded on demand so `text()` and `arrayBuffer()` are both honest
+* the adapter does **not** reject on 4xx/5xx: webdav is the one that decides what a status means, and rejecting first would pre-empt that and lose the response body with it
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.52 (2026-07-28, resource-constrained deployment fork)
 
 ### Priority Inbox
