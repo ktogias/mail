@@ -33,6 +33,8 @@ use OCP\IUser;
 use RuntimeException;
 use Throwable;
 use function array_chunk;
+use function array_unique;
+use function array_values;
 use function array_combine;
 use function array_keys;
 use function array_map;
@@ -505,6 +507,102 @@ class MessageMapper extends QBMapper {
 			);
 		}
 		$result->closeCursor();
+
+		return $messages;
+	}
+
+	/**
+	 * The thread each of these Message-IDs currently belongs to.
+	 *
+	 * The forward half of ThreadClosure: a new message's References name
+	 * existing messages, and those messages' threads are the ones it can
+	 * disturb. An indexed equality lookup on message_id
+	 * (mail_messages_msgid_idx), scoped to the account.
+	 *
+	 * @param string[] $messageIds
+	 *
+	 * @return string[] distinct thread_root_ids
+	 */
+	public function findThreadRootsOfMessageIds(Account $account, array $messageIds): array {
+		if ($messageIds === []) {
+			return [];
+		}
+
+		$roots = [];
+		foreach (array_chunk($messageIds, 1000) as $chunk) {
+			$mailboxesQuery = $this->db->getQueryBuilder();
+			$query = $this->db->getQueryBuilder();
+
+			$mailboxesQuery->select('id')
+				->from('mail_mailboxes')
+				->where($mailboxesQuery->expr()->eq('account_id', $query->createNamedParameter($account->getId(), IQueryBuilder::PARAM_INT), IQueryBuilder::PARAM_INT));
+			$query->selectDistinct('thread_root_id')
+				->from($this->getTableName())
+				->where($query->expr()->in('mailbox_id', $query->createFunction($mailboxesQuery->getSQL()), IQueryBuilder::PARAM_INT_ARRAY))
+				->andWhere($query->expr()->in('message_id', $query->createNamedParameter($chunk, IQueryBuilder::PARAM_STR_ARRAY)))
+				->andWhere($query->expr()->isNotNull('thread_root_id'));
+
+			$result = $query->executeQuery();
+			while (($row = $result->fetch())) {
+				$roots[] = $row['thread_root_id'];
+			}
+			$result->closeCursor();
+		}
+
+		return array_values(array_unique($roots));
+	}
+
+	/**
+	 * Threading data restricted to a set of threads.
+	 *
+	 * Same shape and the same filter as findThreadingData() -- only messages
+	 * that participate in a reply chain, since a message with no references
+	 * is always rooted at itself and never needs re-threading -- but bounded
+	 * to the threads a batch can reach instead of the whole account. That is
+	 * the difference between 169,970 rows and a handful.
+	 *
+	 * @param string[] $threadRootIds
+	 *
+	 * @return DatabaseMessage[]
+	 */
+	public function findThreadingDataForRoots(Account $account, array $threadRootIds): array {
+		if ($threadRootIds === []) {
+			return [];
+		}
+
+		$messages = [];
+		foreach (array_chunk($threadRootIds, 1000) as $chunk) {
+			$mailboxesQuery = $this->db->getQueryBuilder();
+			$messagesQuery = $this->db->getQueryBuilder();
+
+			$mailboxesQuery->select('id')
+				->from('mail_mailboxes')
+				->where($mailboxesQuery->expr()->eq('account_id', $messagesQuery->createNamedParameter($account->getId(), IQueryBuilder::PARAM_INT), IQueryBuilder::PARAM_INT));
+			$messagesQuery->select('id', 'subject', 'message_id', 'in_reply_to', 'references', 'thread_root_id')
+				->from($this->getTableName())
+				->where($messagesQuery->expr()->in('mailbox_id', $messagesQuery->createFunction($mailboxesQuery->getSQL()), IQueryBuilder::PARAM_INT_ARRAY))
+				->andWhere($messagesQuery->expr()->in('thread_root_id', $messagesQuery->createNamedParameter($chunk, IQueryBuilder::PARAM_STR_ARRAY)))
+				->andWhere(
+					$messagesQuery->expr()->isNotNull('message_id'),
+					$messagesQuery->expr()->orX(
+						$messagesQuery->expr()->isNotNull('in_reply_to'),
+						$messagesQuery->expr()->neq('references', $messagesQuery->createNamedParameter('[]'))
+					),
+				);
+
+			$result = $messagesQuery->executeQuery();
+			while (($row = $result->fetch())) {
+				$messages[] = DatabaseMessage::fromRowData(
+					(int)$row['id'],
+					$row['subject'],
+					$row['message_id'],
+					$row['references'],
+					$row['in_reply_to'],
+					$row['thread_root_id']
+				);
+			}
+			$result->closeCursor();
+		}
 
 		return $messages;
 	}

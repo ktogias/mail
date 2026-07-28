@@ -37,6 +37,7 @@ use OCA\Mail\HordeTranslationHandler;
 use OCA\Mail\Http\Middleware\ErrorMiddleware;
 use OCA\Mail\Http\Middleware\ProvisioningMiddleware;
 use OCA\Mail\Listener\AccountSynchronizedThreadUpdaterListener;
+use OCA\Mail\Listener\IncrementalThreadUpdaterListener;
 use OCA\Mail\Listener\AddressCollectionListener;
 use OCA\Mail\Listener\DeleteDraftListener;
 use OCA\Mail\Listener\FollowUpClassifierListener;
@@ -141,6 +142,9 @@ final class Application extends App implements IBootstrap {
 		$context->registerEventListener(MessageDeletedEvent::class, MessageCacheUpdaterListener::class);
 		$context->registerEventListener(MessageSentEvent::class, AddressCollectionListener::class);
 		$context->registerEventListener(MessageSentEvent::class, InteractionListener::class);
+		// Before the notifier and the classifiers: those read the message's
+		// thread, and this is what puts it in one.
+		$context->registerEventListener(NewMessagesSynchronized::class, IncrementalThreadUpdaterListener::class);
 		$context->registerEventListener(NewMessagesSynchronized::class, MessageKnownSinceListener::class);
 		$context->registerEventListener(NewMessagesSynchronized::class, NewMessagesNotifier::class);
 		$context->registerEventListener(NewMessagesSynchronized::class, NewMessagesSummarizeListener::class);

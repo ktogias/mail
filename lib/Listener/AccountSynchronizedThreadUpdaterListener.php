@@ -9,14 +9,17 @@ declare(strict_types=1);
 
 namespace OCA\Mail\Listener;
 
+use OCA\Mail\AppInfo\Application;
 use OCA\Mail\Contracts\IUserPreferences;
 use OCA\Mail\Db\MessageMapper;
 use OCA\Mail\Events\SynchronizationEvent;
 use OCA\Mail\IMAP\Threading\DatabaseMessage;
 use OCA\Mail\IMAP\Threading\ThreadBuilder;
 use OCA\Mail\IMAP\Threading\ThreadIdAssigner;
+use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\EventDispatcher\Event;
 use OCP\EventDispatcher\IEventListener;
+use OCP\IConfig;
 use function array_chunk;
 use function gc_collect_cycles;
 use function iterator_to_array;
@@ -26,11 +29,15 @@ use function iterator_to_array;
  */
 class AccountSynchronizedThreadUpdaterListener implements IEventListener {
 	private const WRITE_IDS_CHUNK_SIZE = 500;
+	private const LAST_FULL_REBUILD_PREFIX = 'threads-rebuilt-at-';
+	private const FULL_REBUILD_INTERVAL_SECONDS = 24 * 60 * 60;
 
 	public function __construct(
 		private IUserPreferences $preferences,
 		private MessageMapper $mapper,
 		private ThreadBuilder $builder,
+		private IConfig $config,
+		private ITimeFactory $timeFactory,
 	) {
 	}
 
@@ -54,6 +61,29 @@ class AccountSynchronizedThreadUpdaterListener implements IEventListener {
 		}
 
 		$accountId = $event->getAccount()->getId();
+
+		// This is now the RECONCILIATION pass, not the hot path.
+		// IncrementalThreadUpdaterListener threads each batch of new messages
+		// against just the threads it can reach, which is exact for everything
+		// except ThreadBuilder's step 5 -- subject-only merges between threads
+		// that reference nothing of each other, which no closure can reach.
+		//
+		// Running the full rebuild after every sync to catch those cost 274MB
+		// and ~6s per sync of this account (measured 2026-07-28, 169,970
+		// messages), inside whichever request happened to trigger it. Once a
+		// day is enough for a merge heuristic that most clients omit entirely
+		// -- see the note in ThreadBuilder::groupBySubject().
+		$now = $this->timeFactory->getTime();
+		$lastFullRebuild = (int)$this->config->getAppValue(
+			Application::APP_ID,
+			self::LAST_FULL_REBUILD_PREFIX . $accountId,
+			'0',
+		);
+		if ($now - $lastFullRebuild < self::FULL_REBUILD_INTERVAL_SECONDS) {
+			$logger->debug("Skipping full thread rebuild for account $accountId, reconciled recently");
+			return;
+		}
+
 		$logger->debug("Building threads for account $accountId");
 		$messages = $this->mapper->findThreadingData($event->getAccount());
 		$nMessages = count($messages);
@@ -71,6 +101,14 @@ class AccountSynchronizedThreadUpdaterListener implements IEventListener {
 
 			$logger->debug("Chunk of $chunkSize messages updated");
 		}
+
+		// Recorded only on success: a rebuild that threw must not push the
+		// next attempt a day out.
+		$this->config->setAppValue(
+			Application::APP_ID,
+			self::LAST_FULL_REBUILD_PREFIX . $accountId,
+			(string)$now,
+		);
 
 		// Free memory
 		unset($flattened, $threads, $messages);
