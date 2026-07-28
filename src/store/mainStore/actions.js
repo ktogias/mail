@@ -874,6 +874,25 @@ function stripMalformedUndefinedToken(query) {
 	return cleaned.join(' ')
 }
 
+/**
+ * Whether this client already holds the WHOLE conversation.
+ *
+ * "The thread" is not a cached object: it is the member-id array on the
+ * head envelope (only ever populated by a fetchThread() success) plus the
+ * referenced store.envelopes entries. Both halves have to be there --
+ * getEnvelopesByThreadRootId() happily returns a single head for a thread
+ * that was never opened, which is exactly the case a thread-wide mutation
+ * must not mistake for "this conversation has one message".
+ *
+ * @param {object} store the pinia store instance
+ * @param {string|number} id database id of the thread head
+ * @return {boolean} true when the id list and every member are present
+ */
+function threadIsFullyKnown(store, id) {
+	const memberIds = store.envelopes[id]?.thread
+	return !!memberIds && memberIds.every((memberId) => store.envelopes[memberId] !== undefined)
+}
+
 function knownLocalThreadMembers(store, envelope) {
 	if (!envelope.threadRootId) {
 		return [envelope]
@@ -4622,13 +4641,64 @@ export default function mainStoreActions() {
 				}
 			})
 		},
+		/**
+		 * Importance from a LIST row, which in the threaded view stands for
+		 * the whole conversation.
+		 *
+		 * A row shows one thing, so an action taken on it has to mean what the
+		 * row means -- otherwise the user acts on something they cannot see.
+		 * Unmarking a thread used to clear the flag on its newest message
+		 * alone; section membership reads the thread-wide aggregate, so the
+		 * row stayed in Important wearing the outline badge and the only way
+		 * out was to open the thread and unmark each older message by hand.
+		 * Worse, clicking the row again did nothing: setEnvelopeImportant()'s
+		 * no-op guard saw the newest message already matching.
+		 *
+		 * This is the rule the rest of the app already follows -- read/unread
+		 * goes through setEnvelopesSeen() and hasUnseenInThread, delete goes
+		 * through deleteThread(), and the Priority sections classify by
+		 * thread-wide aggregates. Importance was the one that did not.
+		 *
+		 * In the flat view a row IS a message, so nothing is expanded. The
+		 * per-message action inside an open thread (toggleEnvelopeImportant)
+		 * is deliberately left alone: there the user is pointing at one
+		 * message, not at the conversation.
+		 *
+		 * Each member's own setEnvelopeImportant() call keeps the cross-folder
+		 * copy handling and the no-op guard, and their flag writes coalesce
+		 * into one batch request (see pendingFlagGroups in MessageService).
+		 *
+		 * @param {object} options
+		 * @param {object} options.envelope the row that was acted on
+		 * @param {boolean} options.addTag true to mark important, false to clear
+		 */
 		async markEnvelopeImportantOrUnimportant({
 			envelope,
 			addTag,
 		}) {
 			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
-				await this.setEnvelopeImportant(envelope, addTag)
+				const threaded = this.getPreference('layout-message-view', 'threaded') === 'threaded'
+				if (!threaded) {
+					await this.setEnvelopeImportant(envelope, addTag)
+					return
+				}
+				// A Priority row whose thread was never opened knows only its
+				// own head, so expanding without this would silently act on
+				// one message again. NOT the speculative path: that one is
+				// capped and externally abortable, and may return having
+				// fetched nothing at all -- fine for a prefetch, not for a
+				// mutation. On failure act on what is known rather than
+				// dropping the click; the flag writes themselves are durable.
+				if (envelope.threadRootId && !threadIsFullyKnown(this, envelope.databaseId)) {
+					try {
+						await this.fetchThread(envelope.databaseId)
+					} catch (error) {
+						logger.warn('could not load the full thread before changing importance', { error })
+					}
+				}
+				const targets = knownLocalThreadMembers(this, envelope)
+				await Promise.all(targets.map((member) => this.setEnvelopeImportant(member, addTag)))
 			})
 		},
 		async fetchThread(id, { speculative = false } = {}) {
@@ -4643,11 +4713,8 @@ export default function mainStoreActions() {
 			// just that id array plus the referenced this.envelopes
 			// entries. A non-speculative call always falls through to a
 			// real fetch below, unconditionally.
-			if (speculative) {
-				const memberIds = this.envelopes[id]?.thread
-				if (memberIds && memberIds.every((memberId) => this.envelopes[memberId] !== undefined)) {
-					return memberIds.map((memberId) => this.envelopes[memberId])
-				}
+			if (speculative && threadIsFullyKnown(this, id)) {
+				return this.envelopes[id].thread.map((memberId) => this.envelopes[memberId])
 			}
 
 			if (pendingThreadFetches.has(id)) {

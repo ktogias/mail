@@ -1,3 +1,18 @@
+## 5.11.0-dev.0.ktogias.52 (2026-07-28, resource-constrained deployment fork)
+
+### Priority Inbox
+
+* marking a thread **important / not important from a list row now applies to the whole conversation**. A row in the threaded view stands for the thread, and section membership is decided by the thread-wide aggregate — but the action only ever wrote the flag on the newest message, so the row stayed in Important wearing the outlined badge and the only way out was to open the thread and unmark each older message by hand
+* clicking the row a second time did nothing: the per-message no-op guard saw that newest message already matching, so the state looked stuck rather than merely partial
+* this is the rule the rest of the app already followed — read/unread goes through the thread and its `hasUnseenInThread` aggregate, delete goes through `deleteThread()`. Importance was the one that did not
+* a Priority row whose thread has never been opened knows only its own head, so the conversation is loaded first; if that load fails the click still applies to what is known rather than being dropped
+* the **flat view is unchanged**: there a row really is a single message, and the per-message action inside an open thread is untouched
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.51 (2026-07-28, resource-constrained deployment fork)
 
 ### Message Bodies

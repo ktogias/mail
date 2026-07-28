@@ -6138,6 +6138,107 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	describe('markEnvelopeImportantOrUnimportant: a list row means the whole conversation', () => {
+		// Reported live on 2026-07-28: selecting a thread in the list and
+		// marking it unimportant only cleared the flag on its NEWEST message.
+		// Section membership reads the thread-wide aggregate, so the row
+		// stayed in Important wearing the outline badge, and clicking it
+		// again did nothing -- setEnvelopeImportant()'s no-op guard saw that
+		// newest message already matching. The only way out was to open the
+		// thread and unmark each older message by hand.
+		const importantTag = { id: 909, imapLabel: '$label1', displayName: 'Important', color: '#FF7A66' }
+
+		function seedThread() {
+			store.tags[importantTag.id] = importantTag
+			// dateInt ordering matters: getEnvelopesByThreadRootId() sorts by
+			// it, and the row the user clicks is the newest member.
+			const members = [
+				{ databaseId: 40, accountId: 13, threadRootId: 100, dateInt: 1, flags: { important: false }, tags: [] },
+				{ databaseId: 41, accountId: 13, threadRootId: 100, dateInt: 2, flags: { important: true }, tags: [importantTag.id] },
+				{ databaseId: 42, accountId: 13, threadRootId: 100, dateInt: 3, flags: { important: true }, tags: [importantTag.id] },
+			]
+			members.forEach((member) => {
+				store.envelopes[member.databaseId] = member
+			})
+			// Populated by a fetchThread() success in real life -- present
+			// here so threadIsFullyKnown() is satisfied without a request.
+			store.envelopes[42].thread = [40, 41, 42]
+			return store.envelopes[42]
+		}
+
+		beforeEach(() => {
+			store.preferences['layout-message-view'] = 'threaded'
+			MessageService.setEnvelopeFlags.mockResolvedValue({ importantTag })
+		})
+
+		it('clears flag_important on every important message of the thread, not just the newest', async () => {
+			const head = seedThread()
+
+			await store.markEnvelopeImportantOrUnimportant({ envelope: head, addTag: false })
+
+			expect(store.envelopes[42].flags.important).toBe(false)
+			expect(store.envelopes[41].flags.important).toBe(false)
+			expect(MessageService.setEnvelopeFlags).toHaveBeenCalledWith(42, { $label1: false })
+			expect(MessageService.setEnvelopeFlags).toHaveBeenCalledWith(41, { $label1: false })
+			// 40 already matched, so its per-message no-op guard still holds:
+			// thread-wide scope must not turn into thread-wide busywork.
+			expect(MessageService.setEnvelopeFlags).not.toHaveBeenCalledWith(40, expect.anything())
+			expect(store.envelopes[41].tags).not.toContain(importantTag.id)
+		})
+
+		it('marks every message of the thread important, so the aggregate cannot disagree with the row', async () => {
+			const head = seedThread()
+			store.envelopes[41].flags.important = false
+			store.envelopes[42].flags.important = false
+
+			await store.markEnvelopeImportantOrUnimportant({ envelope: head, addTag: true })
+
+			expect(store.envelopes[40].flags.important).toBe(true)
+			expect(store.envelopes[41].flags.important).toBe(true)
+			expect(store.envelopes[42].flags.important).toBe(true)
+		})
+
+		it('loads the thread first when only its head is known', async () => {
+			store.tags[importantTag.id] = importantTag
+			const head = { databaseId: 42, accountId: 13, threadRootId: 100, dateInt: 3, flags: { important: true }, tags: [importantTag.id] }
+			store.envelopes[42] = head
+			// A Priority row whose thread was never opened: no member-id list,
+			// so getEnvelopesByThreadRootId() would see a single message.
+			const older = { databaseId: 41, accountId: 13, threadRootId: 100, dateInt: 2, flags: { important: true }, tags: [importantTag.id] }
+			MessageService.fetchThread.mockImplementation(async () => {
+				store.envelopes[41] = older
+				return [older, head]
+			})
+
+			await store.markEnvelopeImportantOrUnimportant({ envelope: head, addTag: false })
+
+			expect(MessageService.fetchThread).toHaveBeenCalled()
+			expect(store.envelopes[41].flags.important).toBe(false)
+		})
+
+		it('still applies to what is known when the thread load fails', async () => {
+			const head = seedThread()
+			delete store.envelopes[42].thread
+			MessageService.fetchThread.mockRejectedValue(new Error('offline'))
+
+			await store.markEnvelopeImportantOrUnimportant({ envelope: head, addTag: false })
+
+			expect(store.envelopes[42].flags.important).toBe(false)
+			expect(store.envelopes[41].flags.important).toBe(false)
+		})
+
+		it('stays per-message in the flat view, where a row IS a message', async () => {
+			store.preferences['layout-message-view'] = 'singleton'
+			const head = seedThread()
+
+			await store.markEnvelopeImportantOrUnimportant({ envelope: head, addTag: false })
+
+			expect(store.envelopes[42].flags.important).toBe(false)
+			expect(store.envelopes[41].flags.important).toBe(true)
+			expect(MessageService.fetchThread).not.toHaveBeenCalled()
+		})
+	})
+
 	describe('fetchThread: concurrent calls for the same id are deduped', () => {
 		// Envelope.vue's hover prefetch and Thread.vue's own open-thread
 		// call independently fetch the same thread id whenever a hover
