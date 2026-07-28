@@ -538,7 +538,10 @@ describe('Thread', () => {
 	describe('revising the expanded message once the thread arrives', () => {
 		function mountLateThread() {
 			store.getEnvelope = vi.fn().mockReturnValue({
-				databaseId: 6003, accountId: 900, threadRootId: 'late', mailboxId: 90,
+				databaseId: 6003,
+				accountId: 900,
+				threadRootId: 'late',
+				mailboxId: 90,
 			})
 			store.getEnvelopesByThreadRootId = vi.fn().mockReturnValue([])
 			store.getMailbox = vi.fn().mockReturnValue({ databaseId: 90, specialRole: 'inbox' })

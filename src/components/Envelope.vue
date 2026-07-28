@@ -1200,20 +1200,12 @@ export default {
 							break
 						case 'markAsImportant':
 							if (!this.isImportant) {
-								if (this.layoutMessageViewThreaded) {
-									this.onToggleImportantThread()
-								} else {
-									this.onToggleImportant()
-								}
+								this.onToggleImportant()
 							}
 							break
 						case 'markAsFavorite':
 							if (!this.data.flags.flagged) {
-								if (this.layoutMessageViewThreaded) {
-									this.onToggleFlaggedThread()
-								} else {
-									this.onToggleFlagged()
-								}
+								this.onToggleFlagged()
 							}
 							break
 						case 'markAsRead':
@@ -1422,29 +1414,26 @@ export default {
 			this.$emit('select-multiple')
 		},
 
+		// Both icons act through the store's ROW-level actions, which know that
+		// a row in the threaded view stands for the conversation: importance
+		// covers every message, a star covers one but clearing it covers all
+		// (see markEnvelopeFavoriteOrUnfavorite). Calling toggleEnvelope*()
+		// here wrote the flag on the head alone, so the badge went hollow
+		// while the row stayed in its section -- reported live on 2026-07-28.
+		//
+		// The direction comes from the head's own flags because that is what
+		// these icons display; membership is the aggregate's business.
 		onToggleImportant() {
-			this.mainStore.toggleEnvelopeImportant(this.data)
-		},
-
-		onToggleImportantThread() {
-			const threadEnvelopes = this.layoutMessageViewThreaded
-				? this.mainStore.getEnvelopesByThreadRootId(this.data.accountId, this.data.threadRootId)
-				: [this.data]
-			threadEnvelopes.forEach((envelope) => {
-				this.mainStore.toggleEnvelopeImportant(envelope)
+			this.mainStore.markEnvelopeImportantOrUnimportant({
+				envelope: this.data,
+				addTag: !this.isImportant,
 			})
 		},
 
 		onToggleFlagged() {
-			this.mainStore.toggleEnvelopeFlagged(this.data)
-		},
-
-		onToggleFlaggedThread() {
-			const threadEnvelopes = this.layoutMessageViewThreaded
-				? this.mainStore.getEnvelopesByThreadRootId(this.data.accountId, this.data.threadRootId)
-				: [this.data]
-			threadEnvelopes.forEach((envelope) => {
-				this.mainStore.toggleEnvelopeFlagged(envelope)
+			this.mainStore.markEnvelopeFavoriteOrUnfavorite({
+				envelope: this.data,
+				favFlag: !this.data.flags.flagged,
 			})
 		},
 

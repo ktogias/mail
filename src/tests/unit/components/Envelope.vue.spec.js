@@ -1498,4 +1498,64 @@ describe('Envelope', () => {
 			expect(mountRow({ searchQuery: 'not:starred is:pi-other' }).vm.threadCarriesStarredOnly).toBe(false)
 		})
 	})
+	// Reported live on 2026-07-28: the badge went hollow while the row stayed
+	// in its section. The row's icons used to call the per-message
+	// toggleEnvelope*() actions, which write the head's flag only, while
+	// section membership reads the thread-wide aggregate. Routing them
+	// through the store's row-level actions is the whole fix, so it is the
+	// thing asserted here.
+	describe('the row icons act through the row-level store actions', () => {
+		function mountIconRow({ flagged = false, important = false } = {}) {
+			return shallowMount(Envelope, {
+				mocks: { $route },
+				propsData: {
+					mailbox: { specialRole: '', databaseId: '3', myAcls: undefined },
+					data: {
+						accountId: 123,
+						databaseId: 999,
+						from: [{ email: 'info@test.com' }],
+						flags: { seen: false, flagged, important, $junk: false, answered: false, hasAttachments: false, draft: false },
+					},
+				},
+				store,
+				localVue,
+			})
+		}
+
+		it('stars through markEnvelopeFavoriteOrUnfavorite rather than the per-message toggle', () => {
+			const favorite = vi.spyOn(store, 'markEnvelopeFavoriteOrUnfavorite').mockResolvedValue()
+			const perMessage = vi.spyOn(store, 'toggleEnvelopeFlagged').mockResolvedValue()
+
+			mountIconRow().vm.onToggleFlagged()
+
+			expect(favorite).toHaveBeenCalledWith({ envelope: expect.objectContaining({ databaseId: 999 }), favFlag: true })
+			expect(perMessage).not.toHaveBeenCalled()
+		})
+
+		it('sends the direction the icon is showing, so a lit star clears', () => {
+			const favorite = vi.spyOn(store, 'markEnvelopeFavoriteOrUnfavorite').mockResolvedValue()
+
+			mountIconRow({ flagged: true }).vm.onToggleFlagged()
+
+			expect(favorite).toHaveBeenCalledWith({ envelope: expect.anything(), favFlag: false })
+		})
+
+		it('marks importance through markEnvelopeImportantOrUnimportant', () => {
+			const importance = vi.spyOn(store, 'markEnvelopeImportantOrUnimportant').mockResolvedValue()
+			const perMessage = vi.spyOn(store, 'toggleEnvelopeImportant').mockResolvedValue()
+
+			mountIconRow().vm.onToggleImportant()
+
+			expect(importance).toHaveBeenCalledWith({ envelope: expect.anything(), addTag: true })
+			expect(perMessage).not.toHaveBeenCalled()
+		})
+
+		it('clears importance when the badge is already filled', () => {
+			const importance = vi.spyOn(store, 'markEnvelopeImportantOrUnimportant').mockResolvedValue()
+
+			mountIconRow({ important: true }).vm.onToggleImportant()
+
+			expect(importance).toHaveBeenCalledWith({ envelope: expect.anything(), addTag: false })
+		})
+	})
 })

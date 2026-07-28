@@ -6239,6 +6239,95 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	describe('markEnvelopeFavoriteOrUnfavorite: the row star is an OR over the thread', () => {
+		// Gmail models the same split this asymmetry follows: GmailThread
+		// carries markImportant()/markUnimportant() but has NO star method --
+		// only hasStarredMessages(), an OR over its messages, which is exactly
+		// what hasFlaggedInThread is here. Lighting an OR takes one member;
+		// clearing it takes all of them, or the row stays lit and the click
+		// looks like it did nothing.
+		function seedThread() {
+			const members = [
+				{ databaseId: 40, accountId: 13, mailboxId: 11, uid: 40, threadRootId: 100, dateInt: 1, flags: { flagged: false }, tags: [] },
+				{ databaseId: 41, accountId: 13, mailboxId: 11, uid: 41, threadRootId: 100, dateInt: 2, flags: { flagged: true }, tags: [] },
+				{ databaseId: 42, accountId: 13, mailboxId: 11, uid: 42, threadRootId: 100, dateInt: 3, flags: { flagged: true }, tags: [] },
+			]
+			members.forEach((member) => {
+				store.envelopes[member.databaseId] = member
+			})
+			store.envelopes[42].thread = [40, 41, 42]
+			return store.envelopes[42]
+		}
+
+		beforeEach(() => {
+			store.preferences['layout-message-view'] = 'threaded'
+			MessageService.setEnvelopeFlags.mockResolvedValue({})
+		})
+
+		it('stars only the head, so one bookmark does not become twenty', async () => {
+			const head = seedThread()
+			store.envelopes[41].flags.flagged = false
+			store.envelopes[42].flags.flagged = false
+
+			await store.markEnvelopeFavoriteOrUnfavorite({ envelope: head, favFlag: true })
+
+			expect(store.envelopes[42].flags.flagged).toBe(true)
+			expect(store.envelopes[41].flags.flagged).toBe(false)
+			expect(store.envelopes[40].flags.flagged).toBe(false)
+			expect(MessageService.setEnvelopeFlags).toHaveBeenCalledTimes(1)
+		})
+
+		it('clears every starred message of the thread, so the row can actually leave Favorites', async () => {
+			const head = seedThread()
+
+			await store.markEnvelopeFavoriteOrUnfavorite({ envelope: head, favFlag: false })
+
+			expect(store.envelopes[42].flags.flagged).toBe(false)
+			expect(store.envelopes[41].flags.flagged).toBe(false)
+			expect(MessageService.setEnvelopeFlags).toHaveBeenCalledWith(42, { flagged: false })
+			expect(MessageService.setEnvelopeFlags).toHaveBeenCalledWith(41, { flagged: false })
+			// 40 was never starred: a thread-wide clear must not become a
+			// write per member.
+			expect(MessageService.setEnvelopeFlags).not.toHaveBeenCalledWith(40, expect.anything())
+		})
+
+		it('loads the thread before clearing when only the head is known', async () => {
+			const head = { databaseId: 42, accountId: 13, mailboxId: 11, uid: 42, threadRootId: 100, dateInt: 3, flags: { flagged: true }, tags: [] }
+			store.envelopes[42] = head
+			const older = { databaseId: 41, accountId: 13, mailboxId: 11, uid: 41, threadRootId: 100, dateInt: 2, flags: { flagged: true }, tags: [] }
+			MessageService.fetchThread.mockImplementation(async () => {
+				store.envelopes[41] = older
+				return [older, head]
+			})
+
+			await store.markEnvelopeFavoriteOrUnfavorite({ envelope: head, favFlag: false })
+
+			expect(MessageService.fetchThread).toHaveBeenCalled()
+			expect(store.envelopes[41].flags.flagged).toBe(false)
+		})
+
+		it('does not load the thread just to star, since one member is enough', async () => {
+			const head = { databaseId: 42, accountId: 13, mailboxId: 11, uid: 42, threadRootId: 100, dateInt: 3, flags: { flagged: false }, tags: [] }
+			store.envelopes[42] = head
+
+			await store.markEnvelopeFavoriteOrUnfavorite({ envelope: head, favFlag: true })
+
+			expect(MessageService.fetchThread).not.toHaveBeenCalled()
+			expect(store.envelopes[42].flags.flagged).toBe(true)
+		})
+
+		it('stays per-message in the flat view, where a row IS a message', async () => {
+			store.preferences['layout-message-view'] = 'singleton'
+			const head = seedThread()
+
+			await store.markEnvelopeFavoriteOrUnfavorite({ envelope: head, favFlag: false })
+
+			expect(store.envelopes[42].flags.flagged).toBe(false)
+			expect(store.envelopes[41].flags.flagged).toBe(true)
+			expect(MessageService.fetchThread).not.toHaveBeenCalled()
+		})
+	})
+
 	describe('fetchThread: concurrent calls for the same id are deduped', () => {
 		// Envelope.vue's hover prefetch and Thread.vue's own open-thread
 		// call independently fetch the same thread id whenever a hover

@@ -908,7 +908,12 @@ export default {
 				}
 				case 'flag':
 					logger.debug('flagging envelope via shortkey', { env })
-					this.mainStore.toggleEnvelopeFlagged(env).catch((error) => logger.error('could not flag envelope via shortkey', {
+					// The shortcut acts on the focused ROW, so it means what the
+					// row means -- same action the row's own star icon uses.
+					this.mainStore.markEnvelopeFavoriteOrUnfavorite({
+						envelope: env,
+						favFlag: !env.flags.flagged,
+					}).catch((error) => logger.error('could not flag envelope via shortkey', {
 						env,
 						error,
 					}))

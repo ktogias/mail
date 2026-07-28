@@ -4572,74 +4572,144 @@ export default function mainStoreActions() {
 				}
 			})
 		},
+		/**
+		 * Every message of a conversation, fetching it first if this client
+		 * only knows the head.
+		 *
+		 * A Priority row whose thread was never opened knows exactly one
+		 * envelope, so a thread-wide mutation that trusted
+		 * getEnvelopesByThreadRootId() alone would quietly act on a single
+		 * message -- which is the bug it was written to fix.
+		 *
+		 * Deliberately NOT the speculative fetch path: that one is capped
+		 * (MAX_CONCURRENT_SPECULATIVE_THREAD_FETCHES) and externally
+		 * abortable, and may return having fetched nothing at all. Fine for a
+		 * prefetch, useless as the basis of a write. On failure the caller
+		 * acts on what is known rather than dropping the click; the flag
+		 * writes themselves are durable.
+		 *
+		 * @param {object} envelope the row that was acted on
+		 * @return {Promise<object[]>} the thread's members, or just this envelope
+		 */
+		async knownOrFetchedThreadMembers(envelope) {
+			if (envelope.threadRootId && !threadIsFullyKnown(this, envelope.databaseId)) {
+				try {
+					await this.fetchThread(envelope.databaseId)
+				} catch (error) {
+					logger.warn('could not load the full thread before a thread-wide flag change', { error })
+				}
+			}
+			return knownLocalThreadMembers(this, envelope)
+		},
+		/**
+		 * Starring from a LIST row, where the star is an OR over the thread.
+		 *
+		 * Unlike importance, a star is a bookmark on a specific message, not a
+		 * judgement about the conversation -- Gmail models exactly this split:
+		 * GmailThread carries markImportant()/markUnimportant() but has no
+		 * star method at all, only hasStarredMessages(), an OR over its
+		 * GmailMessages. Our own hasFlaggedInThread is that same aggregate.
+		 *
+		 * Which makes the row control asymmetric, and necessarily so:
+		 *
+		 *   turning the aggregate ON needs one member -- spraying the star
+		 *   over twenty messages would destroy its value as a pointer to a
+		 *   particular one;
+		 *
+		 *   turning it OFF needs all of them, or the row stays lit and the
+		 *   click appears to have done nothing. That was the live symptom:
+		 *   unstar the newest message and the row sits in Favorites still.
+		 *
+		 * The star inside an open thread (toggleEnvelopeFlagged) stays
+		 * per-message, which is where deliberate bookmarking lives and is
+		 * fully preserved.
+		 *
+		 * @param {object} options
+		 * @param {object} options.envelope the row that was acted on
+		 * @param {boolean} options.favFlag true to star, false to clear
+		 */
 		async markEnvelopeFavoriteOrUnfavorite({
 			envelope,
 			favFlag,
 		}) {
 			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
-				beginPrioritySectionMutation()
-				try {
-					// Change immediately and switch back on error
-					const oldState = envelope.flags.flagged
-					// Move Priority Inbox section membership (into/out of
-					// Favorites, and the not:starred side of the Other/Important
-					// compound sections) in the SAME instant as the star --
-					// exactly like the single-row toggleEnvelopeFlagged() already
-					// does. This bulk-selection path used to skip the reclassify
-					// entirely, so a starred message only left the Other section
-					// on the next routine sync, tens of seconds later (reported
-					// live). userInitiated applies the removal side immediately
-					// too -- see threadStillMatchesFlagPredicate().
-					const reclassify = () => {
-						const mailbox = this.mailboxes[envelope.mailboxId]
-						if (mailbox) {
-							this.reclassifyFlagBucketsMutation({ envelope, sourceMailbox: mailbox, userInitiated: true })
-						}
+				const threaded = this.getPreference('layout-message-view', 'threaded') === 'threaded'
+				if (!threaded || favFlag) {
+					await this.setEnvelopeFavorite(envelope, favFlag)
+					return
+				}
+				const targets = await this.knownOrFetchedThreadMembers(envelope)
+				await Promise.all(targets.map((member) => this.setEnvelopeFavorite(member, favFlag)))
+			})
+		},
+		async setEnvelopeFavorite(envelope, favFlag) {
+			// Same no-op guard setEnvelopeImportant() carries: a thread-wide
+			// clear must not turn into a write per already-unstarred member.
+			if (envelope.flags.flagged === favFlag) {
+				return
+			}
+			beginPrioritySectionMutation()
+			try {
+				// Change immediately and switch back on error
+				const oldState = envelope.flags.flagged
+				// Move Priority Inbox section membership (into/out of
+				// Favorites, and the not:starred side of the Other/Important
+				// compound sections) in the SAME instant as the star --
+				// exactly like the single-row toggleEnvelopeFlagged() already
+				// does. This bulk-selection path used to skip the reclassify
+				// entirely, so a starred message only left the Other section
+				// on the next routine sync, tens of seconds later (reported
+				// live). userInitiated applies the removal side immediately
+				// too -- see threadStillMatchesFlagPredicate().
+				const reclassify = () => {
+					const mailbox = this.mailboxes[envelope.mailboxId]
+					if (mailbox) {
+						this.reclassifyFlagBucketsMutation({ envelope, sourceMailbox: mailbox, userInitiated: true })
 					}
+				}
+				this.flagEnvelopeMutation({
+					envelope,
+					flag: 'flagged',
+					value: favFlag,
+				})
+				// Favorites membership and its counter read the THREAD-wide
+				// aggregate in threaded mode, not this flag -- the same
+				// line toggleEnvelopeFlagged() carries. Missing here, this
+				// path moved the row into Favorites while leaving both
+				// sections' counters describing the state before the click.
+				// Live on 2026-07-27 13:53Z: "Άλλο 2 unread of 41.078"
+				// above an empty list, with the database reporting 0 unread
+				// in that section and 2 in Favorites.
+				this.refreshThreadFlagAggregateMutation(envelope, 'flagged')
+				reclassify()
+
+				try {
+					await setEnvelopeFlags(envelope.databaseId, {
+						flagged: favFlag,
+					})
+					// Fast, correct confirmation for any already-loaded
+					// Favorites-style bucket, without blocking on it -- same
+					// backstop toggleEnvelopeFlagged() uses.
+					this.refreshFlagPredicateBucketsForEnvelope(envelope)
+				} catch (error) {
+					logger.error('could not favorite/unfavorite message ' + envelope.uid, { error })
+
+					// Revert change AND its optimistic membership move, through
+					// the same mutation, so the lists land back where they were.
 					this.flagEnvelopeMutation({
 						envelope,
 						flag: 'flagged',
-						value: favFlag,
+						value: oldState,
 					})
-					// Favorites membership and its counter read the THREAD-wide
-					// aggregate in threaded mode, not this flag -- the same
-					// line toggleEnvelopeFlagged() carries. Missing here, this
-					// path moved the row into Favorites while leaving both
-					// sections' counters describing the state before the click.
-					// Live on 2026-07-27 13:53Z: "Άλλο 2 unread of 41.078"
-					// above an empty list, with the database reporting 0 unread
-					// in that section and 2 in Favorites.
 					this.refreshThreadFlagAggregateMutation(envelope, 'flagged')
 					reclassify()
 
-					try {
-						await setEnvelopeFlags(envelope.databaseId, {
-							flagged: favFlag,
-						})
-						// Fast, correct confirmation for any already-loaded
-						// Favorites-style bucket, without blocking on it -- same
-						// backstop toggleEnvelopeFlagged() uses.
-						this.refreshFlagPredicateBucketsForEnvelope(envelope)
-					} catch (error) {
-						logger.error('could not favorite/unfavorite message ' + envelope.uid, { error })
-
-						// Revert change AND its optimistic membership move, through
-						// the same mutation, so the lists land back where they were.
-						this.flagEnvelopeMutation({
-							envelope,
-							flag: 'flagged',
-							value: oldState,
-						})
-						this.refreshThreadFlagAggregateMutation(envelope, 'flagged')
-						reclassify()
-
-						throw error
-					}
-				} finally {
-					endPrioritySectionMutation()
+					throw error
 				}
-			})
+			} finally {
+				endPrioritySectionMutation()
+			}
 		},
 		/**
 		 * Importance from a LIST row, which in the threaded view stands for
@@ -4683,21 +4753,7 @@ export default function mainStoreActions() {
 					await this.setEnvelopeImportant(envelope, addTag)
 					return
 				}
-				// A Priority row whose thread was never opened knows only its
-				// own head, so expanding without this would silently act on
-				// one message again. NOT the speculative path: that one is
-				// capped and externally abortable, and may return having
-				// fetched nothing at all -- fine for a prefetch, not for a
-				// mutation. On failure act on what is known rather than
-				// dropping the click; the flag writes themselves are durable.
-				if (envelope.threadRootId && !threadIsFullyKnown(this, envelope.databaseId)) {
-					try {
-						await this.fetchThread(envelope.databaseId)
-					} catch (error) {
-						logger.warn('could not load the full thread before changing importance', { error })
-					}
-				}
-				const targets = knownLocalThreadMembers(this, envelope)
+				const targets = await this.knownOrFetchedThreadMembers(envelope)
 				await Promise.all(targets.map((member) => this.setEnvelopeImportant(member, addTag)))
 			})
 		},

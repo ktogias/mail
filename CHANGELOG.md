@@ -1,3 +1,19 @@
+## 5.11.0-dev.0.ktogias.54 (2026-07-28, resource-constrained deployment fork)
+
+### Priority Inbox
+
+* **the star and the importance badge on a list row now act on the conversation**, through the same row-level store actions the bulk selection uses. The row's icons called the per-message toggles, which write the head's flag only — while section membership reads the thread-wide aggregate. The badge went hollow and the row stayed exactly where it was
+* `.52` fixed the bulk-selection path; this covers the entry points that were missed: the row's own star and importance icons, and the `flag` keyboard shortcut
+* **starring is deliberately asymmetric.** Lighting the row takes one message; clearing it takes every one of them. Gmail models the same split — `GmailThread` carries `markImportant()`/`markUnimportant()` but has no star method at all, only `hasStarredMessages()`, an OR over its messages, which is precisely what `hasFlaggedInThread` is here. A star is a bookmark on a particular message, so spreading it over twenty would destroy its value; but the row's control is that OR, so turning it off has to clear all of them or the click appears to do nothing
+* importance stays symmetric: it is a judgement about the conversation, and every message in it carries the same one
+* the star **inside an open thread stays per-message**, which is where deliberate bookmarking lives and is fully preserved
+* two hand-rolled thread fan-outs in `Envelope.vue` are gone. They only ran for quick actions, only in the "turn on" direction, and read `getEnvelopesByThreadRootId()` without loading the thread — so for any row that had never been opened they acted on the head anyway
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.53 (2026-07-28, resource-constrained deployment fork)
 
 ### Calendars and Files
