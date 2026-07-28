@@ -1,3 +1,27 @@
+## 5.11.0-dev.0.ktogias.62 (2026-07-29, resource-constrained deployment fork)
+
+### Threading
+
+* **new messages are threaded against their own threads, not the whole account.** The full rebuild ran after every sync — `Threading 169970 messages`, **274 MB, ~6 s**, inside whichever request triggered it, identically whether one message had arrived or a thousand, for threads whose median size is **one**
+* `IncrementalThreadUpdaterListener` listens to `NewMessagesSynchronized`, which already carries exactly the batch, so nothing had to be plumbed through `SynchronizationEvent` or its three dispatch sites. Two account-scoped indexed queries and **no schema change**
+* the full rebuild survives as a **once-a-day reconciliation**. It is the only thing that catches `ThreadBuilder`'s step 5 — subject-only merges between threads that reference nothing of each other, which no closure can reach. Its timestamp is written only on success, so a rebuild that throws does not push the next attempt a day out
+* messages with neither `in_reply_to` nor `references` are skipped: they are rooted at themselves, which is what `toDbMessage()` already wrote at insert and why `findThreadingData()` excludes them from the full rebuild too
+
+### Measured on the real mailbox
+
+* **171,003 messages.** A 500-message batch pulls a closure of **2,794 messages across 252 threads** — 61× less work — and **zero** of the 171,003 get a different thread id than a full rebuild gives them
+* the equivalence harness runs both paths and diffs every message. Breaking either half of the closure is caught on real mail: dropping the forward lookup diverges on **546** messages, dropping the batch's own ids on **520**
+
+### Also
+
+* the slot test that had been failing in the repository is fixed. It filled both ordinary lanes with two bare `acquire()` calls, from before the work-class partition; the second resolves to `MAINTENANCE`, which may only ever hold slot 0
+* `flattenThreads()` moved out of the listener into `ThreadIdAssigner` so the harness and production share one implementation
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.61 (2026-07-28, resource-constrained deployment fork)
 
 ### Background Jobs
