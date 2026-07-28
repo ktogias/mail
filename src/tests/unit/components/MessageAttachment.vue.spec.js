@@ -3,8 +3,17 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+import { showError } from '@nextcloud/dialogs'
 import { shallowMount } from '@vue/test-utils'
 import MessageAttachment from '../../../components/MessageAttachment.vue'
+import * as DAVService from '../../../service/DAVService.js'
+
+vi.mock('../../../service/DAVService.js')
+vi.mock('@nextcloud/dialogs', async (importOriginal) => ({
+	...(await importOriginal()),
+	showError: vi.fn(),
+	showSuccess: vi.fn(),
+}))
 
 describe('MessageAttachment', () => {
 	afterEach(() => {
@@ -74,5 +83,53 @@ describe('MessageAttachment', () => {
 
 		view.destroy()
 		expect(vi.getTimerCount()).toBe(0)
+	})
+
+	describe('loading the calendar list', () => {
+		function mountCalendarAttachment() {
+			return shallowMount(MessageAttachment, {
+				mocks: { t: (app, text) => text, $route: { params: {} } },
+				propsData: {
+					id: '1',
+					fileName: 'Attached Message Part.vcs',
+					size: 6144,
+					url: 'https://cloud.example.test/attachment/1',
+					mime: 'text/calendar',
+					isCalendarEvent: true,
+				},
+			})
+		}
+
+		// The button carries :disabled="loadingCalendars", so a rejection that
+		// never clears the flag leaves the entry spinning and unclickable for
+		// the life of the open message, saying nothing at all.
+		//
+		// Reported live on 2026-07-28 as "the calendar import is stuck". The
+		// trigger was ordinary: the click landed while the server was in
+		// maintenance mode during a deploy, and the PROPFIND on
+		// /dav/calendars/<uid>/ returned 503.
+		it('recovers when the calendars cannot be loaded', async () => {
+			DAVService.getUserCalendars.mockRejectedValue(new Error('Request failed with status code 503'))
+			const view = mountCalendarAttachment()
+
+			await view.vm.loadCalendars()
+
+			expect(view.vm.loadingCalendars).toBe(false)
+			expect(view.vm.showCalendarPopover).toBe(false)
+			expect(showError).toHaveBeenCalled()
+			view.destroy()
+		})
+
+		it('opens the list when it loads', async () => {
+			DAVService.getUserCalendars.mockResolvedValue([{ displayname: 'Personal', url: '/c/1' }])
+			const view = mountCalendarAttachment()
+
+			await view.vm.loadCalendars()
+
+			expect(view.vm.loadingCalendars).toBe(false)
+			expect(view.vm.showCalendarPopover).toBe(true)
+			expect(view.vm.calendars).toHaveLength(1)
+			view.destroy()
+		})
 	})
 })

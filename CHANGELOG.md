@@ -1,3 +1,16 @@
+## 5.11.0-dev.0.ktogias.49 (2026-07-28, resource-constrained deployment fork)
+
+### Calendar Import
+
+* recover when the calendar list cannot be loaded. `loadCalendars()` had no `catch` at all, so a rejected request left `loadingCalendars` true for good — and the button carries `:disabled="loadingCalendars"`, so the entry sat spinning and unclickable for the life of the open message, saying nothing
+* reported live as "the calendar import is stuck". The trigger was ordinary: the click landed while the server was in maintenance mode during a deploy and the `PROPFIND` on `/dav/calendars/<uid>/` returned 503, but any transient failure would have done the same
+* the neighbouring save-to-Files action already had this shape; this one now matches it
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.48 (2026-07-28, resource-constrained deployment fork)
 
 ### Backfill

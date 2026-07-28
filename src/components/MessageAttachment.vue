@@ -273,13 +273,28 @@ export default {
 			}, delay)
 		},
 
-		loadCalendars() {
+		async loadCalendars() {
+			// The neighbouring save-to-Files action already had this shape; this
+			// one had no catch at all, so a rejected request left
+			// loadingCalendars true for good -- and the button carries
+			// :disabled="loadingCalendars", so the entry sat spinning and
+			// unclickable for the life of the open message, saying nothing.
+			//
+			// Reported live on 2026-07-28 as "the calendar import is stuck".
+			// The trigger was ordinary: the click landed while the server was
+			// in maintenance mode during a deploy, and the PROPFIND on
+			// /dav/calendars/<uid>/ returned 503. Any transient failure would
+			// have done the same.
 			this.loadingCalendars = true
-			getUserCalendars().then((calendars) => {
-				this.calendars = calendars
+			try {
+				this.calendars = await getUserCalendars()
 				this.showCalendarPopover = true
+			} catch (error) {
+				Logger.error('could not load the user calendars', { error })
+				showError(t('mail', 'Could not load your calendars'))
+			} finally {
 				this.loadingCalendars = false
-			})
+			}
 		},
 
 		closeCalendarPopover() {
