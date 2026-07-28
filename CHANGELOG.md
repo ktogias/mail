@@ -1,3 +1,22 @@
+## 5.11.0-dev.0.ktogias.55 (2026-07-28, resource-constrained deployment fork)
+
+### Envelope List
+
+* **stop rendering a `<transition-group>` when nothing is being animated.** Naming the transition `'disabled'` was never enough: Vue's transition-group runs its move detection on *every* update whatever the name is, and caches the answer only when it is truthy — `if (this._hasMove) return this._hasMove`. No `-move` class is defined here (there is no move animation, by design), so the answer is always `false`, the cache never engages, and each list update paid a `cloneNode` + `appendChild` into the live DOM + `getComputedStyle` + `removeChild`. That `getComputedStyle` forces a **synchronous style flush**
+* the wrapper is a `<span>`, which is exactly what `transition-group` renders when given no tag, so the DOM shape is unchanged
+* `transition: all` on the enter/leave classes is now the three properties those classes actually change (`opacity`, `height`, `transform`). `all` made the browser watch every animatable property on a row — and a row has plenty that move on their own: flag colours, badges, borders
+
+### Measured
+
+* Firefox profile, 2026-07-28 13:46, running `.53`: **777 style flushes costing 14.1s** in a 43s capture, **64% of the tab's entire main-thread CPU** inside Vue's `getTransitionInfo`, with the main thread pegged at ~100% for the last 12 seconds straight
+* split by trigger: 12.0s via `whenTransitionEnds` under `requestAnimationFrame`, 2.0s via the `hasMove` probe in the `updated` hook
+* **this release does not fix the 12s.** The lists in that profile were 20 rows each, so animation was on and the transition-group is still rendered; what changes is the cost when animation is *off* (long lists, bulk removals) and how much the browser has to watch during a transition. Removing the enter/leave animation from the list entirely is the change that would address it, and is deliberately left for a separate decision
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.54 (2026-07-28, resource-constrained deployment fork)
 
 ### Priority Inbox

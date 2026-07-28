@@ -529,5 +529,35 @@ describe('EnvelopeList', () => {
 
 			expect(view.vm.listTransitionName).toBe('disabled')
 		})
+
+		// Naming the transition 'disabled' is not enough to make it cheap.
+		// Vue's transition-group runs its move detection on EVERY update
+		// whatever the name is, and caches the answer only when it is truthy
+		// -- and with no `-move` class defined here it never is. So each list
+		// update paid a cloneNode + appendChild + getComputedStyle +
+		// removeChild, and that getComputedStyle forces a synchronous style
+		// flush. Measured live on 2026-07-28: 777 flushes, 14.1s, 64% of the
+		// tab's main-thread CPU. The only way out is not to render a
+		// transition-group at all.
+		it('does not render a transition-group at all once animation is off', () => {
+			const view = mountEnvelopeList({ envelopes: manyEnvelopes(201) })
+
+			expect(view.vm.listWrapper).toBe('span')
+			expect(view.html()).not.toContain('transition-group')
+		})
+
+		it('renders a real transition-group while the list is still animated', () => {
+			const view = mountEnvelopeList({ envelopes: manyEnvelopes(200) })
+
+			expect(view.vm.listWrapper).toBe('transition-group')
+			expect(view.vm.listWrapperProps).toEqual({ name: 'list' })
+		})
+
+		it('keeps the transition name off a plain span, where it is a stray attribute', () => {
+			const view = mountEnvelopeList({ envelopes: manyEnvelopes(3), skipTransition: true })
+
+			expect(view.vm.listWrapper).toBe('span')
+			expect(view.vm.listWrapperProps).toEqual({})
+		})
 	})
 })
