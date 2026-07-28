@@ -243,7 +243,22 @@ class BackfillJobTest extends TestCase {
 		$this->serviceMock->getParameter('synchronizer')
 			->expects(self::once())
 			->method('sync')
-			->with(self::anything(), $client, $mailboxA, self::anything())
+			->with(
+				self::anything(),
+				$client,
+				$mailboxA,
+				self::anything(),
+				self::anything(),
+				self::anything(),
+				self::anything(),
+				// batchSync. Without it every tick ends by dispatching
+				// SynchronizationEvent, whose listener rebuilds the whole
+				// account's thread tree: measured live at 274MB and ~6s for
+				// 169,970 messages, in cron, every 15 minutes, for one batch
+				// of old mail nobody is waiting on. syncAccount() already
+				// passes this for its own per-mailbox calls.
+				true,
+			)
 			->willThrowException(new IncompleteSyncException('still going'));
 		$this->serviceMock->getParameter('config')
 			->expects(self::once())

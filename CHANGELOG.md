@@ -1,3 +1,21 @@
+## 5.11.0-dev.0.ktogias.61 (2026-07-28, resource-constrained deployment fork)
+
+### Background Jobs
+
+* **the backfill no longer rebuilds the account's entire thread tree every 15 minutes.** `BackfillJob` called `ImapToDbSynchronizer::sync()` without `batchSync`, so every tick ended by dispatching `SynchronizationEvent` — whose listener reloads *all* of the account's messages and rebuilds the JWZ thread tree from scratch
+* measured live with the app's own per-step instrumentation: the sync of the 27k-message INBOX peaks at **18 MB**; the threading that follows it is **`Threading 169970 messages … 274 MB peak, ~6s`**. That was the `Request used 273.7 MB of memory. Memory limit: 512M` in the log all along — the sync was never the cost
+* `syncAccount()` already passes exactly this flag for its per-mailbox calls and dispatches the event once at the end of a pass. This call was simply never given the same treatment
+* thread ids for backfilled messages are built by the next ordinary account sync, which is the same trade-off `syncAccount()` has always made
+
+### Corrections to earlier reasoning
+
+* two hypotheses about that memory were wrong and are recorded as such: UID chunking was proposed when it **already exists** (`chunk_uid_sequence`, 10 KB per IMAP command), and the chunker was then suspected when measurement showed it costs **2 chunks and 3 probes** for this mailbox (27,266 UIDs in 851 runs → 10,842 bytes)
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.60 (2026-07-28, resource-constrained deployment fork)
 
 ### Marking as Spam

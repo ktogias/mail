@@ -204,7 +204,19 @@ class BackfillJob extends TimedJob {
 		$advanceCursor = true;
 		$syncStartedAt = microtime(true);
 		try {
-			$this->synchronizer->sync($account, $client, $next, $this->logger);
+			// batchSync: this job has no user waiting on it, and without the
+			// flag every tick ends by dispatching SynchronizationEvent, whose
+			// listener rebuilds the account's ENTIRE thread tree from scratch.
+			// Measured live on 2026-07-28 against this account: "Threading
+			// 169970 messages" at 274MB peak and ~6s, in the cron process, on
+			// a box with 1.6GB of RAM -- every 15 minutes, for one batch of
+			// old messages nobody is looking at.
+			//
+			// syncAccount() already passes exactly this for its per-mailbox
+			// calls and dispatches once at the end of the pass; this call was
+			// simply never given the same treatment. Thread ids for backfilled
+			// messages are built by the next ordinary account sync.
+			$this->synchronizer->sync($account, $client, $next, $this->logger, batchSync: true);
 			$this->logger->debug("Backfill: mailbox {$next->getId()} finished its initial sync");
 		} catch (IncompleteSyncException $e) {
 			// Expected -- one batch done, more left for a future tick.
