@@ -9,13 +9,12 @@ declare(strict_types=1);
 
 namespace OCA\Mail\Listener;
 
-use Generator;
 use OCA\Mail\Contracts\IUserPreferences;
 use OCA\Mail\Db\MessageMapper;
 use OCA\Mail\Events\SynchronizationEvent;
-use OCA\Mail\IMAP\Threading\Container;
 use OCA\Mail\IMAP\Threading\DatabaseMessage;
 use OCA\Mail\IMAP\Threading\ThreadBuilder;
+use OCA\Mail\IMAP\Threading\ThreadIdAssigner;
 use OCP\EventDispatcher\Event;
 use OCP\EventDispatcher\IEventListener;
 use function array_chunk;
@@ -63,7 +62,7 @@ class AccountSynchronizedThreadUpdaterListener implements IEventListener {
 		$nThreads = count($threads);
 		$logger->debug("Account $accountId has $nThreads threads");
 		/** @var DatabaseMessage[] $flattened */
-		$flattened = iterator_to_array($this->flattenThreads($threads), false);
+		$flattened = iterator_to_array(ThreadIdAssigner::assign($threads), false);
 		$nFlattened = count($flattened);
 		$logger->debug("Account $accountId has $nFlattened messages with a new thread IDs");
 		$chunkSize = self::WRITE_IDS_CHUNK_SIZE;
@@ -76,34 +75,5 @@ class AccountSynchronizedThreadUpdaterListener implements IEventListener {
 		// Free memory
 		unset($flattened, $threads, $messages);
 		gc_collect_cycles();
-	}
-
-	/**
-	 * @param Container[] $threads
-	 *
-	 * @return Generator
-	 * @psalm-return Generator<int, DatabaseMessage>
-	 */
-	private function flattenThreads(array $threads,
-		?string $threadId = null): Generator {
-		foreach ($threads as $thread) {
-			if (($message = $thread->getMessage()) !== null) {
-				/** @var DatabaseMessage $message */
-				if ($threadId === null) {
-					// No parent -> let's use own ID
-					$message->setThreadRootId($message->getId());
-				} else {
-					$message->setThreadRootId($threadId);
-				}
-				if ($message->isDirty()) {
-					yield $message;
-				}
-			}
-
-			yield from $this->flattenThreads(
-				$thread->getChildren(),
-				$threadId ?? ($message === null ? $thread->getId() : $message->getId())
-			);
-		}
 	}
 }
