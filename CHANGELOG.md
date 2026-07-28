@@ -1,3 +1,15 @@
+## 5.11.0-dev.0.ktogias.47 (2026-07-28, resource-constrained deployment fork)
+
+### Inline Attachments
+
+* serve inline parts whose content id is purely numeric. PHP stores a numeric-string array key as an int, so `array_keys()` handed back `int 2` for a part named `"2"`, which under `strict_types` is a `TypeError` against the `string` parameter of `attachmentFromBundle()` — every inline-attachment request for such a message returned 500
+* found in the production log on 2026-07-28: four consecutive 500s for one message as the client retried. Content ids are usually `<foo@bar>` shapes, which is why it went unnoticed until a message arrived without them
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.46 (2026-07-28, resource-constrained deployment fork)
 
 ### Priority Sections

@@ -119,6 +119,42 @@ class InlineAttachmentCacheTest extends TestCase {
 		self::assertSame('second', $bundle['2.3']->getContent());
 	}
 
+	/**
+	 * Content ids are usually <foo@bar> shapes, which is why this went
+	 * unnoticed: a part numbered "2" is a numeric string, and PHP silently
+	 * stores such an array key as an int. array_keys() then hands back int 2,
+	 * which under strict_types is a TypeError against the string parameter of
+	 * attachmentFromBundle().
+	 *
+	 * Live on 2026-07-28: every inline-attachment request for one message
+	 * returned 500, four times in a row as the client retried.
+	 */
+	public function testServesPartsWhoseContentIdIsPurelyNumeric(): void {
+		$values = [
+			'message_123' => [
+				'inlineAttachments' => [
+					['id' => '2', 'mime' => 'image/png', 'size' => 5],
+				],
+			],
+		];
+		$cache = $this->createStatefulMemcache($values);
+		$this->cacheFactory->method('createDistributed')->willReturn($cache);
+		$this->mailManager->method('getMailAttachments')->willReturn([
+			new Attachment('2', 'numbered.png', 'image/png', 'numbered', 5, 'numbered', 'inline'),
+		]);
+		$service = $this->newService();
+
+		$bundle = $service->getBundle(
+			$this->account,
+			$this->mailbox,
+			$this->message,
+			123,
+		);
+
+		self::assertSame(['2'], array_map('strval', array_keys($bundle)));
+		self::assertSame('numbered', $bundle[2]->getContent());
+	}
+
 	public function testCandidatePolicyCapsCountAndTotalDeclaredBytes(): void {
 		$service = $this->newService();
 		$attachments = [

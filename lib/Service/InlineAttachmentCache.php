@@ -135,6 +135,17 @@ class InlineAttachmentCache {
 
 		$attachments = [];
 		foreach (array_keys($bundle) as $attachmentId) {
+			// PHP silently casts a numeric-string array key to int, so a part
+			// whose content id is "2" comes back from array_keys() as int 2.
+			// Under strict_types that is a TypeError against the string
+			// parameter below, and the whole inline-attachment request 500s.
+			//
+			// Live on 2026-07-28: a message whose inline parts are numbered
+			// rather than named failed four times in a row, once per retry,
+			// with "Argument #2 ($attachmentId) must be of type string, int
+			// given". Content ids are usually <foo@bar> shapes, which is why
+			// this went unnoticed until a message arrived without them.
+			$attachmentId = (string)$attachmentId;
 			$attachment = $this->attachmentFromBundle($bundle, $attachmentId);
 			if ($attachment !== null) {
 				$attachments[$attachmentId] = $attachment;
