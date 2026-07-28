@@ -13,6 +13,7 @@ use OCA\Mail\Db\MailboxMapper;
 use OCA\Mail\Exception\IncompleteSyncException;
 use OCA\Mail\Exception\MailboxLockedException;
 use OCA\Mail\IMAP\IMAPClientFactory;
+use OCA\Mail\IMAP\ImapWorkClass;
 use OCA\Mail\Service\AccountService;
 use OCA\Mail\Service\Sync\ImapToDbSynchronizer;
 use OCA\Mail\Service\Sync\SyncService;
@@ -174,7 +175,32 @@ class BackfillJob extends TimedJob {
 		// the cursor pointed at has since finished/disappeared.
 		$next ??= $incomplete[0];
 
-		$client = $this->clientFactory->getClient($account);
+		// Wait for a connection slot rather than giving up on it.
+		//
+		// MAINTENANCE work gets waitMilliseconds = 0, so this job asked for a
+		// slot, found the sync lane busy and abandoned the whole tick -- with
+		// nothing to show for it until fifteen minutes later. That is exactly
+		// backwards for the only caller here that has no one waiting on it:
+		// the user's own reads keep their reserved slots either way, and this
+		// job's alternative to waiting eight seconds is waiting fifteen
+		// minutes.
+		//
+		// Confirmed live on 2026-07-28, minutes after background sync was
+		// enabled for six large folders: every tick logged
+		// "could not advance mailbox 179: IMAP account concurrency limit
+		// reached" while the incremental sync of those same folders held the
+		// lane. The backfill made no progress at all.
+		//
+		// The work class stays MAINTENANCE deliberately, so waiting buys
+		// patience in the SYNC lane only -- it must never let a backfill
+		// borrow the slot kept for what the user is looking at.
+		$client = $this->clientFactory->getClient(
+			$account,
+			true,
+			false,
+			true,
+			ImapWorkClass::MAINTENANCE,
+		);
 		$advanceCursor = true;
 		$syncStartedAt = microtime(true);
 		try {

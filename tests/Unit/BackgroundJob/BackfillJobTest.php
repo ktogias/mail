@@ -17,6 +17,7 @@ use OCA\Mail\Account;
 use OCA\Mail\BackgroundJob\BackfillJob;
 use OCA\Mail\Db\MailAccount;
 use OCA\Mail\Db\Mailbox;
+use OCA\Mail\IMAP\ImapWorkClass;
 use OCA\Mail\Exception\IncompleteSyncException;
 use OCA\Mail\Exception\MailboxLockedException;
 use OCP\AppFramework\Db\DoesNotExistException;
@@ -483,6 +484,36 @@ class BackfillJobTest extends TestCase {
 	 * exposed this, every incomplete mailbox was of this kind -- 5.9M messages,
 	 * led by a 3.1M-message Gmail "All Mail" that can never complete.
 	 */
+	/**
+	 * MAINTENANCE work is granted zero wait, so this job used to ask for a
+	 * connection slot, find the sync lane busy and abandon the whole tick --
+	 * for fifteen minutes, with nothing to show for it.
+	 *
+	 * Confirmed live on 2026-07-28, minutes after background sync was enabled
+	 * for six large folders: every tick logged "IMAP account concurrency limit
+	 * reached" while the incremental sync of those same folders held the lane,
+	 * and the backfill advanced nothing at all.
+	 *
+	 * The work class must stay MAINTENANCE: waiting buys patience in the sync
+	 * lane, never a borrowed slot from what the user is looking at.
+	 */
+	public function testWaitsForAConnectionSlotInTheSyncLane(): void {
+		$account = $this->account();
+		$this->serviceMock->getParameter('accountService')->method('findById')->willReturn($account);
+		$this->serviceMock->getParameter('userManager')->method('get')
+			->willReturn($this->createConfiguredMock(IUser::class, ['isEnabled' => true]));
+		$this->serviceMock->getParameter('syncService')->method('isServerBusy')->willReturn(false);
+		$this->serviceMock->getParameter('mailboxMapper')->method('findAll')
+			->willReturn([$this->mailbox(1, false)]);
+		$this->serviceMock->getParameter('clientFactory')
+			->expects(self::once())
+			->method('getClient')
+			->with($account, true, false, true, ImapWorkClass::MAINTENANCE)
+			->willReturn($this->createMock(Horde_Imap_Client_Socket::class));
+
+		$this->job->start($this->createMock(JobList::class));
+	}
+
 	public function testSkipsMailboxesExcludedFromBackgroundSync(): void {
 		$this->serviceMock->getParameter('accountService')
 			->method('findById')

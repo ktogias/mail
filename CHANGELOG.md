@@ -1,3 +1,16 @@
+## 5.11.0-dev.0.ktogias.48 (2026-07-28, resource-constrained deployment fork)
+
+### Backfill
+
+* let the backfill **wait** for an IMAP connection slot instead of abandoning the tick. `MAINTENANCE` work is granted zero wait, so the job asked, found the sync lane busy and gave up for another fifteen minutes
+* confirmed live minutes after background sync was enabled for six large folders: every tick logged "IMAP account concurrency limit reached" while the incremental sync of those same folders held the lane, and the backfill advanced nothing at all
+* the work class stays `MAINTENANCE` deliberately — waiting buys patience in the sync lane only, never a slot borrowed from what the user is reading
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.47 (2026-07-28, resource-constrained deployment fork)
 
 ### Inline Attachments
