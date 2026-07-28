@@ -36,6 +36,12 @@
 				</ActionButton>
 			</Actions>
 		</div>
+		<div v-if="frameTimedOut" class="message-frame-failed">
+			<span>{{ t('mail', 'This message could not be displayed') }}</span>
+			<NcButton variant="tertiary" @click="retryFrame">
+				{{ t('mail', 'Try again') }}
+			</NcButton>
+		</div>
 		<div id="message-container" :class="{ scroll: !fullHeight }">
 			<iframe
 				ref="iframe"
@@ -50,7 +56,7 @@
 
 <script>
 import { loadState } from '@nextcloud/initial-state'
-import { NcActionButton as ActionButton, NcActions as Actions } from '@nextcloud/vue'
+import { NcActionButton as ActionButton, NcActions as Actions, NcButton } from '@nextcloud/vue'
 import PrintScout from 'printscout'
 import IconDomain from 'vue-material-design-icons/Domain.vue'
 import IconMail from 'vue-material-design-icons/EmailOutline.vue'
@@ -64,6 +70,21 @@ import { trustSender } from '../service/TrustedSenderService.js'
 const scout = new PrintScout()
 const MESSAGE_HTML_READY = 'nextcloud-mail:message-html-ready'
 
+// How long to wait for the frame to say it is ready before giving up on it.
+//
+// The skeleton above this component is cleared by our own 'load' event, which
+// only fires once prepareMessageFrame() has run -- and that needs either the
+// frame's postMessage or its native load. A request that is CANCELLED gives
+// neither, so the message sat behind grey placeholder bars for as long as it
+// stayed open. Confirmed live on 2026-07-28:
+//   GET /apps/mail/api/messages/1471436/html  499
+// left exactly that on screen.
+//
+// Generous on purpose: this hardware serves a slow body in seconds, and a
+// premature "could not load" on a message that is merely slow would be worse
+// than the wait.
+const FRAME_READY_TIMEOUT_MS = 30_000
+
 export default {
 	name: 'MessageHTMLBody',
 	components: {
@@ -71,6 +92,7 @@ export default {
 		NeedsTranslationInfo,
 		Actions,
 		ActionButton,
+		NcButton,
 		IconImage,
 		IconMail,
 		IconDomain,
@@ -101,6 +123,7 @@ export default {
 			needsTranslation: false,
 			enabledFreePrompt: loadState('mail', 'llm_freeprompt_available', false),
 			printOriginalHeight: null,
+			frameTimedOut: false,
 		}
 	},
 
@@ -121,6 +144,7 @@ export default {
 	},
 
 	async mounted() {
+		this.startFrameReadyTimeout()
 		if (this.enabledFreePrompt && this.message) {
 			this.needsTranslation = await needsTranslation(this.message.databaseId)
 		}
@@ -137,10 +161,40 @@ export default {
 		scout.off('beforeprint', this.onBeforePrint)
 		scout.off('afterprint', this.onAfterPrint)
 		window.removeEventListener('message', this.onMessageFrameReady)
+		clearTimeout(this.frameReadyTimeout)
 		this.resizeObserver?.disconnect()
 	},
 
 	methods: {
+		startFrameReadyTimeout() {
+			clearTimeout(this.frameReadyTimeout)
+			this.frameReadyTimeout = setTimeout(() => {
+				if (this.preparedIframeDocument) {
+					return
+				}
+				logger.warn('message frame never reported itself ready', {
+					messageId: this.message?.databaseId,
+				})
+				this.frameTimedOut = true
+				// Clear the skeleton either way: a placeholder that never
+				// resolves says less than an honest "this did not load".
+				this.$emit('load')
+			}, FRAME_READY_TIMEOUT_MS)
+		},
+
+		retryFrame() {
+			this.frameTimedOut = false
+			this.preparedIframeDocument = undefined
+			this.startFrameReadyTimeout()
+			const iframe = this.$refs.iframe
+			if (iframe) {
+				// Re-assigning src is what actually re-requests it; the URL is
+				// unchanged, so a plain reload() of a frame that never loaded
+				// would not do.
+				iframe.src = this.url
+			}
+		},
+
 		getIframeDoc() {
 			const iframe = this.$refs.iframe
 			return iframe.contentDocument || iframe.contentWindow.document
@@ -177,6 +231,8 @@ export default {
 				return
 			}
 			this.preparedIframeDocument = iframeDoc
+			clearTimeout(this.frameReadyTimeout)
+			this.frameTimedOut = false
 
 			this.hasBlockedContent
 				= iframeDoc.querySelectorAll('[data-original-src]').length > 0
@@ -285,6 +341,14 @@ export default {
 </script>
 
 <style lang="scss" scoped>
+.message-frame-failed {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	padding: 8px 0;
+	color: var(--color-text-maxcontrast);
+}
+
 // account for 12px (was 8) margin on iframe body
 // should be 12px so it maches the rest of the content
 .html-message-body {

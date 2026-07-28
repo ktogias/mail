@@ -1,3 +1,16 @@
+## 5.11.0-dev.0.ktogias.51 (2026-07-28, resource-constrained deployment fork)
+
+### Message Bodies
+
+* stop waiting for a message frame that never reports itself ready, say so, and offer to try again. The skeleton is cleared by `MessageHTMLBody`'s own `load` event, which only fires once the frame has signalled — and a **cancelled** request gives neither a postMessage nor a native load, so the message sat behind grey placeholder bars for as long as it stayed open
+* confirmed live: `GET /apps/mail/api/messages/1471436/html 499` left exactly that on screen
+* the wait is 30 seconds, deliberately generous: this hardware serves a slow body in seconds, and a premature failure on a message that is merely slow would be worse than the wait
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.50 (2026-07-28, resource-constrained deployment fork)
 
 ### Opening a Thread

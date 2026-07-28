@@ -77,6 +77,57 @@ describe('MessageHTMLBody', () => {
 	// after the moment it last measured. A ResizeObserver reports every
 	// one of those automatically, with no manual nudging needed.
 
+	// The skeleton above this component is cleared by its own 'load' event,
+	// which only fires once prepareMessageFrame() has run -- and that needs
+	// either the frame's postMessage or its native load. A CANCELLED request
+	// gives neither, so the message sat behind grey placeholder bars for as
+	// long as it stayed open. Confirmed live on 2026-07-28:
+	//   GET /apps/mail/api/messages/1471436/html  499
+	describe('a frame that never reports itself ready', () => {
+		it('stops waiting, says so, and still clears the skeleton', async () => {
+			vi.useFakeTimers()
+			const view = mountMessageHTMLBody()
+
+			vi.advanceTimersByTime(30_000)
+			await view.vm.$nextTick()
+
+			expect(view.vm.frameTimedOut).toBe(true)
+			// A placeholder that never resolves says less than an honest
+			// failure, so the skeleton is cleared either way.
+			expect(view.emitted('load')).toHaveLength(1)
+			vi.useRealTimers()
+			view.destroy()
+		})
+
+		it('re-requests the body when asked to try again', async () => {
+			vi.useFakeTimers()
+			const view = mountMessageHTMLBody()
+			vi.advanceTimersByTime(30_000)
+			await view.vm.$nextTick()
+
+			view.vm.retryFrame()
+
+			expect(view.vm.frameTimedOut).toBe(false)
+			expect(view.vm.$refs.iframe.src).toContain('/messages/112929/html')
+			vi.useRealTimers()
+			view.destroy()
+		})
+
+		it('does not fire once the frame has been prepared', async () => {
+			vi.useFakeTimers()
+			const view = mountMessageHTMLBody()
+			stubIframeDoc(view)
+			view.vm.prepareMessageFrame()
+
+			vi.advanceTimersByTime(30_000)
+			await view.vm.$nextTick()
+
+			expect(view.vm.frameTimedOut).toBe(false)
+			vi.useRealTimers()
+			view.destroy()
+		})
+	})
+
 	it('observes the iframe body and applies its scrollHeight, not contentRect', () => {
 		// scrollHeight, not entries[0].contentRect.height: the injected
 		// html-response.css sets `html { overflow-y: hidden }` (to avoid
