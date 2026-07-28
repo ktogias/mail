@@ -16,6 +16,7 @@ use OCA\Mail\Db\MailAccount;
 use OCA\Mail\Db\MailAccountMapper;
 use OCA\Mail\IMAP\HordeImapClient;
 use OCA\Mail\IMAP\ImapConnectionSemaphore;
+use OCA\Mail\IMAP\ImapWorkClass;
 use OCA\Mail\Integration\GoogleIntegration;
 use OCA\Mail\Integration\MicrosoftIntegration;
 use OCP\AppFramework\Utility\ITimeFactory;
@@ -347,10 +348,19 @@ class HordeImapClientTest extends TestCase {
 	}
 
 	public function testInteractiveClientCanUseTheReservedSlotWithoutExceedingTheHardLimit(): void {
-		$firstOrdinary = new ImapConnectionSemaphore($this->cache, 'account-concurrency', 3, 1);
-		$secondOrdinary = new ImapConnectionSemaphore($this->cache, 'account-concurrency', 3, 1);
-		self::assertTrue($firstOrdinary->acquire());
-		self::assertTrue($secondOrdinary->acquire());
+		// Both ordinary lanes have to be filled through the work classes that
+		// own them. This used to call acquire() twice, from back when
+		// "ordinary" meant one undifferentiated pool of limit - reservedSlots.
+		// Since the work-class partition landed (2026-07-24) the lanes are
+		// hard-separated -- with limit 3 and one reserved slot, active content
+		// may take slot 1 or 0 while sync/background work may take only slot 0
+		// -- so the second acquire() was asking the sync lane for a second
+		// slot it is never allowed to have, and the test failed on the setup
+		// rather than on what it is named for.
+		$activeContent = new ImapConnectionSemaphore($this->cache, 'account-concurrency', 3, 1);
+		$syncLane = new ImapConnectionSemaphore($this->cache, 'account-concurrency', 3, 1);
+		self::assertTrue($activeContent->acquireFor(ImapWorkClass::ACTIVE_CONTENT));
+		self::assertTrue($syncLane->acquireFor(ImapWorkClass::MAINTENANCE));
 
 		$this->client->enableConnectionSemaphore(
 			new ImapConnectionSemaphore($this->cache, 'account-concurrency', 3, 1),
