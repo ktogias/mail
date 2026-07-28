@@ -5004,10 +5004,11 @@ describe('Vuex store actions', () => {
 			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(5)
 		})
 
-		it('does not collapse distinct structural syncs for a real mailbox', async () => {
-			// Structural buckets have independently materialized list state.
-			// Only the canonical unfiltered physical sync is single-flight;
-			// two explicit structural syncs remain distinct.
+		it('does not collapse DISTINCT structural syncs for a real mailbox', async () => {
+			// Structural buckets have independently materialized list state, so
+			// Important/Favorites/Other must never share one request. This is
+			// the invariant; asking for the same bucket twice at once (below)
+			// is a different question.
 			MessageService.syncEnvelopes.mockResolvedValue({
 				newMessages: [],
 				changedMessages: [],
@@ -5015,10 +5016,60 @@ describe('Vuex store actions', () => {
 				stats: { unread: 0 },
 			})
 
+			const starred = store.syncEnvelopes({ mailboxId: 100, query: 'is:starred' })
+			const unstarred = store.syncEnvelopes({ mailboxId: 100, query: 'not:starred' })
+
+			await Promise.all([starred, unstarred])
+
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(2)
+		})
+
+		it('shares one request when the SAME bucket is asked for twice at once', async () => {
+			// Widened on 2026-07-28. This case used to be excluded along with
+			// the distinct-bucket case above, on the reasoning that structural
+			// syncs keep their own server state -- true of different buckets,
+			// but two callers asking for the identical mailbox AND query are
+			// issuing literally the same request.
+			//
+			// It mattered because refreshFlagPredicateBucketsForEnvelope()
+			// fires one sync per loaded flag-predicate bucket and runs once per
+			// mutated envelope, so once importance and stars became thread-wide
+			// a single click on an N-message thread meant N x buckets identical
+			// POSTs at once, against a per-account IMAP semaphore of three.
+			//
+			// Joining an in-flight sync that began before a local write cannot
+			// resurrect stale flags: withRecentFlagOverrides() already makes a
+			// just-changed flag win over whatever a sync response reports.
+			let resolveSync
+			MessageService.syncEnvelopes.mockReturnValue(new Promise((resolve) => {
+				resolveSync = resolve
+			}))
+
 			const first = store.syncEnvelopes({ mailboxId: 100, query: 'not:starred' })
 			const second = store.syncEnvelopes({ mailboxId: 100, query: 'not:starred' })
 
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(1)
+
+			resolveSync({ newMessages: [], changedMessages: [], vanishedMessages: [], stats: { unread: 0 } })
 			await Promise.all([first, second])
+
+			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(1)
+		})
+
+		it('gives a later refresh of the same bucket its own round trip', async () => {
+			// No settle window for query-scoped entries: that backstop exists
+			// to confirm a bucket AFTER a mutation, so a call arriving once the
+			// previous sync has finished must really go to the server. The
+			// canonical unfiltered sync keeps its window (tested above).
+			MessageService.syncEnvelopes.mockResolvedValue({
+				newMessages: [],
+				changedMessages: [],
+				vanishedMessages: [],
+				stats: { unread: 0 },
+			})
+
+			await store.syncEnvelopes({ mailboxId: 100, query: 'not:starred' })
+			await store.syncEnvelopes({ mailboxId: 100, query: 'not:starred' })
 
 			expect(MessageService.syncEnvelopes).toHaveBeenCalledTimes(2)
 		})
@@ -6236,6 +6287,77 @@ describe('Vuex store actions', () => {
 			expect(store.envelopes[42].flags.important).toBe(false)
 			expect(store.envelopes[41].flags.important).toBe(true)
 			expect(MessageService.fetchThread).not.toHaveBeenCalled()
+		})
+	})
+
+	describe('a thread-wide flag change must not multiply the bucket refreshes', () => {
+		// The defect this guards, seen live on 2026-07-28 as three concurrent
+		// POSTs to mailboxes/149/sync:
+		//
+		//   refreshFlagPredicateBucketsForEnvelope() fires one syncEnvelopes()
+		//   per loaded flag-predicate bucket, and is called once per mutated
+		//   envelope. Once importance and stars became thread-wide (.52, .54,
+		//   .56), a single click on an N-message thread produced N x buckets
+		//   identical requests for the same mailbox, all at once, against a
+		//   per-account IMAP semaphore of three -- on a mailbox that needs
+		//   seconds per sync.
+		//
+		// The cost has to be the number of buckets, not the size of the thread.
+		const importantTag = { id: 909, imapLabel: '$label1', displayName: 'Important', color: '#FF7A66' }
+		const BUCKETS = ['is:starred', 'not:starred is:pi-important', 'not:starred is:pi-other']
+
+		beforeEach(() => {
+			store.preferences['layout-message-view'] = 'threaded'
+			store.tags[importantTag.id] = importantTag
+			MessageService.setEnvelopeFlags.mockResolvedValue({ importantTag })
+			MessageService.syncEnvelopes.mockResolvedValue({
+				newMessages: [],
+				changedMessages: [],
+				vanishedMessages: [],
+				stats: { unread: 0 },
+			})
+			const account = { id: 13, personalNamespace: '', mailboxes: [] }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: { id: 'INBOX', name: 'INBOX', databaseId: 11, accountId: 13, specialRole: 'inbox' },
+			})
+			const mailbox = store.mailboxes[11]
+			BUCKETS.forEach((bucket) => {
+				Vue.set(mailbox.envelopeLists, bucket, [])
+			})
+		})
+
+		function seedImportantThread(size) {
+			const members = Array.from({ length: size }, (_, i) => ({
+				databaseId: 40 + i,
+				accountId: 13,
+				mailboxId: 11,
+				uid: 40 + i,
+				threadRootId: 100,
+				dateInt: i + 1,
+				flags: { important: true },
+				tags: [importantTag.id],
+			}))
+			members.forEach((member) => {
+				store.envelopes[member.databaseId] = member
+			})
+			const head = members[members.length - 1]
+			head.thread = members.map((member) => member.databaseId)
+			return head
+		}
+
+		it('refreshes each bucket once, however many messages the thread has', async () => {
+			const head = seedImportantThread(5)
+
+			await store.markEnvelopeImportantOrUnimportant({ envelope: head, addTag: false })
+			// The bucket refresh is fire-and-forget, so let the microtask queue
+			// drain before counting.
+			await new Promise((resolve) => setTimeout(resolve, 0))
+
+			const synced = MessageService.syncEnvelopes.mock.calls.length
+			// Five members x three buckets used to be fifteen.
+			expect(synced).toBeLessThanOrEqual(BUCKETS.length)
 		})
 	})
 

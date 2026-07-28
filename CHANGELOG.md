@@ -1,3 +1,18 @@
+## 5.11.0-dev.0.ktogias.57 (2026-07-28, resource-constrained deployment fork)
+
+### Syncing
+
+* **one click on a thread no longer fires a sync per message per bucket.** `refreshFlagPredicateBucketsForEnvelope()` issues one `syncEnvelopes()` per loaded flag-predicate bucket and is called once per mutated envelope. Once importance and stars became thread-wide (`.52`, `.54`, `.56`), a single click on a 5-message thread meant **5 × 3 = 15 identical POSTs to the same mailbox at once**, against a per-account IMAP semaphore of three — on a mailbox that needs seconds per sync
+* seen live on 2026-07-28 as three concurrent `mailboxes/149/sync` requests, two of them starting 10ms apart
+* the single-flight now covers a real mailbox **with** a query, keyed on mailbox **and** query. Distinct buckets still never collapse into each other — that invariant is unchanged and separately tested; only two callers asking for the *identical* mailbox and bucket now share the one request they were both issuing
+* the settle window stays a canonical-sync affair. A query-scoped entry is joinable only while genuinely in flight, so a bucket refresh arriving after the previous one finished still gets its own round trip — that refresh is a post-mutation backstop and must reach the server
+* joining an in-flight sync that began before a local write cannot resurrect stale flags: `withRecentFlagOverrides()` already makes a just-changed flag win over whatever a sync response reports
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.56 (2026-07-28, resource-constrained deployment fork)
 
 ### Envelope List

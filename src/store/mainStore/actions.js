@@ -3452,25 +3452,51 @@ export default function mainStoreActions() {
 			// A canonical physical sync has no search predicate. Coalesce only
 			// that exact case: Important/Favorites/Other queries must retain
 			// their own server state and therefore never share this entry.
-			const isCanonicalPhysicalSync = mailboxForFanOut
+			const isPhysicalMailbox = !!mailboxForFanOut
 				&& !mailboxForFanOut.isUnified
 				&& !mailboxForFanOut.isPriorityInbox
+			const isCanonicalPhysicalSync = isPhysicalMailbox
 				&& !init
 				&& (query === undefined || query === '')
-			if (isCanonicalPhysicalSync && !physicalSyncLeader) {
+			// The same bucket of the same real mailbox, asked for twice at
+			// once, is the one case where sharing cannot change the answer:
+			// it is literally the same request. Distinct queries still never
+			// collapse into each other -- the key carries the query.
+			//
+			// refreshFlagPredicateBucketsForEnvelope() fires one sync per
+			// loaded flag-predicate bucket, and is called once per mutated
+			// envelope. Since importance and stars became thread-wide (.52,
+			// .54, .56), one click on an N-message thread meant N x buckets
+			// identical POSTs to the same mailbox, all at once, against a
+			// per-account IMAP semaphore of three -- on a mailbox that takes
+			// seconds per sync. Seen live on 2026-07-28 as three concurrent
+			// syncs of mailbox 149.
+			const isQueryScopedPhysicalSync = isPhysicalMailbox && !init && !!query
+			if ((isCanonicalPhysicalSync || isQueryScopedPhysicalSync) && !physicalSyncLeader) {
 				let pendingForStore = pendingCanonicalPhysicalSyncs.get(this)
 				if (!pendingForStore) {
 					pendingForStore = new Map()
 					pendingCanonicalPhysicalSyncs.set(this, pendingForStore)
 				}
 
-				const physicalKey = String(mailboxId)
+				const physicalKey = `${mailboxId}:${query ?? ''}`
 				const existing = pendingForStore.get(physicalKey)
 				// Still running: every caller joins it, as before. Already
 				// finished and only being held open for the settle window:
 				// only a caller that opted into coalescing may join, so a
 				// sync that needs its own fresh response still gets one.
-				if (existing && (!existing.settled || coalesceRecent)) {
+				//
+				// The settle window stays a canonical-sync affair. A
+				// query-scoped entry is joinable only while genuinely in
+				// flight, so a bucket refresh that arrives after the previous
+				// one finished still gets its own round trip -- which is the
+				// whole point of that refresh being a backstop.
+				if (existing && (!existing.settled || (coalesceRecent && isCanonicalPhysicalSync))) {
+					// Logged because the absence of this line is what made the
+					// original fan-out invisible: identical requests are hard to
+					// tell apart in a network panel, and the only clue was three
+					// POSTs to the same URL 10ms apart.
+					logger.debug(`joining an in-flight mailbox sync of ${mailboxId} (${query})`)
 					return existing.promise
 				}
 
@@ -3493,7 +3519,11 @@ export default function mainStoreActions() {
 				entry.promise = leader.then(
 					(result) => {
 						entry.settled = true
-						setTimeout(forget, CANONICAL_PHYSICAL_SYNC_SETTLE_MS)
+						if (isCanonicalPhysicalSync) {
+							setTimeout(forget, CANONICAL_PHYSICAL_SYNC_SETTLE_MS)
+						} else {
+							forget()
+						}
 						return result
 					},
 					(error) => {
