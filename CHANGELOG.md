@@ -1,3 +1,15 @@
+## 5.11.0-dev.0.ktogias.63 (2026-07-29, resource-constrained deployment fork)
+
+### Tests only — no runtime change from `.62`
+
+* the daily reconciliation gate added in `.62` is now pinned by tests. The live deploy never exercised the interval: the syncs that followed it returned earlier, at the pre-existing *no significant changes* guard, so what was observed was the **absence** of further rebuilds — consistent with the gate working, but not evidence that it fired
+* four cases, each proven to fail against a deliberately broken listener: skipping inside the window, rebuilding once it has elapsed, rebuilding when it has never run, and **not** recording a timestamp when the rebuild throws — otherwise one failure buys a whole day of not trying again, and the subject-only merges stay unreconciled with nothing saying so
+
+### Database
+
+* no schema changes or migrations
+
+
 ## 5.11.0-dev.0.ktogias.62 (2026-07-29, resource-constrained deployment fork)
 
 ### Threading
