@@ -271,6 +271,74 @@ function cancelledFannedOutPageError() {
 	return error
 }
 
+/**
+ * The furthest an envelope list reaches, in list order.
+ *
+ * Deliberately not last(): a stored list is in insertion order, not sort
+ * order, so its final element is merely whatever arrived most recently -- in
+ * a list holding both an old page and a freshly synced newer message, that is
+ * the NEWEST envelope, which as a boundary would truncate every page to
+ * nothing. One linear pass, no second sort of a list the caller is already
+ * merging.
+ *
+ * @param {object[]} envelopes an unordered envelope list
+ * @param {string} sortOrder active envelope sort order
+ * @return {object|undefined} the envelope furthest along the list order
+ */
+function furthestEnvelope(envelopes, sortOrder) {
+	return envelopes.reduce((furthest, envelope) => (
+		furthest === undefined || compareEnvelopeCursors(envelope, furthest, sortOrder) > 0
+			? envelope
+			: furthest
+	), undefined)
+}
+
+/**
+ * Cut a merged page at the point past which the merge is no longer complete.
+ *
+ * A unified/priority page is a k-way merge of one list per constituent inbox.
+ * The merge is only sound as far down as EVERY source has delivered: past the
+ * newest source tail, some source may still be holding messages that belong in
+ * between, so anything emitted beyond that point is a guess about ordering.
+ *
+ * Emitting it anyway is what produced the reported jump. A tiny inbox whose
+ * whole history is already loaded ends in May; the big one is loaded to July
+ * and still has more. Whenever the big one contributes fewer rows than the
+ * page asked for -- it failed, it was cancelled, or the server page was simply
+ * short -- the slice fills the remainder from the tiny inbox, and the list
+ * reads July, July, July, May. The messages in between are not lost, but they
+ * can never be scrolled to: the cursor is now in May and pagination walks
+ * further away from them with every pull.
+ *
+ * Truncating instead is self-correcting. The page ends where knowledge ends,
+ * the cursor advances only over rows that are certainly contiguous, and the
+ * next pull re-derives which sources to fetch from that shorter page -- which
+ * is the same watermark needsFetch() already applies when choosing them.
+ *
+ * @param {object[]} page merged page, in list order
+ * @param {Array<object|undefined>} openTails tail of each source that may still have older messages
+ * @param {string} sortOrder active envelope sort order
+ * @return {object[]} the contiguous prefix of the page
+ */
+function contiguousFannedOutPage(page, openTails, sortOrder) {
+	const boundary = openTails.reduce((newest, tail) => {
+		if (tail === undefined) {
+			return newest
+		}
+		if (newest === undefined || compareEnvelopeCursors(tail, newest, sortOrder) < 0) {
+			return tail
+		}
+		return newest
+	}, undefined)
+
+	// No source has an open tail: every one of them is exhausted, so the merge
+	// is complete all the way down and the page stands as assembled.
+	if (boundary === undefined) {
+		return page
+	}
+	return page.filter((envelope) => compareEnvelopeCursors(envelope, boundary, sortOrder) <= 0)
+}
+
 function incompleteFannedOutPageError() {
 	const error = new Error('Fanned-out next page could not be assembled from every source')
 	error.mailPageIncomplete = true
@@ -1401,7 +1469,19 @@ export function isMailboxSyncRetryPending(mailboxId) {
 // cycle, which is the signature of a genuine (not merely advisory) held
 // lock recurring, not of the pessimistic Retry-After estimate alone.
 const watchedMailboxSyncsInFlight = new Set()
-const DELETE_REFILL_DEBOUNCE_MS = 1000
+// A refill fills a hole the user is looking at right now: they unmarked or
+// deleted rows and the collapsed section is visibly short until it lands. The
+// window only exists to coalesce a burst -- a multi-select action removes its
+// rows over several ticks, and one request beats one per row.
+//
+// It used to be a plain 1000ms trailing debounce, which is the wrong shape for
+// this twice over. Trailing means every further removal RESTARTS the wait, so
+// unmarking three messages a beat apart pushed the refill out past three
+// seconds; and 1000ms was already longer than the fetch it was guarding.
+// Hence a short window with a hard ceiling measured from the FIRST removal, so
+// a burst still costs one request but the hole cannot stay open indefinitely.
+const REFILL_COALESCE_MS = 200
+const REFILL_MAX_WAIT_MS = 500
 let pendingDeleteRefills = new Map()
 
 export function resetPendingDeleteRefillsForTests() {
@@ -3140,11 +3220,15 @@ export default function mainStoreActions() {
 					quantity: 0,
 					waiters: [],
 					timeout: undefined,
+					deadline: Date.now() + REFILL_MAX_WAIT_MS,
 				}
 				pendingForStore.set(key, pending)
 			}
 			pending.quantity += quantity
 			clearTimeout(pending.timeout)
+			// Measured from the first removal in the burst, not this one, so a
+			// steady trickle of removals cannot keep pushing the refill away.
+			const delay = Math.max(0, Math.min(REFILL_COALESCE_MS, pending.deadline - Date.now()))
 
 			const result = new Promise((resolve, reject) => {
 				pending.waiters.push({ resolve, reject })
@@ -3156,13 +3240,19 @@ export default function mainStoreActions() {
 						mailboxId,
 						query,
 						quantity: pending.quantity,
-						workClass: WorkClass.SPECULATIVE,
+						// Not SPECULATIVE. Speculative is work the user has not
+						// asked to see; this is the content of the view they are
+						// looking at, with a gap in it. At priority 4 of 6 it
+						// queued behind every revalidation, and SPECULATIVE is in
+						// HIDDEN_CANCEL_CLASSES, so a glance at another window
+						// threw the refill away and left the hole open.
+						workClass: WorkClass.ACTIVE_CONTENT,
 					})
 					pending.waiters.forEach(({ resolve }) => resolve(envelopes))
 				} catch (error) {
 					pending.waiters.forEach(({ reject }) => reject(error))
 				}
-			}, DELETE_REFILL_DEBOUNCE_MS)
+			}, delay)
 			return result
 		},
 		async fetchNextEnvelopes({
@@ -3238,6 +3328,12 @@ export default function mainStoreActions() {
 					// exhausted and scrolling stopped.
 					let cancelledConstituent = false
 					let failedConstituent = false
+					// A source that answered with nothing has no more to give, so
+					// its tail stops constraining the merge. Every other source
+					// still does -- including one that failed, which is how a
+					// failure now truncates the page instead of letting an
+					// unrelated source fill the gap it left.
+					const exhaustedConstituents = new Set()
 					const fetchNextFannedOutPage = async (query, allowRecursiveFetch = rec) => {
 						const getIndivisualLists = curry((query, m) => this.getEnvelopes(m.databaseId, query))
 						const individualCursor = curry((query, m) => last(this.getEnvelopes(m.databaseId, query)))
@@ -3318,6 +3414,11 @@ export default function mainStoreActions() {
 									quantity,
 									addToUnifiedMailboxes: false,
 									workClass,
+								}).then((fetched) => {
+									if (fetched.length === 0) {
+										exhaustedConstituents.add(mb.databaseId)
+									}
+									return fetched
 								}).catch((error) => {
 									if (error?.code === 'ERR_CANCELED') {
 										cancelledConstituent = true
@@ -3333,7 +3434,16 @@ export default function mainStoreActions() {
 							)(mbs)
 						}
 
-						const envelopes = nextLocalEnvelopes(this.getAccounts)
+						const assembled = nextLocalEnvelopes(this.getAccounts)
+						const envelopes = contiguousFannedOutPage(
+							assembled,
+							pipe(
+								findIndividualMailboxes(this.getMailboxes, mailbox.specialRole),
+								filter((mb) => !exhaustedConstituents.has(mb.databaseId)),
+								map((mb) => furthestEnvelope(this.getEnvelopes(mb.databaseId, query), sortOrder)),
+							)(this.getAccounts),
+							sortOrder,
+						)
 
 						// Do not publish a page a cancelled source was meant to
 						// contribute to, and never let one look like the end of
@@ -3344,6 +3454,20 @@ export default function mainStoreActions() {
 							throw cancelledFannedOutPageError()
 						}
 						if (envelopes.length === 0 && failedConstituent) {
+							throw incompleteFannedOutPageError()
+						}
+						// Truncated away to nothing. That is "the merge does not
+						// reach any further yet", which is not the same claim as
+						// an empty page -- returning [] here would let loadMore()
+						// mark the list exhausted and stop scrolling for good.
+						// The next attempt sees the shorter page, so needsFetch()
+						// picks up exactly the source that is holding it back.
+						if (envelopes.length === 0 && assembled.length > 0) {
+							logger.debug('next fanned-out page starts inside a range a source has not delivered yet', {
+								mailboxId,
+								query,
+								assembled: assembled.length,
+							})
 							throw incompleteFannedOutPageError()
 						}
 

@@ -773,14 +773,14 @@ describe('Vuex store actions', () => {
 		expect(MailboxService.create).toHaveBeenCalledWith(13, 'Archive.2020')
 	})
 
-	it('coalesces a burst of delete refills into one speculative page fetch', async () => {
+	it('coalesces a burst of refills into one active-content page fetch', async () => {
 		vi.useFakeTimers()
 		try {
 			store.fetchNextEnvelopes = vi.fn().mockResolvedValue([])
 
 			const first = store.scheduleEnvelopeRefill({ mailboxId: 21, query: 'not:starred', quantity: 1 })
 			const second = store.scheduleEnvelopeRefill({ mailboxId: 21, query: 'not:starred', quantity: 2 })
-			await vi.advanceTimersByTimeAsync(999)
+			await vi.advanceTimersByTimeAsync(199)
 			expect(store.fetchNextEnvelopes).not.toHaveBeenCalled()
 
 			await vi.advanceTimersByTimeAsync(1)
@@ -791,8 +791,37 @@ describe('Vuex store actions', () => {
 				mailboxId: 21,
 				query: 'not:starred',
 				quantity: 3,
-				workClass: WorkClass.SPECULATIVE,
+				// The user is looking at the hole this fills. Speculative work
+				// is what they have NOT asked to see; it queues behind every
+				// revalidation and is thrown away when the tab is hidden, both
+				// of which left the section visibly short for seconds.
+				workClass: WorkClass.ACTIVE_CONTENT,
 			})
+		} finally {
+			vi.useRealTimers()
+		}
+	})
+
+	it('does not let a trickle of removals keep pushing the refill away', async () => {
+		// The coalescing window used to restart on every removal, so unmarking
+		// messages one at a time -- the actual way this is used -- delayed the
+		// refill for as long as the user kept clicking. The ceiling is measured
+		// from the first removal in the burst.
+		vi.useFakeTimers()
+		try {
+			store.fetchNextEnvelopes = vi.fn().mockResolvedValue([])
+
+			const waiters = [store.scheduleEnvelopeRefill({ mailboxId: 21, query: 'not:starred', quantity: 1 })]
+			for (let elapsed = 0; elapsed < 600; elapsed += 150) {
+				await vi.advanceTimersByTimeAsync(150)
+				waiters.push(store.scheduleEnvelopeRefill({ mailboxId: 21, query: 'not:starred', quantity: 1 }))
+			}
+
+			// Still one request, and it went out inside the ceiling rather than
+			// 150ms after whichever removal happened to be last.
+			expect(store.fetchNextEnvelopes).toHaveBeenCalledTimes(1)
+			expect(store.fetchNextEnvelopes).toHaveBeenCalledWith(expect.objectContaining({ quantity: 4 }))
+			await Promise.all(waiters.slice(0, 4))
 		} finally {
 			vi.useRealTimers()
 		}
@@ -3154,6 +3183,99 @@ describe('Vuex store actions', () => {
 
 		// No hole was appended.
 		expect(store.getEnvelopes(UNIFIED_INBOX_ID, undefined).map((e) => e.databaseId)).toEqual(before)
+	})
+
+	it('cuts a fanned-out page where the merge stops being complete instead of padding it from an older source', async () => {
+		// The same July-to-May jump as the test above, reached WITHOUT anything
+		// failing -- which is why hardening the cancelled path did not stop it
+		// recurring. Repeated pull-ups mean the big inbox eventually answers
+		// with a short page (a small server page, a partly-synced range), and a
+		// short page leaves room in the slice. The tiny inbox fills that room
+		// from its own ancient tail, and the list reads ...27, 26, 2, 1.
+		//
+		// Nothing is lost, but everything between is now unreachable: the
+		// cursor sits in the ancient tail and every further pull walks away
+		// from the gap rather than into it.
+		const account13 = { id: 13 }
+		const account26 = { id: 26 }
+		store.preferences['sort-order'] = 'newest'
+		store.preferences['layout-message-view'] = 'threaded'
+		store.addAccountMutation(account13)
+		store.addAccountMutation(account26)
+		store.addMailboxMutation({
+			account: account13,
+			mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+		})
+		store.addMailboxMutation({
+			account: account26,
+			mailbox: { name: 'INBOX', databaseId: 21, specialRole: 'inbox' },
+		})
+		// The tiny inbox's tail is the unified cursor, so the next page starts
+		// in a range only the big inbox can speak for.
+		store.addEnvelopesMutation({ envelopes: reverse(range(30, 35)).map(mockEnvelope(11)) })
+		store.addEnvelopesMutation({ envelopes: reverse(range(28, 30)).map(mockEnvelope(21)) })
+
+		MessageService.fetchEnvelopes.mockImplementation(async (accountId, mailboxId) => {
+			if (mailboxId === 11) {
+				// Short: two rows where a full page was asked for. The big
+				// inbox still holds 25 down to 8.
+				return reverse(range(26, 28)).map(mockEnvelope(11))
+			}
+			// The tiny inbox reaches straight back to its own oldest messages.
+			return reverse(range(1, 3)).map(mockEnvelope(21))
+		})
+
+		const page = await store.fetchNextEnvelopePage({
+			mailboxId: UNIFIED_INBOX_ID,
+			quantity: PAGE_SIZE,
+		})
+
+		// Only as far as every source has delivered.
+		expect(page.map((e) => e.databaseId)).toEqual([11027, 11026])
+		const unified = store.getEnvelopes(UNIFIED_INBOX_ID, undefined).map((e) => e.databaseId)
+		expect(unified).not.toContain(21002)
+		expect(unified).not.toContain(21001)
+		// ...and the cursor stayed in the range the next pull must continue
+		// from, rather than jumping past the gap.
+		expect(unified[unified.length - 1]).toEqual(11026)
+	})
+
+	it('lets an exhausted source stop constraining the merge', async () => {
+		// The other half of the same rule, and the reason it cannot simply be
+		// "never emit past any source's tail": the tiny inbox's tail IS the
+		// cursor here. Treating it as a boundary regardless would truncate
+		// every page to nothing and end scrolling permanently. Having answered
+		// with nothing, it has no more to contribute and stops constraining.
+		const account13 = { id: 13 }
+		const account26 = { id: 26 }
+		store.preferences['sort-order'] = 'newest'
+		store.preferences['layout-message-view'] = 'threaded'
+		store.addAccountMutation(account13)
+		store.addAccountMutation(account26)
+		store.addMailboxMutation({
+			account: account13,
+			mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+		})
+		store.addMailboxMutation({
+			account: account26,
+			mailbox: { name: 'INBOX', databaseId: 21, specialRole: 'inbox' },
+		})
+		store.addEnvelopesMutation({ envelopes: reverse(range(30, 35)).map(mockEnvelope(11)) })
+		store.addEnvelopesMutation({ envelopes: reverse(range(28, 30)).map(mockEnvelope(21)) })
+
+		MessageService.fetchEnvelopes.mockImplementation(async (accountId, mailboxId) => {
+			if (mailboxId === 11) {
+				return reverse(range(8, 28)).map(mockEnvelope(11))
+			}
+			return []
+		})
+
+		const page = await store.fetchNextEnvelopePage({
+			mailboxId: UNIFIED_INBOX_ID,
+			quantity: PAGE_SIZE,
+		})
+
+		expect(page.map((e) => e.uid)).toEqual(reverse(range(8, 28)))
 	})
 
 	it('builds the next unified page with partial fetch', async () => {
