@@ -230,7 +230,14 @@ export default {
 
 			const vData = ICAL.stringify(task.jCal)
 
-			await task.calendar.dav.createVObject(vData)
+			// KEEP the created object. The response carries the name CalDAV
+			// gave it, and that name -- not the VTODO's UID -- is what the
+			// Tasks app routes on (/calendars/<cal>/tasks/<uri>). Discarding
+			// it left task.uri empty and every link we stored pointed at a
+			// task that does not exist: cdav-library names the object with an
+			// identifier of its own, so UID e179a093-... lives at
+			// 85D8FD67-....ics.
+			task.dav = await task.calendar.dav.createVObject(vData)
 
 			return task
 		},
@@ -264,6 +271,9 @@ export default {
 					await linkTaskToMessage(this.envelope.databaseId, {
 						calendarUri: this.selectedCalendar.id,
 						taskUid: task.uid,
+						// What the deep link actually resolves on. The UID is kept
+						// because it is what identifies the task itself.
+						taskUri: task.uri,
 						summary: this.taskTitle,
 					})
 					// Tell whatever is on screen that the answer has changed.

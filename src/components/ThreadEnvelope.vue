@@ -489,7 +489,7 @@ import ViewportPrefetchMixin from '../mixins/ViewportPrefetchMixin.js'
 import { buildRecipients as buildReplyRecipients } from '../ReplyBuilder.js'
 import { smartReply } from '../service/AiIntergrationsService.js'
 import { unsubscribe } from '../service/ListService.js'
-import { taskDeepLink } from '../service/MessageTaskService.js'
+import { taskDeepLink, taskUriOf } from '../service/MessageTaskService.js'
 import { FOLLOW_UP_TAG_LABEL } from '../store/constants.js'
 import useMainStore from '../store/mainStore.js'
 import useOutboxStore from '../store/outboxStore.js'
@@ -1166,7 +1166,7 @@ export default {
 		},
 
 		taskUrl(task) {
-			return taskDeepLink(task.calendarUri, task.taskUid)
+			return taskDeepLink(task.calendarUri, taskUriOf(task))
 		},
 
 		scrollToThread(threadId) {

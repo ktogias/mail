@@ -29,6 +29,8 @@ use OCP\AppFramework\Db\Entity;
  * @method void setCalendarUri(string $value)
  * @method string getTaskUid()
  * @method void setTaskUid(string $value)
+ * @method string|null getTaskUri()
+ * @method void setTaskUri(string|null $value)
  * @method string|null getSummary()
  * @method void setSummary(string|null $value)
  * @method int getCreatedAt()
@@ -40,6 +42,7 @@ class MessageTask extends Entity implements JsonSerializable {
 	protected $threadRootId;
 	protected $calendarUri;
 	protected $taskUid;
+	protected $taskUri;
 	protected $summary;
 	protected $createdAt;
 
@@ -57,6 +60,10 @@ class MessageTask extends Entity implements JsonSerializable {
 			'threadRootId' => $this->getThreadRootId(),
 			'calendarUri' => $this->getCalendarUri(),
 			'taskUid' => $this->getTaskUid(),
+			// The CalDAV object name, `.ics` included. This -- not the UID --
+			// is what the Tasks app routes on. Null on rows written before
+			// Version5011Date20260730020000; see that migration.
+			'taskUri' => $this->getTaskUri(),
 			'summary' => $this->getSummary(),
 			'createdAt' => $this->getCreatedAt(),
 		];

@@ -117,11 +117,31 @@ class MessageTasksControllerTest extends TestCase {
 					&& $task->getThreadRootId() === '<root@b>'
 					&& $task->getCalendarUri() === 'personal'
 					&& $task->getTaskUid() === 'uid-1'
+					// The CalDAV object name, which is a DIFFERENT string from
+					// the UID and is the one the Tasks app routes on.
+					&& $task->getTaskUri() === '85D8FD67.ics'
+					&& $task->getSummary() === 'Pay the invoice'
 					&& $task->getUserId() === 'user';
 			}))
 			->willReturnArgument(0);
 
-		$response = $this->controller->create(42, 'personal', 'uid-1', 'Pay the invoice');
+		$response = $this->controller->create(42, 'personal', 'uid-1', 'Pay the invoice', '85D8FD67.ics');
+
+		self::assertSame(Http::STATUS_CREATED, $response->getStatus());
+	}
+
+	public function testKeepsIndexingWhenTheObjectNameIsUnknown(): void {
+		// Nothing sends it yet from an older client, and a missing name is not
+		// a reason to lose the indicator: the reader falls back to <uid>.ics.
+		$this->mailManager->method('getMessage')->willReturn($this->message('<a@b>', '<root@b>'));
+		$this->mapper->expects(self::once())
+			->method('insert')
+			->with(self::callback(static function (MessageTask $task): bool {
+				return $task->getTaskUri() === null;
+			}))
+			->willReturnArgument(0);
+
+		$response = $this->controller->create(42, 'personal', 'uid-1', 'Pay the invoice', '  ');
 
 		self::assertSame(Http::STATUS_CREATED, $response->getStatus());
 	}

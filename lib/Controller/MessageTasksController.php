@@ -87,7 +87,11 @@ class MessageTasksController extends Controller {
 	 */
 	#[NoAdminRequired]
 	#[TrapError]
-	public function create(int $id, string $calendarUri, string $taskUid, ?string $summary = null): JSONResponse {
+	// $taskUri is appended rather than slotted in beside $taskUid on
+	// purpose: the request maps parameters by NAME, but every existing
+	// positional caller -- the tests among them -- would silently start
+	// passing its summary as the URI.
+	public function create(int $id, string $calendarUri, string $taskUid, ?string $summary = null, ?string $taskUri = null): JSONResponse {
 		if ($this->userId === null) {
 			return new JSONResponse([], Http::STATUS_UNAUTHORIZED);
 		}
@@ -113,6 +117,9 @@ class MessageTasksController extends Controller {
 		$task->setThreadRootId($message->getThreadRootId());
 		$task->setCalendarUri($calendarUri);
 		$task->setTaskUid($taskUid);
+		// The CalDAV object name is what the deep link needs; the UID is kept
+		// because it is what identifies the task itself, and the two differ.
+		$task->setTaskUri($taskUri === null || trim($taskUri) === '' ? null : $taskUri);
 		$task->setSummary($summary === null ? null : mb_substr($summary, 0, 255));
 		$task->setCreatedAt($this->timeFactory->getTime());
 

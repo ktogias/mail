@@ -4,7 +4,7 @@
  */
 
 import axios from '@nextcloud/axios'
-import { generateUrl } from '@nextcloud/router'
+import { generateUrl, getBaseUrl } from '@nextcloud/router'
 import { WorkClass } from './RequestCoordinator.js'
 
 /**
@@ -21,25 +21,60 @@ import { WorkClass } from './RequestCoordinator.js'
  * a slash, and %2F inside a path segment is rejected or silently decoded by web
  * servers before the router ever sees it.
  *
+ * ABSOLUTE, including scheme and host. This value is written into the VTODO's
+ * URL property, and an iCalendar URL is defined as a URI -- a bare path is not
+ * one. It also leaves the browser: the .ics can be synced to a phone or opened
+ * in Thunderbird, where `/apps/mail/…` resolves against nothing at all.
+ *
+ * (It still will not render as a hyperlink in the Tasks web UI. Tasks draws
+ * URL with the same plain editable-text component it uses for Location -- the
+ * only anchors in its bundle are vue-router's own -- so clicking it opens the
+ * editor. That is upstream, and not a reason to store a broken value here.)
+ *
  * @param {string} messageId the RFC 5322 Message-ID, angle brackets included
- * @return {string} an absolute-path URL into this app
+ * @return {string} an absolute URL into this app
  */
 export function messageDeepLink(messageId) {
-	return generateUrl('/apps/mail/message?messageId={messageId}', { messageId })
+	return getBaseUrl() + generateUrl('/apps/mail/message?messageId={messageId}', { messageId })
 }
 
 /**
  * Where the Tasks app shows a single task.
  *
+ * The last segment is the CalDAV object's NAME -- `85D8FD67-….ics` -- and not
+ * the VTODO's UID. Read off the Tasks app's own router: its route is
+ * `/calendars/:calendarId/tasks/:taskId` and every push it makes passes
+ * `task.uri` for that parameter. The two strings are different, because
+ * cdav-library names a newly created object with an identifier of its own, so
+ * the UID-based link resolved to nothing.
+ *
+ * No `#` either: Tasks runs on createWebHistory over `generateUrl('apps/tasks')`,
+ * so the path is real and a fragment would land on the calendar view instead.
+ *
  * @param {string} calendarUri the calendar the task lives in
- * @param {string} taskUid the task's iCalendar UID
+ * @param {string} taskUri the CalDAV object name, `.ics` included
  * @return {string} an absolute-path URL into the Tasks app
  */
-export function taskDeepLink(calendarUri, taskUid) {
-	return generateUrl('/apps/tasks/#/calendars/{calendarUri}/tasks/{taskUid}', {
+export function taskDeepLink(calendarUri, taskUri) {
+	return generateUrl('/apps/tasks/calendars/{calendarUri}/tasks/{taskUri}', {
 		calendarUri,
-		taskUid,
+		taskUri,
 	})
+}
+
+/**
+ * The CalDAV object name to link an indexed task by.
+ *
+ * Rows written before the name was recorded have only the UID. `<uid>.ics` is
+ * the conventional name, so this is right for anything the Tasks app created
+ * itself and wrong for the few this bug produced -- which cannot be recovered
+ * without walking the whole calendar, and are better re-created.
+ *
+ * @param {object} task an indexed task
+ * @return {string} the object name to put in the link
+ */
+export function taskUriOf(task) {
+	return task.taskUri || `${task.taskUid}.ics`
 }
 
 /**
@@ -49,13 +84,14 @@ export function taskDeepLink(calendarUri, taskUid) {
  * @param {object} link the task's identity
  * @param {string} link.calendarUri calendar the task was created in
  * @param {string} link.taskUid the task's iCalendar UID
+ * @param {string} [link.taskUri] the CalDAV object name, which is what links resolve on
  * @param {string} [link.summary] shown on the chip so it need not be fetched
  * @return {Promise<object>} the stored row
  */
-export async function linkTaskToMessage(messageId, { calendarUri, taskUid, summary }) {
+export async function linkTaskToMessage(messageId, { calendarUri, taskUid, taskUri, summary }) {
 	const { data } = await axios.post(
 		generateUrl('/apps/mail/api/messages/{messageId}/tasks', { messageId }),
-		{ calendarUri, taskUid, summary },
+		{ calendarUri, taskUid, taskUri, summary },
 		{ mailWorkClass: WorkClass.QUICK_MUTATION },
 	)
 	return data.task
