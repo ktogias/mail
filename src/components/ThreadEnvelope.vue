@@ -268,7 +268,12 @@
 							target="_blank"
 							:close-after-click="true">
 							<template #icon>
-								<TasksAppIcon :size="20" />
+								<!-- 16, not the 20 the outline glyphs beside it use:
+								     this mark is a SOLID tile, so at the same box it
+								     carries far more ink and reads bigger. 16px is
+								     also what Nextcloud sizes an action's own icon
+								     at (`background-size: 16px` on .action-link__icon). -->
+								<TasksAppIcon :size="16" />
 							</template>
 							{{ task.summary ? t('mail', 'Open task "{summary}"', { summary: task.summary }) : t('mail', 'Open task') }}
 						</NcActionLink>
@@ -1468,10 +1473,14 @@ export default {
 .app-content-list-item-star.task-icon-style {
 	display: inline-block;
 	position: absolute;
-	/* Bottom-start, mirroring the importance flag at top-start: 40px avatar
-	   less the 14px mark less the 3px the star and the flag are inset by. */
-	top: 23px;
-	inset-inline-start: 0;
+	/* Bottom-start, mirroring the importance flag at top-start. Inset by 2px
+	   on both edges: the flag and the star are glyphs with padding inside
+	   their own viewBox, so their boxes sit at 0 while what you SEE starts a
+	   couple of pixels in. This tile fills its box edge to edge, so at 0 it
+	   hung further out than the flag above it. Symmetric, so the bottom
+	   matches: 40px avatar less the 14px mark less 2px. */
+	top: 24px;
+	inset-inline-start: 2px;
 	z-index: 1;
 	/* No drop-shadow here. The ring is drawn by the icon itself as a real
 	   stroke (`haloed`), the way icon-important and favorite-icon-style below

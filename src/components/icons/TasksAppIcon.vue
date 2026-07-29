@@ -4,9 +4,21 @@
 -->
 
 <template>
-	<span class="tasks-app-icon" :style="{ width: `${size}px`, height: `${size}px` }" aria-hidden="true">
+	<!-- Structured exactly like a vue-material-design-icons component: a
+	     `material-design-icon` span with no inline size, wrapping an svg that
+	     carries the dimensions and `material-design-icon__svg`.
+
+	     Not cosmetic. Every icon inside an action menu is boxed by the
+	     framework's own rule -- `.action-link .material-design-icon { width:
+	     var(--default-clickable-area); height: … }` -- which is what puts all
+	     of them in one column and starts every label at the same x. Without
+	     the class this icon got no box, so it sat left of the column and its
+	     label began 24px early. And an inline width/height would beat that
+	     rule on specificity, so the size has to live on the svg. -->
+	<span class="material-design-icon tasks-app-icon" aria-hidden="true">
 		<svg
 			xmlns="http://www.w3.org/2000/svg"
+			class="material-design-icon__svg"
 			viewBox="0 0 32 32"
 			:width="size"
 			:height="size"

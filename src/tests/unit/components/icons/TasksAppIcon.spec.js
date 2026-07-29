@@ -79,6 +79,30 @@ describe('TasksAppIcon', () => {
 		expect(wrapper.html()).not.toContain('--color-primary')
 	})
 
+	it('presents itself as a material-design-icon, which is what aligns it', () => {
+		// Not decoration. Every icon inside an action menu is boxed by the
+		// framework's own rule -- `.action-link .material-design-icon { width:
+		// var(--default-clickable-area) }` -- and that box is what puts all of
+		// them in one column with their labels starting at the same x. Without
+		// the class this icon got no box at all: it sat left of every other
+		// icon in the menu and its label began 24px early.
+		const wrapper = mount(TasksAppIcon)
+
+		expect(wrapper.classes()).toContain('material-design-icon')
+		expect(wrapper.find('svg').classes()).toContain('material-design-icon__svg')
+	})
+
+	it('sizes the svg rather than the box, so the framework can box it', () => {
+		// An inline width/height on the span beats a class rule on specificity,
+		// which would leave the icon at its own size inside a menu that wants
+		// to give it the clickable area. The dimensions belong on the svg --
+		// where vue-material-design-icons puts them too.
+		const wrapper = mount(TasksAppIcon, { propsData: { size: 16 } })
+
+		expect(wrapper.attributes('style')).toBeUndefined()
+		expect(wrapper.find('svg').attributes('width')).toBe('16')
+	})
+
 	it('is hidden from assistive technology, which reads the label instead', () => {
 		// The marker's meaning lives in its aria-label/title; the icon
 		// repeating it would announce the same thing twice.
