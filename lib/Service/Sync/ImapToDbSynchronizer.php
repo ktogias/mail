@@ -414,10 +414,12 @@ class ImapToDbSynchronizer {
 			// of already-persisted messages alive at peak memory.
 			$imapMessageBatch = $imapMessages['messages'];
 			unset($imapMessages['messages']);
+			$persisted = 0;
 			while ($imapMessageBatch !== []) {
 				$chunk = array_splice($imapMessageBatch, 0, 500);
 				$messages = array_map(static fn (IMAPMessage $imapMessage) => $imapMessage->toDbMessage($mailbox->getId(), $account->getMailAccount()), $chunk);
 				$this->dbMapper->insertBulk($account, ...$messages);
+				$persisted += count($chunk);
 				$perf->step(sprintf('persist %d messages in database', count($chunk)));
 				// Free the memory
 				unset($messages, $chunk);
@@ -427,17 +429,26 @@ class ImapToDbSynchronizer {
 				// We might need more attempts to fill the cache
 				$loggingMailboxId = $account->getId() . ':' . $mailbox->getName();
 				$total = $imapMessages['total'];
-				// countByMailbox(), not count(findAllUids()): the latter pulls
-				// every UID of the mailbox into a PHP array only to take its
-				// length. On this deployment's largest INBOX that is 27k rows
-				// materialised for a number the database can produce itself,
-				// on the very path -- an incomplete initial sync -- that is
-				// already under memory pressure.
-				$cached = $this->dbMapper->countByMailbox($mailbox);
-				$perf->step('count cached UIDs');
 
+				// This message is DIAGNOSTIC and nothing reads it: every
+				// catcher either logs it under ['exception' => $e] at debug
+				// level or turns it into an HTTP status. At the deployment's
+				// loglevel it is therefore built and discarded.
+				//
+				// So it must not cost a query. It used to report the mailbox's
+				// total cached count -- first as count(findAllUids()), then
+				// (in .60) as countByMailbox(), which is the right way to ask
+				// the database for a number but is still an aggregate over
+				// every row of the mailbox. Measured 2026-07-29 on the 757k-row
+				// swco/Site Philosophy: an index-only scan taking 4.4s warm and
+				// 18s cold, once per backfill batch, for a string nobody reads.
+				//
+				// What this pass persisted is already in hand and answers the
+				// more useful question anyway -- whether the backfill is
+				// advancing. The absolute figure is one SQL query away for
+				// anyone who wants it.
 				$perf->end();
-				throw new IncompleteSyncException("Initial sync is not complete for $loggingMailboxId ($cached of $total messages cached).");
+				throw new IncompleteSyncException("Initial sync is not complete for $loggingMailboxId ($persisted messages cached this pass, $total on the server).");
 			}
 		} finally {
 			$noCacheClient->logout();

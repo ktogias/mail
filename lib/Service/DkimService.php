@@ -13,6 +13,7 @@ use OCA\Mail\Account;
 use OCA\Mail\Contracts\IDkimService;
 use OCA\Mail\Contracts\IDkimValidator;
 use OCA\Mail\Db\Mailbox;
+use OCA\Mail\Exception\MessageSourceUnavailableException;
 use OCA\Mail\Exception\ServiceException;
 use OCA\Mail\IMAP\IMAPClientFactory;
 use OCA\Mail\IMAP\MessageMapper;
@@ -53,7 +54,11 @@ class DkimService implements IDkimService {
 			);
 
 			if ($fullText === null) {
-				throw new ServiceException("Could not fetch message source for uid $id");
+				// The message is gone from IMAP -- moved or deleted since the
+				// cached copy was written. Ordinary, not a fault, and the
+				// caller needs to be able to say so without also swallowing a
+				// genuine IMAP failure.
+				throw MessageSourceUnavailableException::forUid($id);
 			}
 		} finally {
 			$client->logout();

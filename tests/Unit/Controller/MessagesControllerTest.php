@@ -29,6 +29,7 @@ use OCA\Mail\Db\Mailbox;
 use OCA\Mail\Db\Message as DbMessage;
 use OCA\Mail\Db\Tag;
 use OCA\Mail\Exception\ClientException;
+use OCA\Mail\Exception\MessageSourceUnavailableException;
 use OCA\Mail\Exception\ServiceException;
 use OCA\Mail\Http\AttachmentDownloadResponse;
 use OCA\Mail\Http\HtmlResponse;
@@ -1759,6 +1760,68 @@ class MessagesControllerTest extends TestCase {
 
 		$this->assertInstanceOf(JSONResponse::class, $actualResponse);
 		$this->assertEquals(['valid' => true], $actualResponse->getData());
+	}
+
+	public function testGetDkimReportsAVanishedMessageAsUnknownRatherThanAFailure(): void {
+		// A message that has been moved or deleted since the cached copy was
+		// written is an ORDINARY outcome, not a fault. It used to escape as an
+		// uncaught ServiceException, which #[TrapError] turned into a 500 and
+		// logged at ERROR level -- noise in the one place that should hold only
+		// real problems. Confirmed live 2026-07-29:
+		// "Could not fetch message source for uid 264986".
+		//
+		// 404 specifically: fetchMessageDkim() in the client already reads that
+		// as "no DKIM information" and returns undefined, so the badge simply
+		// does not render and the message body is unaffected.
+		[$account, $mailbox, $message] = $this->buildDkimFixture();
+
+		$this->dkimService->expects($this->once())
+			->method('validate')
+			->willThrowException(MessageSourceUnavailableException::forUid($message->getUid()));
+
+		$actualResponse = $this->controller->getDkim($message->getId());
+
+		$this->assertInstanceOf(JSONResponse::class, $actualResponse);
+		$this->assertEquals(Http::STATUS_NOT_FOUND, $actualResponse->getStatus());
+	}
+
+	public function testGetDkimStillLetsARealFailureSurface(): void {
+		// The other half, and the reason this is a distinct exception rather
+		// than a catch on ServiceException: a broken IMAP connection must stay
+		// an error. Swallowing everything as "unknown" would have made the
+		// logs quiet in exactly the case where they should not be.
+		[$account, $mailbox, $message] = $this->buildDkimFixture();
+
+		$this->dkimService->expects($this->once())
+			->method('validate')
+			->willThrowException(new ServiceException('IMAP is down'));
+
+		$this->expectException(ServiceException::class);
+		$this->controller->getDkim($message->getId());
+	}
+
+	/** @return array{0: Account, 1: \OCA\Mail\Db\Mailbox, 2: \OCA\Mail\Db\Message} */
+	private function buildDkimFixture(): array {
+		$mailAccount = new MailAccount();
+		$mailAccount->setId(100);
+		$mailAccount->setUserId($this->userId);
+		$account = new Account($mailAccount);
+
+		$mailbox = new \OCA\Mail\Db\Mailbox();
+		$mailbox->setId(4);
+		$mailbox->setAccountId($account->getId());
+		$mailbox->setName('FooBar');
+
+		$message = new \OCA\Mail\Db\Message();
+		$message->setId(4448);
+		$message->setMailboxId($mailbox->getId());
+		$message->setUid(264986);
+
+		$this->mailManager->method('getMessage')->willReturn($message);
+		$this->mailManager->method('getMailbox')->willReturn($mailbox);
+		$this->accountService->method('find')->willReturn($account);
+
+		return [$account, $mailbox, $message];
 	}
 
 	public function testGetDkimTrapsCapacityErrors(): void {

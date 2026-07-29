@@ -22,6 +22,7 @@ use OCA\Mail\Contracts\IUserPreferences;
 use OCA\Mail\Db\Message;
 use OCA\Mail\Db\Tag;
 use OCA\Mail\Exception\ClientException;
+use OCA\Mail\Exception\MessageSourceUnavailableException;
 use OCA\Mail\Exception\ServiceException;
 use OCA\Mail\Http\AttachmentDownloadResponse;
 use OCA\Mail\Http\HtmlResponse;
@@ -349,7 +350,26 @@ class MessagesController extends Controller {
 			return new JSONResponse([], Http::STATUS_FORBIDDEN);
 		}
 
-		$response = new JSONResponse(['valid' => $this->dkimService->validate($account, $mailbox, $message->getUid())]);
+		try {
+			$valid = $this->dkimService->validate($account, $mailbox, $message->getUid());
+		} catch (MessageSourceUnavailableException $e) {
+			// 404, not the 500 that #[TrapError] produces from an uncaught
+			// ServiceException. DKIM is decorative metadata: the client
+			// already reads 404 as "no DKIM information" and renders nothing,
+			// and the message body loads independently of this call.
+			//
+			// The 500 was logged at error level for what is an ordinary
+			// outcome -- the user opened a message the server no longer has --
+			// which is noise in exactly the place that should hold only real
+			// problems. Any OTHER failure still propagates and is still an
+			// error, so a genuinely broken IMAP connection stays visible.
+			$this->logger->debug('Cannot validate DKIM: the message is no longer on the server', [
+				'exception' => $e,
+			]);
+			return new JSONResponse([], Http::STATUS_NOT_FOUND);
+		}
+
+		$response = new JSONResponse(['valid' => $valid]);
 		$response->cacheFor(24 * 60 * 60, false, true);
 		return $response;
 	}

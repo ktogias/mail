@@ -130,6 +130,63 @@ class ImapToDbSynchronizerTest extends TestCase {
 		);
 	}
 
+	public function testAnIncompleteInitialSyncDoesNotPayForATotalNobodyReads(): void {
+		// The IncompleteSyncException message is diagnostic and no caller reads
+		// it -- every catcher logs it under ['exception' => $e] at DEBUG, or
+		// turns it into an HTTP status. At this deployment's loglevel it is
+		// built and discarded.
+		//
+		// It used to report the mailbox's whole cached count. Measured live on
+		// 2026-07-29 against the 757k-row swco/Site Philosophy, countByMailbox()
+		// was an index-only scan taking 4.4s warm and 18s cold -- once per
+		// backfill batch, for a string nobody reads. What this pass persisted
+		// is already in hand and answers the more useful question anyway.
+		$mailAccount = new MailAccount();
+		$mailAccount->setId(1);
+		$mailAccount->setUserId('user');
+		$account = new Account($mailAccount);
+		$mailbox = new Mailbox();
+		$mailbox->setId(190);
+		$mailbox->setName('Huge');
+		$mailbox->setAccountId(1);
+		$mailbox->setSelectable(true);
+
+		$capability = $this->createMock(Horde_Imap_Client_Data_Capability_Imap::class);
+		$capability->method('isEnabled')->with('QRESYNC')->willReturn(false);
+		$initialClient = $this->createMock(Horde_Imap_Client_Socket::class);
+		$initialClient->method('__get')->with('capability')->willReturn($capability);
+		$this->clientFactory->method('getClient')->willReturn($this->createStub(Horde_Imap_Client_Socket::class));
+		$this->dbMapper->method('findHighestUid')->willReturn(null);
+		$this->dbMapper->method('findLowestUid')->willReturn(null);
+
+		$dbMessage = new Message();
+		$imapMessage = $this->createMock(IMAPMessage::class);
+		$imapMessage->method('toDbMessage')->willReturn($dbMessage);
+		$this->imapMapper->method('findAll')->willReturn([
+			'messages' => [$imapMessage, $imapMessage, $imapMessage],
+			'all' => false,
+			'total' => 773157,
+		]);
+
+		// The whole point: no aggregate over the mailbox on this path.
+		$this->dbMapper->expects(self::never())->method('countByMailbox');
+
+		try {
+			$this->synchronizer->sync(
+				$account,
+				$initialClient,
+				$mailbox,
+				$this->createStub(LoggerInterface::class),
+			);
+			self::fail('an incomplete initial sync must throw IncompleteSyncException');
+		} catch (IncompleteSyncException $e) {
+			// Still says something useful: whether this pass advanced, and how
+			// far there is to go.
+			self::assertStringContainsString('3 messages cached this pass', $e->getMessage());
+			self::assertStringContainsString('773157 on the server', $e->getMessage());
+		}
+	}
+
 	public function testRepairSyncBackfillsAMissingNewestUidWithoutWaitingForAnotherMessage(): void {
 		$mailAccount = new MailAccount();
 		$mailAccount->setId(1);
