@@ -29,7 +29,20 @@ describe('TasksAppIcon', () => {
 		// The brand blue as a FILL, and the tick knocked out in white.
 		expect(svg).toContain('fill="#0082c9"')
 		expect(svg).toContain('fill="#fff"')
-		expect(svg).not.toContain('stroke=')
+		// No ring unless it is asked for: the halo is only wanted where the
+		// mark sits on an avatar.
+		expect(svg).toContain('stroke="none"')
+	})
+
+	it('rings itself in the background colour when haloed', () => {
+		// The star and the importance flag both carry
+		// stroke: var(--color-main-background) on the avatar so they stay
+		// legible over whatever colour it happens to be. A solid tile without
+		// one sat there looking heavier than either, which is what read as
+		// "too big" rather than merely different.
+		const svg = mount(TasksAppIcon, { propsData: { haloed: true } }).html()
+
+		expect(svg).toContain('stroke="var(--color-main-background)"')
 	})
 
 	it('draws an outline with a blue tick when outlined', () => {

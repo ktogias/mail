@@ -26,11 +26,15 @@
 				fill="none"
 				stroke="#0082c9"
 				stroke-width="3.93"
-				transform="translate(1.75 1.75) scale(0.890625)" />
+				transform="translate(1.75 1.75) scale(0.890625)"
+				:style="haloed ? { paintOrder: 'stroke', filter: 'drop-shadow(0 0 1.5px var(--color-main-background))' } : {}" />
 			<path
 				v-else
 				d="M5 0h22a5 5 0 0 1 5 5v22a5 5 0 0 1-5 5H5a5 5 0 0 1-5-5V5a5 5 0 0 1 5-5Z"
-				fill="#0082c9" />
+				fill="#0082c9"
+				:stroke="haloed ? 'var(--color-main-background)' : 'none'"
+				stroke-width="4"
+				transform="translate(2 2) scale(0.875)" />
 			<!-- One tick, one geometry. Only its colour changes: knocked out of
 			     the tile when filled, drawn in the brand blue when outlined. -->
 			<path
@@ -74,6 +78,21 @@ export default {
 		 * to look like the second kind.
 		 */
 		outlined: {
+			type: Boolean,
+			default: false,
+		},
+
+		/**
+		 * Draw a background-coloured ring around the mark.
+		 *
+		 * Only for the avatar badges. The star and the importance flag both
+		 * carry `stroke: var(--color-main-background)` there so they stay
+		 * legible over whatever colour the avatar happens to be, and a solid
+		 * tile without one sat on the avatar looking heavier than either of
+		 * them -- which is what made it read as too big rather than merely
+		 * different.
+		 */
+		haloed: {
 			type: Boolean,
 			default: false,
 		},

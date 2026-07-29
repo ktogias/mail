@@ -56,13 +56,15 @@
 					:title="t('mail', 'The conversation has a favorite message')" />
 				<TasksAppIcon
 					v-if="data.flags.hasTask"
-					:size="16"
+					:size="14"
+					haloed
 					class="app-content-list-item-star task-icon-style"
 					:title="t('mail', 'A task was created from this message')" />
 				<TasksAppIcon
 					v-else-if="data.flags.hasTaskInThread"
-					:size="16"
+					:size="14"
 					outlined
+					haloed
 					class="app-content-list-item-star task-icon-style thread-context-badge--task"
 					:title="t('mail', 'The conversation has a message with a task')" />
 				<ImportantIcon
@@ -1970,11 +1972,16 @@ export default {
 .app-content-list-item-star.task-icon-style {
 	display: inline-block;
 	position: absolute;
-	top: 26px;
+	/* Bottom-start, mirroring the importance flag at top-start: 40px avatar
+	   less the 14px mark less the 3px the star and the flag are inset by. */
+	top: 23px;
 	inset-inline-start: 0;
 	z-index: 1;
-	filter: drop-shadow(0 0 1px var(--color-main-background))
-		drop-shadow(0 0 1px var(--color-main-background));
+	/* No drop-shadow here. The ring is drawn by the icon itself as a real
+	   stroke (`haloed`), the way icon-important and favorite-icon-style below
+	   do it -- two stacked shadows were an imitation of that ring, and a
+	   blurry one, which is what made this mark sit heavier on the avatar than
+	   the two it is meant to line up with. */
 }
 
 .one-line.favorite-icon-style {

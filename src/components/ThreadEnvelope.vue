@@ -50,13 +50,15 @@
 					@click.prevent="hasWriteAcl ? onToggleFlagged() : false" />
 				<TasksAppIcon
 					v-if="envelope.flags.hasTask"
-					:size="16"
+					:size="14"
+					haloed
 					class="app-content-list-item-star task-icon-style"
 					:title="t('mail', 'A task was created from this message')" />
 				<TasksAppIcon
 					v-else-if="envelope.flags.hasTaskInThread"
-					:size="16"
+					:size="14"
 					outlined
+					haloed
 					class="app-content-list-item-star task-icon-style thread-context-badge--task"
 					:title="t('mail', 'The conversation has a message with a task')" />
 				<JunkIcon
@@ -81,24 +83,7 @@
 				@touchmove.passive="cancelHoverPrefetch">
 				<div class="envelope__header__left__sender-subject-tags">
 					<div class="sender" :class="{ 'sender--expanded': expanded }">
-						<span>{{ envelope.from && envelope.from[0] ? envelope.from[0].label : '' }}</span>
-						<!-- Immediately after the message's own title line and
-						     left-aligned, the way the marker sits after the
-						     thread's subject. Filled, because this message IS
-						     the one the task came from -- the outlined form is
-						     reserved for "somewhere in this conversation". -->
-						<a
-							v-for="task in tasks"
-							:key="task.taskUid"
-							class="envelope__task-marker"
-							:href="taskUrl(task)"
-							:aria-label="t('mail', 'Open the task created from this message')"
-							:title="t('mail', 'Open the task created from this message')"
-							target="_blank"
-							rel="noopener noreferrer"
-							@click.stop>
-							<TasksAppIcon :size="16" />
-						</a>
+						{{ envelope.from && envelope.from[0] ? envelope.from[0].label : '' }}
 					</div>
 					<!-- The sender-address / details toggle sits in the sender
 					     cell (natural, fits the UI). It's the discoverable way
@@ -261,6 +246,32 @@
 							</template>
 							{{ t('mail', 'Delete message') }}
 						</NcActionButton>
+						<!-- Opening the task lives HERE, in the message's own
+						     overflow menu, rather than as an icon beside the
+						     sender. That inline marker had nowhere to go at phone
+						     widths: the sender cell is the first thing this layout
+						     squeezes, so the affordance vanished on exactly the
+						     device that could least afford to lose it -- there is
+						     no hover on a touch screen to reveal it either.
+
+						     An action in the ... menu is what Nextcloud uses for
+						     anything secondary and per-item: it is labelled rather
+						     than guessed at, it survives every width because the
+						     menu collapses instead of clipping, and it is where
+						     "Create task" already lives, so the way back sits next
+						     to the way in. The avatar badge keeps saying THAT there
+						     is a task; the menu carries the verb. -->
+						<NcActionLink
+							v-for="task in tasks"
+							:key="task.taskUid"
+							:href="taskUrl(task)"
+							target="_blank"
+							:close-after-click="true">
+							<template #icon>
+								<TasksAppIcon :size="20" />
+							</template>
+							{{ task.summary ? t('mail', 'Open task "{summary}"', { summary: task.summary }) : t('mail', 'Open task') }}
+						</NcActionLink>
 						<MenuEnvelope
 							class="app-content-list-item-menu"
 							:envelope="envelope"
@@ -430,7 +441,7 @@ import axios from '@nextcloud/axios'
 import { loadState } from '@nextcloud/initial-state'
 import moment from '@nextcloud/moment'
 import { generateUrl } from '@nextcloud/router'
-import { NcActionButton, NcButton } from '@nextcloud/vue'
+import { NcActionButton, NcActionLink, NcButton } from '@nextcloud/vue'
 import { mapStores } from 'pinia'
 import NcActions from '@nextcloud/vue/components/NcActions'
 import NcActionText from '@nextcloud/vue/components/NcActionText'
@@ -515,6 +526,7 @@ export default {
 		Avatar,
 		RecipientBubble,
 		NcActionButton,
+		NcActionLink,
 		NcButton,
 		Error,
 		IconFavorite,
@@ -1452,39 +1464,22 @@ export default {
 
 <style lang="scss" scoped>
 
-.sender {
-	display: flex;
-	align-items: center;
-	gap: calc(var(--default-grid-baseline, 8px));
-}
-
-.envelope__task-marker {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	flex: 0 0 auto;
-	width: 24px;
-	height: 24px;
-	border-radius: var(--border-radius, 4px);
-	text-decoration: none !important;
-}
-
 /* Bottom-start on the avatar: important holds top-start, the star top-end. */
 .app-content-list-item-star.task-icon-style {
 	display: inline-block;
 	position: absolute;
-	top: 26px;
+	/* Bottom-start, mirroring the importance flag at top-start: 40px avatar
+	   less the 14px mark less the 3px the star and the flag are inset by. */
+	top: 23px;
 	inset-inline-start: 0;
 	z-index: 1;
-	filter: drop-shadow(0 0 1px var(--color-main-background))
-		drop-shadow(0 0 1px var(--color-main-background));
+	/* No drop-shadow here. The ring is drawn by the icon itself as a real
+	   stroke (`haloed`), the way icon-important and favorite-icon-style below
+	   do it -- two stacked shadows were an imitation of that ring, and a
+	   blurry one, which is what made this mark sit heavier on the avatar than
+	   the two it is meant to line up with. */
 }
 
-.envelope__task-marker:hover,
-.envelope__task-marker:focus-visible {
-	background-color: var(--color-background-hover);
-	color: var(--color-main-text) !important;
-}
 	.sender {
 		margin-inline-start: calc(var(--default-grid-baseline) * 3);
 

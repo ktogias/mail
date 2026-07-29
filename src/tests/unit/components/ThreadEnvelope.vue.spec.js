@@ -1003,4 +1003,84 @@ describe('ThreadEnvelope', () => {
 			expect(store.toggleEnvelopeJunk).not.toHaveBeenCalled()
 		})
 	})
+	describe('the way back to a task', () => {
+		/**
+		 * Mount an expanded message that has one task made from it.
+		 *
+		 * @param {object[]} tasks tasks indexed against this message
+		 * @return {object} the mounted message
+		 */
+		const mountWithTasks = (tasks) => {
+			const store = useMainStore()
+			store.getAccount = vi.fn().mockReturnValue({ name: 'Test', emailAddress: 'test@test.com' })
+			store.fetchMessage = vi.fn().mockResolvedValue({
+				databaseId: 999,
+				hasHtmlBody: false,
+				attachments: [],
+				dkimValid: true,
+				itineraries: [],
+			})
+			return shallowMount(ThreadEnvelope, {
+				propsData: {
+					envelope: {
+						accountId: 123,
+						databaseId: 999,
+						messageId: '<a@b>',
+						from: [{ email: 'info@test.com', label: 'Info' }],
+						to: [],
+						cc: [],
+						flags: { seen: true, flagged: false, $junk: false, hasTask: true },
+						subject: '',
+						dateInt: 1692200926180,
+					},
+					threadSubject: '',
+					threadIndex: 0,
+					expanded: true,
+					tasks,
+				},
+				computed: {
+					mailbox() {
+						return { myAcls: undefined, specialRole: '' }
+					},
+					archiveMailbox() {
+						return { myAcls: undefined }
+					},
+				},
+				localVue,
+			})
+		}
+
+		const task = { taskUid: 'uid-1', calendarUri: 'personal', summary: 'Send the form back', messageId: '<a@b>' }
+
+		it('offers opening the task from the message action menu', () => {
+			// This affordance used to be an icon beside the sender, and at phone
+			// widths the sender cell is the first thing the layout squeezes: the
+			// link was pushed out entirely, with no hover on a touch screen to
+			// bring it back. The action menu collapses rather than clips, so it
+			// survives every width -- and it is where "Create task" already
+			// lives, which puts the way back beside the way in.
+			const view = mountWithTasks([task])
+
+			const link = view.findAllComponents({ name: 'NcActionLink' })
+				.filter((action) => action.attributes('href')?.includes('uid-1'))
+
+			expect(link).toHaveLength(1)
+			expect(link.at(0).text()).toContain('Send the form back')
+		})
+
+		it('offers nothing when no task was made from this message', () => {
+			expect(mountWithTasks([]).findAllComponents({ name: 'NcActionLink' })).toHaveLength(0)
+		})
+
+		it('keeps the way back out of the sender cell, which is what mobile clips', () => {
+			// Asserting on the absence of the old placement rather than on the
+			// new one alone: putting a second copy back beside the sender would
+			// pass every test above while reintroducing exactly the bug.
+			const sender = mountWithTasks([task]).find('.sender')
+
+			expect(sender.exists()).toBe(true)
+			expect(sender.findAll('a')).toHaveLength(0)
+			expect(sender.html()).not.toContain('uid-1')
+		})
+	})
 })
