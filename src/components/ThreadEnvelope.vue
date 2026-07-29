@@ -118,25 +118,24 @@
 					</div>
 				</div>
 			</div>
-			<!-- This is the message a task was made from. Invisible until the
-			     user arrives here -- which is exactly when it is useful, and
-			     why it is not redundant with the chip in the thread header:
-			     that one says a task exists and brings you here, this one says
-			     you have arrived and opens it. -->
-			<div v-if="tasks.length" class="envelope__tasks">
+			<div class="right">
+				<!-- This is the message a task was made from. Icon only, in the
+				     same row and at the same size as the S/MIME lock beside it
+				     -- the app marks message state with bare icons, and this is
+				     message state. The label it used to carry was the task's
+				     summary, which defaults to the subject, so it repeated the
+				     header two lines up. -->
 				<a
 					v-for="task in tasks"
 					:key="task.taskUid"
-					class="envelope__tasks__chip"
+					class="envelope__task-marker"
 					:href="taskUrl(task)"
+					:aria-label="t('mail', 'Open the task created from this message')"
 					:title="t('mail', 'Open the task created from this message')"
 					target="_blank"
 					rel="noopener noreferrer">
-					<CheckIcon :size="16" />
-					<span>{{ task.summary || t('mail', 'Task') }}</span>
+					<CheckIcon :size="18" />
 				</a>
-			</div>
-			<div class="right">
 				<Moment class="timestamp" :timestamp="envelope.dateInt" />
 				<template v-if="expanded">
 					<NcActions v-if="smimeData.isSigned || smimeData.isEncrypted">
@@ -1442,36 +1441,21 @@ export default {
 
 <style lang="scss" scoped>
 
-.envelope__tasks {
-	display: flex;
-	align-items: center;
-	gap: var(--default-grid-baseline, 8px);
-	flex-wrap: wrap;
-	padding-inline: calc(var(--default-grid-baseline, 8px) * 2);
-}
-
-.envelope__tasks__chip {
+.envelope__task-marker {
 	display: inline-flex;
 	align-items: center;
-	gap: calc(var(--default-grid-baseline, 8px) / 2);
-	max-width: 260px;
-	padding: 2px calc(var(--default-grid-baseline, 8px) * 1.5);
-	border-radius: var(--border-radius-pill, 16px);
-	background-color: var(--color-background-dark);
-	color: var(--color-main-text) !important;
-	font-size: 90%;
+	justify-content: center;
+	width: var(--default-clickable-area, 34px);
+	height: var(--default-clickable-area, 34px);
+	border-radius: var(--border-radius-element, 50%);
+	color: var(--color-text-maxcontrast) !important;
 	text-decoration: none !important;
 }
 
-.envelope__tasks__chip span {
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-}
-
-.envelope__tasks__chip:hover,
-.envelope__tasks__chip:focus-visible {
+.envelope__task-marker:hover,
+.envelope__task-marker:focus-visible {
 	background-color: var(--color-background-hover);
+	color: var(--color-main-text) !important;
 }
 	.sender {
 		margin-inline-start: calc(var(--default-grid-baseline) * 3);

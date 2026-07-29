@@ -1678,7 +1678,9 @@ describe('Thread: tasks made from a message', () => {
 			mocks: { $route: { params: { threadId: 100 } } },
 			localVue,
 		})
-		view.setData({ threadTasks: tasks })
+		// loading starts true, and the header only renders past the Loading
+		// branch -- the DOM assertions below need the real markup.
+		view.setData({ threadTasks: tasks, loading: false })
 		vi.spyOn(view.vm, 'thread', 'get').mockReturnValue(thread)
 		return view
 	}
@@ -1725,6 +1727,25 @@ describe('Thread: tasks made from a message', () => {
 		await view.vm.$nextTick()
 
 		expect(spy).toHaveBeenCalledTimes(1)
+	})
+
+	it('marks the conversation with an icon, not the subject spelled out again', async () => {
+		// The task's summary defaults to the SUBJECT, so a labelled pill
+		// restated the line directly above it -- and the message chip restated
+		// it a third time. Every other state marker in this app is a bare icon
+		// with a tooltip; this one had no business being louder.
+		const view = mountWithTasks(
+			[{ databaseId: 1, messageId: '<a@b>' }],
+			[{ taskUid: 'uid-1', messageId: '<a@b>', calendarUri: 'personal', summary: 'Έντυπα πληρωμών' }],
+		)
+		await view.vm.$nextTick()
+
+		const marker = view.find('.thread-tasks__marker')
+		expect(marker.exists()).toBe(true)
+		expect(marker.text()).toBe('')
+		// The words still exist, for anyone who cannot see the icon.
+		expect(marker.attributes('aria-label')).toBeTruthy()
+		expect(marker.attributes('title')).toBeTruthy()
 	})
 
 	it('does nothing when the source message has left the thread', async () => {

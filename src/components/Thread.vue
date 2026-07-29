@@ -33,7 +33,18 @@
 						     the instructions the task is about are usually IN
 						     that message, and hunting for it defeats the link.
 						     Several tasks means a menu rather than a jump to an
-						     arbitrary one, the way GitHub lists linked issues. -->
+						     arbitrary one, the way GitHub lists linked issues.
+
+						     Icon only. The task's summary DEFAULTS TO THE SUBJECT,
+						     so a labelled pill restated the line directly above it
+						     -- and again on the message chip, putting the same
+						     words on screen three times. Every other state marker
+						     in this app is a bare icon with a tooltip (the answered
+						     arrow, the attachment clip, the S/MIME lock); this one
+						     had no business being louder. The check mark is the
+						     Tasks app's own icon, which is what ties the two
+						     together, and the count goes in an NcCounterBubble
+						     rather than into prose. -->
 						<div v-if="threadTasks.length" class="thread-tasks">
 							<NcActions
 								v-if="threadTasks.length > 1"
@@ -56,12 +67,13 @@
 							<button
 								v-else
 								type="button"
-								class="thread-tasks__chip"
+								class="thread-tasks__marker"
+								:aria-label="threadTasksLabel"
 								:title="threadTasksLabel"
 								@click="revealTaskSource(threadTasks[0])">
 								<CheckIcon :size="16" />
-								<span>{{ threadTasks[0].summary || t('mail', 'Task') }}</span>
 							</button>
+							<NcCounterBubble v-if="threadTasks.length > 1" :count="threadTasks.length" />
 						</div>
 					</div>
 					<NcActions
@@ -255,6 +267,7 @@ import { NcAppContentDetails as AppContentDetails, NcButton as ButtonVue, NcActi
 import { mapStores } from 'pinia'
 import NcActionInput from '@nextcloud/vue/components/NcActionInput'
 import NcActions from '@nextcloud/vue/components/NcActions'
+import NcCounterBubble from '@nextcloud/vue/components/NcCounterBubble'
 import AlarmIcon from 'vue-material-design-icons/Alarm.vue'
 import AlertOctagonIcon from 'vue-material-design-icons/AlertOctagonOutline.vue'
 import ArchiveIcon from 'vue-material-design-icons/ArchiveArrowDownOutline.vue'
@@ -294,6 +307,7 @@ export default {
 		NcActionButton,
 		NcActionInput,
 		NcActionSeparator,
+		NcCounterBubble,
 		AlarmIcon,
 		AlertOctagonIcon,
 		ArchiveIcon,
@@ -1911,34 +1925,30 @@ $mail-thread-header-inline-start: calc(var(--default-grid-baseline) * 14 + var(-
 }
 
 .thread-tasks {
-	display: flex;
-	align-items: center;
-	gap: var(--default-grid-baseline, 8px);
-	margin-block-start: calc(var(--default-grid-baseline, 8px) / 2);
-}
-
-.thread-tasks__chip {
 	display: inline-flex;
 	align-items: center;
 	gap: calc(var(--default-grid-baseline, 8px) / 2);
-	max-width: 320px;
-	padding: 2px calc(var(--default-grid-baseline, 8px) * 1.5);
+}
+
+/* Sized like the other icon affordances in a header row rather than like a
+   button: a statement first, a target second. */
+.thread-tasks__marker {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: var(--default-clickable-area, 34px);
+	height: var(--default-clickable-area, 34px);
+	padding: 0;
 	border: none;
-	border-radius: var(--border-radius-pill, 16px);
-	background-color: var(--color-background-dark);
-	color: var(--color-main-text);
-	font-size: 90%;
+	border-radius: var(--border-radius-element, 50%);
+	background-color: transparent;
+	color: var(--color-text-maxcontrast);
 	cursor: pointer;
 }
 
-.thread-tasks__chip span {
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-}
-
-.thread-tasks__chip:hover,
-.thread-tasks__chip:focus-visible {
+.thread-tasks__marker:hover,
+.thread-tasks__marker:focus-visible {
 	background-color: var(--color-background-hover);
+	color: var(--color-main-text);
 }
 </style>
