@@ -272,8 +272,19 @@
 				</div>
 			</NcDialog>
 		</div>
-		<!-- Filter buttons -->
-		<div v-if="showButtons || persistentFilters" class="filter-buttons">
+		<!-- Quick filters. Revealed by focusing the search box and hidden
+		     again on blur -- EXCEPT while one of them is on, which
+		     hideButtonsWithDelay() checks. That exception is the whole reason
+		     this can be hidden safely: a filter silently narrowing the list
+		     from behind a collapsed row would be the one genuinely bad
+		     outcome, and it cannot happen.
+
+		     .39 pinned this row open in the Priority Inbox. That was
+		     collateral: its actual job was removing a duplicate "Unread only"
+		     checkbox from the overview bar, and that stands either way. The
+		     row itself is chrome the user has to look past on every screen to
+		     reach the messages, for filters wanted occasionally. -->
+		<div v-if="showButtons" class="filter-buttons">
 			<NcChip
 				:text="t('mail', 'Has attachment')"
 				:no-close="true"
@@ -341,21 +352,6 @@ export default {
 		accountId: {
 			type: Number,
 			required: true,
-		},
-
-		/**
-		 * Keep the quick-filter row visible without focusing the search box.
-		 *
-		 * The Priority Inbox needs it: its unread filter used to be a separate
-		 * checkbox in the overview bar, which meant one filter with two
-		 * controls, in two widget languages, in two places -- and the checkbox
-		 * only ever delegated to setUnread() here anyway. Removing it leaves
-		 * this row as the single home for "Unread", beside its siblings
-		 * "Has attachment" and "To me", which is the point.
-		 */
-		persistentFilters: {
-			type: Boolean,
-			default: false,
 		},
 	},
 

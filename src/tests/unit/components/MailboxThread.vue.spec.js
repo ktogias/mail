@@ -124,12 +124,22 @@ describe('MailboxThread', () => {
 	// One filter, one control, one place. The unread filter used to exist
 	// twice: a checkbox in the Priority overview and a chip in the search
 	// filter row, in two widget languages, with the checkbox delegating to the
-	// chip anyway. Keeping the filter row open in the Priority Inbox is what
-	// makes removing the checkbox an improvement rather than a loss.
-	it('keeps the search filter row open in the Priority Inbox', () => {
+	// chip anyway. Removing the checkbox is what made that true, and it stands
+	// on its own -- .39 additionally pinned the filter row open, which was
+	// collateral rather than the point, and is chrome on every screen for
+	// filters wanted occasionally. SearchMessages now decides for itself when
+	// to show them; see its own spec for the part that matters, which is that
+	// an ACTIVE filter is never hidden.
+	it('does not force the search filter row open', () => {
+		// attributes(), not props(). A binding for a prop the component no
+		// longer declares lands in $attrs, so props() cannot see it and an
+		// assertion there passes however the binding is written -- proven by
+		// re-adding :persistent-filters and watching this test stay green.
 		const wrapper = mountThread()
+		const search = wrapper.findComponent({ name: 'SearchMessages' })
 
-		expect(wrapper.findComponent({ name: 'SearchMessages' }).props('persistentFilters')).toBe(true)
+		expect(search.props()).not.toHaveProperty('persistentFilters')
+		expect(search.attributes()).not.toHaveProperty('persistent-filters')
 	})
 
 	it("shows the 'Other' section once it actually has envelopes, even if Important is empty", () => {

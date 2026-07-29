@@ -17,7 +17,6 @@
 						ref="searchMessages"
 						:mailbox="mailbox"
 						:account-id="account.accountId"
-						:persistent-filters="mailbox.isPriorityInbox"
 						@search-changed="onUpdateSearchQuery" />
 					<PriorityInboxOverview
 						v-if="mailbox.isPriorityInbox"
