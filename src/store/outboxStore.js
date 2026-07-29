@@ -8,7 +8,8 @@ import { defineStore } from 'pinia'
 import Vue from 'vue'
 import logger from '../logger.js'
 import * as OutboxService from '../service/OutboxService.js'
-import { showError, showSuccess, showUndo } from '../util/toast.js'
+import { deferWithUndo } from '../service/UndoableAction.js'
+import { showError, showSuccess } from '../util/toast.js'
 import { UNDO_DELAY } from './constants.js'
 import useMainStore from './mainStore.js'
 
@@ -170,45 +171,52 @@ export default defineStore('outbox', {
 		 *
 		 * @param {object} data Action data
 		 * @param {number} data.id Id of outbox message to send
-		 * @return {Promise<boolean>} Resolves to false if sending was skipped. Resolves after UNDO_DELAY has elapsed and the message dispatch was triggered. Warning: This might take a long time, depending on UNDO_DELAY.
+		 * @return {Promise<boolean>} Resolves to false if sending was skipped or undone. Resolves after the undo window has elapsed and the message dispatch was triggered -- which may be longer than UNDO_DELAY, because the window is held while the pointer rests on the toast.
 		 */
 		async sendMessageWithUndo({ id }) {
 			this.mainStore.hideMessageComposerMutation()
 
-			return new Promise((resolve, reject) => {
-				const message = this.getMessage(id)
+			const message = this.getMessage(id)
+			let sent = false
 
-				showUndo(
-					t('mail', 'Sending message…'),
-					async () => {
-						logger.info('Attempting to stop sending message ' + message.id)
-						const stopped = await this.stopMessage({ message })
-						logger.info('Message ' + message.id + ' stopped', { message: stopped })
-						await this.mainStore.startComposerSession({
-							type: 'outbox',
-							data: { ...message },
-						}, { root: true })
-					},
-					{
-						timeout: UNDO_DELAY,
-						close: true,
-					},
-				)
-
-				setTimeout(async () => {
+			// deferWithUndo() rather than a second hand-rolled copy of the
+			// pattern. This one had drifted in the way copies do: its toast ran
+			// toastify's clock while a separate setTimeout ran the send, so the
+			// two could not be paused together, and it got none of the
+			// hover-to-hold, swipe-to-dismiss or Escape handling the delete /
+			// archive / junk / move / snooze family has.
+			//
+			// It also relied on a side effect rather than saying what it meant:
+			// undoing did not cancel the send, it cleared `sendAt` and trusted
+			// sendMessage(force: false) to notice and skip. That still holds --
+			// stopMessage() is what the server needs -- but the send is now
+			// simply not attempted, which is what was always intended.
+			await deferWithUndo({
+				message: t('mail', 'Sending message…'),
+				onUndo: async () => {
+					logger.info('Attempting to stop sending message ' + message.id)
+					const stopped = await this.stopMessage({ message })
+					logger.info('Message ' + message.id + ' stopped', { message: stopped })
+					await this.mainStore.startComposerSession({
+						type: 'outbox',
+						data: { ...message },
+					}, { root: true })
+				},
+				action: async () => {
 					try {
-						const wasSent = await this.sendMessage({ id: message.id, force: false })
-						if (wasSent) {
+						sent = await this.sendMessage({ id: message.id, force: false })
+						if (sent) {
 							showSuccess(t('mail', 'Message sent'))
 						}
-						resolve(wasSent)
 					} catch (error) {
 						showError(t('mail', 'Could not send message'))
 						logger.error('Could not delay-send message ' + message.id, { message })
-						reject(error)
+						throw error
 					}
-				}, UNDO_DELAY)
+				},
 			})
+
+			return sent
 		},
 
 		/**

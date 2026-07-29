@@ -20,6 +20,9 @@ import { extname, join, relative } from 'path'
 // toast nobody can dismiss.
 const SRC_DIR = join(process.cwd(), 'src')
 const OWNER = join('util', 'toast.js')
+// Raising a toast is one thing; the undo WINDOW is another, and it has its
+// own owner. Everything undoable goes through deferWithUndo().
+const UNDO_OWNER = join('service', 'UndoableAction.js')
 const SCANNED_EXTENSIONS = new Set(['.js', '.vue', '.ts'])
 
 // Only the toast-raising functions. TOAST_* are plain numbers and the dialog
@@ -73,6 +76,31 @@ describe('Raising a toast has a single owner', () => {
 		}
 
 		expect(offenders).toEqual([])
+	})
+
+	it('has one implementation of the undo window, not one per feature', () => {
+		// Placement and the close button are generic because they are CSS and a
+		// wrapper. The undo BEHAVIOUR is not automatic: hold-on-hover, the
+		// single clock, swipe-to-dismiss and the hold cap all live in
+		// deferWithUndo(), and anything calling showUndo() directly gets none
+		// of them.
+		//
+		// outboxStore's "Sending message…" was exactly that -- a second copy
+		// that had already drifted, running toastify's clock against its own
+		// setTimeout so the two could not be paused together. It was found by
+		// asking this question rather than by anyone noticing.
+		const callers = []
+		for (const file of files) {
+			const relativePath = relative(SRC_DIR, file)
+			if (relativePath === OWNER || relativePath === UNDO_OWNER || relativePath.startsWith('tests')) {
+				continue
+			}
+			if (/\bshowUndo\s*\(/.test(readFileSync(file, 'utf8'))) {
+				callers.push(`${relativePath} calls showUndo() directly; use deferWithUndo() from service/UndoableAction.js`)
+			}
+		}
+
+		expect(callers).toEqual([])
 	})
 
 	it('keeps the owner defaulting every toast to dismissible', () => {
