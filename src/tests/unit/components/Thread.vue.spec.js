@@ -1748,6 +1748,23 @@ describe('Thread: tasks made from a message', () => {
 		expect(marker.attributes('title')).toBeTruthy()
 	})
 
+	it('uses the OUTLINED task icon in the header, the way StarOutline is used', async () => {
+		// The list already distinguishes "this message is starred" (filled
+		// Star) from "the conversation contains a starred message"
+		// (StarOutline). The header is making the second kind of statement, so
+		// it has to look like the second kind -- otherwise the app teaches two
+		// different rules for the same idea. The MESSAGE marker stays filled.
+		const view = mountWithTasks(
+			[{ databaseId: 1, messageId: '<a@b>' }],
+			[{ taskUid: 'uid-1', messageId: '<a@b>', calendarUri: 'personal' }],
+		)
+		await view.vm.$nextTick()
+
+		const icon = view.findComponent({ name: 'TasksAppIcon' })
+		expect(icon.exists()).toBe(true)
+		expect(icon.props('outlined')).toBe(true)
+	})
+
 	it('does nothing when the source message has left the thread', async () => {
 		// Moved, deleted, or the thread was re-cut by a subject merge. The
 		// index cannot know, and this is not worth interrupting anyone over.

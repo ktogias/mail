@@ -26,7 +26,8 @@
 							@keydown.space.prevent="subjectExpanded = !subjectExpanded">
 							{{ threadSubject }}
 						</h2>
-						<!-- A conversation can carry tasks made from any of its
+						<div v-if="threadTasks.length" class="thread-tasks">
+							<!-- A conversation can carry tasks made from any of its
 						     messages. The chip says so where the subject is,
 						     and takes the user to the message it came from --
 						     which in a forty-message thread is the whole point:
@@ -45,13 +46,12 @@
 						     Tasks app's own icon, which is what ties the two
 						     together, and the count goes in an NcCounterBubble
 						     rather than into prose. -->
-						<div v-if="threadTasks.length" class="thread-tasks">
 							<NcActions
 								v-if="threadTasks.length > 1"
 								:aria-label="threadTasksLabel"
 								variant="tertiary">
 								<template #icon>
-									<CheckIcon :size="16" />
+									<TasksAppIcon :size="16" outlined />
 								</template>
 								<NcActionButton
 									v-for="task in threadTasks"
@@ -59,7 +59,7 @@
 									:close-after-click="true"
 									@click="revealTaskSource(task)">
 									<template #icon>
-										<CheckIcon :size="16" />
+										<TasksAppIcon :size="16" outlined />
 									</template>
 									{{ task.summary || t('mail', 'Task') }}
 								</NcActionButton>
@@ -67,11 +67,11 @@
 							<button
 								v-else
 								type="button"
-								class="thread-tasks__marker"
+								class="thread-tasks__marker thread-context-badge--task"
 								:aria-label="threadTasksLabel"
 								:title="threadTasksLabel"
 								@click="revealTaskSource(threadTasks[0])">
-								<CheckIcon :size="16" />
+								<TasksAppIcon :size="16" outlined />
 							</button>
 							<NcCounterBubble v-if="threadTasks.length > 1" :count="threadTasks.length" />
 						</div>
@@ -281,6 +281,7 @@ import EmailUnreadIcon from 'vue-material-design-icons/EmailOutline.vue'
 import OpenInNewIcon from 'vue-material-design-icons/OpenInNew.vue'
 import DeleteIcon from 'vue-material-design-icons/TrashCanOutline.vue'
 import Error from './Error.vue'
+import TasksAppIcon from './icons/TasksAppIcon.vue'
 import Loading from './Loading.vue'
 import MoveModal from './MoveModal.vue'
 import ThreadEnvelope from './ThreadEnvelope.vue'
@@ -308,6 +309,7 @@ export default {
 		NcActionInput,
 		NcActionSeparator,
 		NcCounterBubble,
+		TasksAppIcon,
 		AlarmIcon,
 		AlertOctagonIcon,
 		ArchiveIcon,
@@ -1749,6 +1751,12 @@ $mail-thread-header-inline-start: calc(var(--default-grid-baseline) * 14 + var(-
 
 #mail-thread-header-fields {
 	min-width: 0;
+	// The subject and its markers share one line. h2 is a block, so without
+	// this the marker dropped onto a line of its own underneath -- which was
+	// both the reported clutter and a second row of chrome above the message.
+	display: flex;
+	align-items: center;
+	gap: calc(var(--default-grid-baseline, 8px));
 	// while scrolling, the back button overlaps with subject on small screen
 	// envelope margin (2×baseline) + border (2px) + header padding (--border-radius-container) + avatar (10×baseline) + sender margin (2×baseline)
 	padding-inline-start: $mail-thread-header-inline-start;
@@ -1936,19 +1944,17 @@ $mail-thread-header-inline-start: calc(var(--default-grid-baseline) * 14 + var(-
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	width: var(--default-clickable-area, 34px);
-	height: var(--default-clickable-area, 34px);
+	width: 24px;
+	height: 24px;
 	padding: 0;
 	border: none;
-	border-radius: var(--border-radius-element, 50%);
+	border-radius: var(--border-radius, 4px);
 	background-color: transparent;
-	color: var(--color-text-maxcontrast);
 	cursor: pointer;
 }
 
 .thread-tasks__marker:hover,
 .thread-tasks__marker:focus-visible {
 	background-color: var(--color-background-hover);
-	color: var(--color-main-text);
 }
 </style>

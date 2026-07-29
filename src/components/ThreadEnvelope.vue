@@ -134,7 +134,7 @@
 					:title="t('mail', 'Open the task created from this message')"
 					target="_blank"
 					rel="noopener noreferrer">
-					<CheckIcon :size="18" />
+					<TasksAppIcon :size="18" />
 				</a>
 				<Moment class="timestamp" :timestamp="envelope.dateInt" />
 				<template v-if="expanded">
@@ -424,7 +424,6 @@ import { mapStores } from 'pinia'
 import NcActions from '@nextcloud/vue/components/NcActions'
 import NcActionText from '@nextcloud/vue/components/NcActionText'
 import ArchiveIcon from 'vue-material-design-icons/ArchiveArrowDownOutline.vue'
-import CheckIcon from 'vue-material-design-icons/CheckCircleOutline.vue'
 import ChevronDownIcon from 'vue-material-design-icons/ChevronDown.vue'
 import ChevronUpIcon from 'vue-material-design-icons/ChevronUp.vue'
 import EmailOffIcon from 'vue-material-design-icons/EmailOffOutline.vue'
@@ -443,6 +442,7 @@ import ConfirmModal from './ConfirmationModal.vue'
 import Error from './Error.vue'
 import EventModal from './EventModal.vue'
 import JunkIcon from './icons/JunkIcon.vue'
+import TasksAppIcon from './icons/TasksAppIcon.vue'
 import MailFilterFromEnvelope from './mailFilter/MailFilterFromEnvelope.vue'
 import MenuEnvelope from './MenuEnvelope.vue'
 import Message from './Message.vue'
@@ -493,7 +493,7 @@ function isSupplementaryCapacityError(error) {
 export default {
 	name: 'ThreadEnvelope',
 	components: {
-		CheckIcon,
+		TasksAppIcon,
 		MailFilterFromEnvelope,
 		EventModal,
 		TaskModal,
