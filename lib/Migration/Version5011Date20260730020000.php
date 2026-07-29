@@ -26,12 +26,21 @@ use OCP\Migration\SimpleMigrationStep;
  * created object with a fresh identifier of its own, so a task whose UID is
  * `e179a093-…` lives at `85D8FD67-….ics`.
  *
- * Nullable, and no attempt to backfill. The old rows genuinely do not contain
- * the information -- recovering it would mean fetching every object in the
- * calendar and matching on UID. Readers fall back to `<uid>.ics`, which is the
- * conventional name and therefore right for anything the Tasks app created
- * itself; it stays wrong for the handful this bug produced, and re-creating
- * those tasks is the honest fix.
+ * Nullable, so readers fall back to `<uid>.ics` -- the conventional name, and
+ * therefore right for anything the Tasks app created itself.
+ *
+ * No backfill step here, but NOT because the information is unrecoverable:
+ * that was the first assumption and it was wrong. `oc_calendarobjects` stores
+ * `uid` and `uri` side by side, so the mapping is one join away:
+ *
+ *   UPDATE oc_mail_message_tasks t SET task_uri = co.uri
+ *     FROM oc_calendarobjects co JOIN oc_calendars c ON c.id = co.calendarid
+ *    WHERE t.task_uri IS NULL AND co.uid = t.task_uid AND c.uri = t.calendar_uri;
+ *
+ * It is left out of the migration because those are core tables this app does
+ * not own, and reaching across into another app's schema from a migration is
+ * a worse precedent than a one-off repair. The single affected row on this
+ * install was fixed with exactly that statement.
  *
  * @psalm-api
  */
