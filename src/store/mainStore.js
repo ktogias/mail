@@ -97,6 +97,19 @@ export default defineStore('main', {
 			// IntersectionObserver sentinel: neither mailbox/query/sort
 			// changes when a same-query refresh publishes a new first page.
 			priorityInboxViewRevision: 0,
+			// Bumped when a task is linked to a message. The Create-task modal
+			// lives in the envelope LIST (Envelope.vue) and in the open thread
+			// (ThreadEnvelope.vue), neither of which shares a component tree --
+			// or an event bus, which is per-component here -- with the Thread
+			// header that has to show the result. A counter in the store is the
+			// one channel all three can see.
+			//
+			// Without it the chips only appeared after leaving the thread and
+			// coming back: loadThreadTasks() runs inside fetchThread(), and
+			// that does not re-run while the thread is already open. Confirmed
+			// from the access log -- a GET on open, a POST on create, and then
+			// nothing.
+			messageTaskRevision: 0,
 			// True while refreshPriorityInboxView() is assembling the section
 			// pages. The sections cannot infer this themselves: they render
 			// Mailbox components with skip-initial-load, so those components

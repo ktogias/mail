@@ -1711,6 +1711,22 @@ describe('Thread: tasks made from a message', () => {
 		expect(revealMessage).toHaveBeenCalledTimes(1)
 	})
 
+	it('picks up a task created while the thread is already open', async () => {
+		// fetchThread() -- where the initial load happens -- does not re-run
+		// for a thread that is already showing, and the Create-task modal
+		// lives in a different component tree with no shared bus. Without a
+		// store signal the chip only appeared after navigating away and back.
+		// Confirmed from the access log: GET on open, POST on create, then
+		// nothing.
+		const view = mountWithTasks([{ databaseId: 1, messageId: '<a@b>' }], [])
+		const spy = vi.spyOn(view.vm, 'loadThreadTasks').mockResolvedValue(undefined)
+
+		taskStore.messageTaskRevision++
+		await view.vm.$nextTick()
+
+		expect(spy).toHaveBeenCalledTimes(1)
+	})
+
 	it('does nothing when the source message has left the thread', async () => {
 		// Moved, deleted, or the thread was re-cut by a subject merge. The
 		// index cannot know, and this is not worth interrupting anyone over.

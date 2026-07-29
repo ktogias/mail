@@ -568,6 +568,15 @@ export default {
 	},
 
 	watch: {
+		// A task created while this thread is open. fetchThread() -- where the
+		// initial load happens -- does not re-run for a thread that is already
+		// showing, so without this the chip waited for a navigation away and
+		// back. Confirmed from the access log: a GET on open, a POST on
+		// create, and then nothing.
+		'mainStore.messageTaskRevision': function() {
+			this.loadThreadTasks(this.threadId)
+		},
+
 		$route(to, from) {
 			// Mirrored unconditionally, even when the guard below skips
 			// resetThread() -- store-level consumers (the idle-tail-trim

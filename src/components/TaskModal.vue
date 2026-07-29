@@ -266,6 +266,8 @@ export default {
 						taskUid: task.uid,
 						summary: this.taskTitle,
 					})
+					// Tell whatever is on screen that the answer has changed.
+					this.mainStore.messageTaskRevision++
 				} catch (error) {
 					logger.warn('task created, but it could not be indexed against the message', { error })
 				}
