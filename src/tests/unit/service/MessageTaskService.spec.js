@@ -70,6 +70,13 @@ describe('MessageTaskService', () => {
 		})
 
 		it('writes the message link as an absolute URI', () => {
+			// A webroot is set on purpose. Without one this assertion is
+			// vacuous for the failure that actually shipped in .81:
+			// getBaseUrl() is origin + webroot and generateUrl() prefixes the
+			// webroot too, so concatenating them gave /cloud/cloud/apps/mail
+			// -- invisible when the webroot is the empty string, which is
+			// jsdom's default and was the whole reason this passed.
+			window._oc_webroot = '/cloud'
 			// This value goes into the VTODO's URL property, and an iCalendar
 			// URL is defined as a URI -- a bare path is not one. It also leaves
 			// the browser: the .ics syncs to phones and desktop clients, where
@@ -82,6 +89,12 @@ describe('MessageTaskService', () => {
 			// may legally contain a slash, which a path segment would not
 			// survive.
 			expect(url).toContain('%3Ca%40b.example%3E')
+			// The property is that the webroot appears EXACTLY ONCE. Stated
+			// that way rather than as a literal prefix, because generateUrl
+			// inserts /index.php when mod_rewrite is not advertised -- true in
+			// jsdom, false on the live instance -- and that is not what this
+			// test is about.
+			expect(url.match(/\/cloud/g)).toHaveLength(1)
 		})
 
 		it('sends the object name along with the UID when indexing', () => {

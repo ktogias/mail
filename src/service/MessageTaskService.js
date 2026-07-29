@@ -35,7 +35,16 @@ import { WorkClass } from './RequestCoordinator.js'
  * @return {string} an absolute URL into this app
  */
 export function messageDeepLink(messageId) {
-	return getBaseUrl() + generateUrl('/apps/mail/message?messageId={messageId}', { messageId })
+	// baseURL, NOT getBaseUrl() + generateUrl(...). generateUrl already prefixes
+	// getRootUrl(), and getBaseUrl() is origin + getRootUrl() -- concatenating
+	// them yields https://host/cloud/cloud/apps/mail/... on any instance served
+	// from a subdirectory. Shipped exactly that way in .81, and the test did not
+	// catch it because jsdom's webroot is empty, where the doubling is invisible.
+	return generateUrl(
+		'/apps/mail/message?messageId={messageId}',
+		{ messageId },
+		{ baseURL: getBaseUrl() },
+	)
 }
 
 /**
