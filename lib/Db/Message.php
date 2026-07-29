@@ -166,6 +166,14 @@ class Message extends Entity implements JsonSerializable {
 	 * per section.
 	 */
 	private bool $hasFlaggedInThread = false;
+	/**
+	 * Whether a task was made from this message, and whether one was made from
+	 * anywhere in its thread. Not columns: filled by
+	 * MessageMapper::applyThreadFlagAggregates() from mail_message_tasks, the
+	 * same way the thread flags beside them are.
+	 */
+	private bool $hasTask = false;
+	private bool $hasTaskInThread = false;
 	private bool $hasImportantInThread = false;
 	private ?int $threadUpdatedAt = null;
 
@@ -360,6 +368,22 @@ class Message extends Entity implements JsonSerializable {
 		return $this->hasUnseenInThread;
 	}
 
+	public function setHasTask(bool $hasTask): void {
+		$this->hasTask = $hasTask;
+	}
+
+	public function getHasTask(): bool {
+		return $this->hasTask;
+	}
+
+	public function setHasTaskInThread(bool $hasTaskInThread): void {
+		$this->hasTaskInThread = $hasTaskInThread;
+	}
+
+	public function getHasTaskInThread(): bool {
+		return $this->hasTaskInThread;
+	}
+
 	public function setHasFlaggedInThread(bool $hasFlaggedInThread): void {
 		$this->hasFlaggedInThread = $hasFlaggedInThread;
 	}
@@ -463,6 +487,8 @@ class Message extends Entity implements JsonSerializable {
 				'$mdnsent' => ($this->getFlagMdnsent() === true),
 				'hasUnseenInThread' => $this->hasUnseenInThread,
 				'hasFlaggedInThread' => $this->hasFlaggedInThread,
+				'hasTask' => $this->hasTask,
+				'hasTaskInThread' => $this->hasTaskInThread,
 				'hasImportantInThread' => $this->hasImportantInThread,
 			],
 			'tags' => $indexed,

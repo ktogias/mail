@@ -54,6 +54,17 @@
 					class="app-content-list-item-star favorite-icon-style thread-context-badge--favorite"
 					:class="{ 'one-line': oneLineLayout, 'favorite-icon-style': !oneLineLayout }"
 					:title="t('mail', 'The conversation has a favorite message')" />
+				<TasksAppIcon
+					v-if="data.flags.hasTask"
+					:size="16"
+					class="app-content-list-item-star task-icon-style"
+					:title="t('mail', 'A task was created from this message')" />
+				<TasksAppIcon
+					v-else-if="data.flags.hasTaskInThread"
+					:size="16"
+					outlined
+					class="app-content-list-item-star task-icon-style thread-context-badge--task"
+					:title="t('mail', 'The conversation has a message with a task')" />
 				<ImportantIcon
 					v-if="isImportant"
 					fill-color="#00679e"
@@ -596,6 +607,7 @@ import EnvelopePrimaryActions from './EnvelopePrimaryActions.vue'
 import EnvelopeSkeleton from './EnvelopeSkeleton.vue'
 import EventModal from './EventModal.vue'
 import JunkIcon from './icons/JunkIcon.vue'
+import TasksAppIcon from './icons/TasksAppIcon.vue'
 import MoveModal from './MoveModal.vue'
 import Icon from './quickActions/Icon.vue'
 import TagModal from './TagModal.vue'
@@ -635,6 +647,7 @@ export default {
 		EnvelopePrimaryActions,
 		EventModal,
 		ImportantIcon,
+		TasksAppIcon,
 		ImportantOutlineIcon,
 		TaskModal,
 		EnvelopeSkeleton,
@@ -1949,6 +1962,19 @@ export default {
 	&:hover {
 		opacity: .4;
 	}
+}
+
+/* The third corner of the same system: important sits top-start, the star
+   top-end, and the task bottom-start. Same halo so it reads against whatever
+   the avatar happens to be, same rule for filled versus outlined. */
+.app-content-list-item-star.task-icon-style {
+	display: inline-block;
+	position: absolute;
+	top: 26px;
+	inset-inline-start: 0;
+	z-index: 1;
+	filter: drop-shadow(0 0 1px var(--color-main-background))
+		drop-shadow(0 0 1px var(--color-main-background));
 }
 
 .one-line.favorite-icon-style {

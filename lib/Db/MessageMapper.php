@@ -2336,7 +2336,7 @@ class MessageMapper extends QBMapper {
 	 */
 	public function findRelatedData(array $messages, string $userId): array {
 		$messages = $this->findRecipients($messages);
-		$messages = $this->applyThreadFlagAggregates($messages);
+		$messages = $this->applyThreadFlagAggregates($messages, $userId);
 		$tags = $this->tagMapper->getAllTagsForMessages($messages, $userId);
 		/** @var Message $message */
 		$messages = array_map(static function ($message) use ($tags) {
@@ -2360,7 +2360,7 @@ class MessageMapper extends QBMapper {
 	 * @param Message[] $messages
 	 * @return Message[]
 	 */
-	private function applyThreadFlagAggregates(array $messages): array {
+	private function applyThreadFlagAggregates(array $messages, string $userId): array {
 		$threadRootIdsByMailbox = [];
 		foreach ($messages as $message) {
 			$threadRootId = $message->getThreadRootId();
@@ -2402,8 +2402,40 @@ class MessageMapper extends QBMapper {
 			$result->closeCursor();
 		}
 
+		// One extra query for the whole page, over thread roots already
+		// collected above -- the badge has to be answerable for a list of
+		// twenty envelopes without twenty round trips.
+		$taskMessageIds = [];
+		$taskThreadRootIds = [];
+		$allThreadRootIds = [];
+		foreach ($threadRootIdsByMailbox as $threadRootIds) {
+			foreach ($threadRootIds as $threadRootId) {
+				$allThreadRootIds[$threadRootId] = true;
+			}
+		}
+		if ($allThreadRootIds !== []) {
+			$qb = $this->db->getQueryBuilder();
+			$qb->select('message_id', 'thread_root_id')
+				->from('mail_message_tasks')
+				->where(
+					$qb->expr()->eq('user_id', $qb->createNamedParameter($userId)),
+					$qb->expr()->in('thread_root_id', $qb->createNamedParameter(array_keys($allThreadRootIds), IQueryBuilder::PARAM_STR_ARRAY)),
+				);
+			$result = $qb->executeQuery();
+			while (($row = $result->fetchAssociative()) !== false) {
+				$taskMessageIds[$row['message_id']] = true;
+				$taskThreadRootIds[$row['thread_root_id']] = true;
+			}
+			$result->closeCursor();
+		}
+
 		foreach ($messages as $message) {
+			$messageId = $message->getMessageId();
+			$message->setHasTask($messageId !== null && isset($taskMessageIds[$messageId]));
+
 			$threadRootId = $message->getThreadRootId();
+			$message->setHasTaskInThread($threadRootId !== null && isset($taskThreadRootIds[$threadRootId]));
+
 			if ($threadRootId === null) {
 				// Not grouped with anything (see findIdsByQuery()'s self-join
 				// for why), so the thread's status is just its own.

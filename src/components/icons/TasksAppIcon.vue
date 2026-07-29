@@ -11,34 +11,32 @@
 			:width="size"
 			:height="size"
 			focusable="false">
-			<!-- Filled tile: THIS message is the one the task came from.
-			     Outlined: the CONVERSATION carries one. Same distinction the
-			     list already draws between Star and StarOutline, and it has to
-			     read the same way here or it teaches two different rules. -->
-			<template v-if="outlined">
-				<rect
-					x="1.6"
-					y="1.6"
-					width="28.8"
-					height="28.8"
-					rx="4.6"
-					fill="none"
-					stroke="#0082c9"
-					stroke-width="3.2" />
-				<path
-					d="m9.55 18-5.7-5.7 1.425-1.425L9.55 15.15l9.175-9.175L20.15 7.4 9.55 18Z"
-					fill="#0082c9"
-					transform="translate(-1.05 -1.05) scale(1.13)" />
-			</template>
-			<template v-else>
-				<path
-					d="M5 0h22a5 5 0 0 1 5 5v22a5 5 0 0 1-5 5H5a5 5 0 0 1-5-5V5a5 5 0 0 1 5-5Z"
-					fill="#0082c9" />
-				<path
-					d="m9.55 18-5.7-5.7 1.425-1.425L9.55 15.15l9.175-9.175L20.15 7.4 9.55 18Z"
-					fill="#fff"
-					transform="translate(-3.141 -3.13) scale(1.59509)" />
-			</template>
+			<!-- Filled tile: THIS message has a task.
+			     Outlined: the CONVERSATION contains one.
+
+			     Both draw the SAME rounded-square path, so the two read as one
+			     icon in two states rather than two icons. The outline insets
+			     that path by half its stroke instead of substituting a <rect>
+			     -- a rect has different corners and the pair stopped looking
+			     related, which is the whole job here. Same rule the list
+			     already follows with Star and StarOutline. -->
+			<path
+				v-if="outlined"
+				d="M5 0h22a5 5 0 0 1 5 5v22a5 5 0 0 1-5 5H5a5 5 0 0 1-5-5V5a5 5 0 0 1 5-5Z"
+				fill="none"
+				stroke="#0082c9"
+				stroke-width="3.93"
+				transform="translate(1.75 1.75) scale(0.890625)" />
+			<path
+				v-else
+				d="M5 0h22a5 5 0 0 1 5 5v22a5 5 0 0 1-5 5H5a5 5 0 0 1-5-5V5a5 5 0 0 1 5-5Z"
+				fill="#0082c9" />
+			<!-- One tick, one geometry. Only its colour changes: knocked out of
+			     the tile when filled, drawn in the brand blue when outlined. -->
+			<path
+				d="m9.55 18-5.7-5.7 1.425-1.425L9.55 15.15l9.175-9.175L20.15 7.4 9.55 18Z"
+				:fill="outlined ? '#0082c9' : '#fff'"
+				transform="translate(-3.141 -3.13) scale(1.59509)" />
 		</svg>
 	</span>
 </template>
@@ -89,8 +87,6 @@ export default {
 	align-items: center;
 	justify-content: center;
 	flex: 0 0 auto;
-	// Only the filled tile needs clipping to rounded corners; the outlined
-	// variant draws its own inset border.
-	border-radius: 3px;
+	// The tile is drawn by the path itself, so nothing needs clipping here.
 }
 </style>

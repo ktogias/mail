@@ -1558,4 +1558,64 @@ describe('Envelope', () => {
 			expect(importance).toHaveBeenCalledWith({ envelope: expect.anything(), addTag: false })
 		})
 	})
+
+	describe('the task badge on the avatar', () => {
+		// Third corner of the same system: important holds top-start, the star
+		// top-end, the task bottom-start -- and the same rule decides which
+		// form it takes. Filled means THIS message; outlined means somewhere
+		// in the conversation. Exactly what Star/StarOutline already do, so it
+		// has to behave identically or the app teaches two rules for one idea.
+
+		/**
+		 * @param {object} flags envelope flags under test
+		 * @return {object} the mounted row
+		 */
+		const mountRow = (flags) => shallowMount(Envelope, {
+			mocks: { $route },
+			propsData: {
+				data: {
+					accountId: 123,
+					from: [{ email: 'info@test.com' }],
+					flags: {
+						seen: true, flagged: false, $junk: false, answered: false,
+						hasAttachments: false, draft: false, ...flags,
+					},
+				},
+				account: { sentMailboxId: '1' },
+				mailbox: { myAcls: undefined, databaseId: '3', specialRole: '' },
+			},
+			store,
+			localVue,
+		})
+
+		it('is filled when this message has the task', () => {
+			const icons = mountRow({ hasTask: true, hasTaskInThread: true })
+				.findAllComponents({ name: 'TasksAppIcon' })
+
+			expect(icons).toHaveLength(1)
+			expect(icons.at(0).props('outlined')).toBe(false)
+		})
+
+		it('is outlined when only the conversation carries one', () => {
+			const icons = mountRow({ hasTask: false, hasTaskInThread: true })
+				.findAllComponents({ name: 'TasksAppIcon' })
+
+			expect(icons).toHaveLength(1)
+			expect(icons.at(0).props('outlined')).toBe(true)
+		})
+
+		it('shows exactly one, never both', () => {
+			// v-if/v-else-if, not two independent conditions: a message that
+			// has a task is also in a thread that has one, and stacking the
+			// filled and outlined marks in the same corner would be a mess.
+			const icons = mountRow({ hasTask: true, hasTaskInThread: true })
+				.findAllComponents({ name: 'TasksAppIcon' })
+
+			expect(icons).toHaveLength(1)
+		})
+
+		it('shows none when there is no task anywhere', () => {
+			expect(mountRow({}).findAllComponents({ name: 'TasksAppIcon' })).toHaveLength(0)
+		})
+	})
 })

@@ -42,6 +42,21 @@ describe('TasksAppIcon', () => {
 		expect(svg).not.toContain('fill="#fff"')
 	})
 
+	it('draws the SAME rounded-square path in both states', () => {
+		// Two states of one icon, not two icons. An outline built from a
+		// <rect> has different corners and the pair stops looking related --
+		// which is the entire job of borrowing the app's mark.
+		const tile = 'M5 0h22a5 5 0 0 1 5 5v22a5 5 0 0 1-5 5H5a5 5 0 0 1-5-5V5a5 5 0 0 1 5-5Z'
+		const tick = 'm9.55 18-5.7-5.7 1.425-1.425L9.55 15.15l9.175-9.175L20.15 7.4 9.55 18Z'
+
+		for (const outlined of [false, true]) {
+			const svg = mount(TasksAppIcon, { propsData: { outlined } }).html()
+			expect(svg).toContain(tile)
+			expect(svg).toContain(tick)
+		}
+		expect(mount(TasksAppIcon, { propsData: { outlined: true } }).html()).not.toContain('<rect')
+	})
+
 	it('keeps the literal brand blue rather than the instance theme', () => {
 		// The point of borrowing another app's icon is that it is recognisable
 		// as that app. Re-tinting it to var(--color-primary-element) would

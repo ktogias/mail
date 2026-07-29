@@ -48,6 +48,17 @@
 					class="app-content-list-item-star favorite-icon-style"
 					:data-starred="envelope.flags.flagged ? 'true' : 'false'"
 					@click.prevent="hasWriteAcl ? onToggleFlagged() : false" />
+				<TasksAppIcon
+					v-if="envelope.flags.hasTask"
+					:size="16"
+					class="app-content-list-item-star task-icon-style"
+					:title="t('mail', 'A task was created from this message')" />
+				<TasksAppIcon
+					v-else-if="envelope.flags.hasTaskInThread"
+					:size="16"
+					outlined
+					class="app-content-list-item-star task-icon-style thread-context-badge--task"
+					:title="t('mail', 'The conversation has a message with a task')" />
 				<JunkIcon
 					v-if="envelope.flags.$junk"
 					:size="18"
@@ -70,7 +81,24 @@
 				@touchmove.passive="cancelHoverPrefetch">
 				<div class="envelope__header__left__sender-subject-tags">
 					<div class="sender" :class="{ 'sender--expanded': expanded }">
-						{{ envelope.from && envelope.from[0] ? envelope.from[0].label : '' }}
+						<span>{{ envelope.from && envelope.from[0] ? envelope.from[0].label : '' }}</span>
+						<!-- Immediately after the message's own title line and
+						     left-aligned, the way the marker sits after the
+						     thread's subject. Filled, because this message IS
+						     the one the task came from -- the outlined form is
+						     reserved for "somewhere in this conversation". -->
+						<a
+							v-for="task in tasks"
+							:key="task.taskUid"
+							class="envelope__task-marker"
+							:href="taskUrl(task)"
+							:aria-label="t('mail', 'Open the task created from this message')"
+							:title="t('mail', 'Open the task created from this message')"
+							target="_blank"
+							rel="noopener noreferrer"
+							@click.stop>
+							<TasksAppIcon :size="16" />
+						</a>
 					</div>
 					<!-- The sender-address / details toggle sits in the sender
 					     cell (natural, fits the UI). It's the discoverable way
@@ -119,23 +147,6 @@
 				</div>
 			</div>
 			<div class="right">
-				<!-- This is the message a task was made from. Icon only, in the
-				     same row and at the same size as the S/MIME lock beside it
-				     -- the app marks message state with bare icons, and this is
-				     message state. The label it used to carry was the task's
-				     summary, which defaults to the subject, so it repeated the
-				     header two lines up. -->
-				<a
-					v-for="task in tasks"
-					:key="task.taskUid"
-					class="envelope__task-marker"
-					:href="taskUrl(task)"
-					:aria-label="t('mail', 'Open the task created from this message')"
-					:title="t('mail', 'Open the task created from this message')"
-					target="_blank"
-					rel="noopener noreferrer">
-					<TasksAppIcon :size="18" />
-				</a>
 				<Moment class="timestamp" :timestamp="envelope.dateInt" />
 				<template v-if="expanded">
 					<NcActions v-if="smimeData.isSigned || smimeData.isEncrypted">
@@ -1441,15 +1452,32 @@ export default {
 
 <style lang="scss" scoped>
 
+.sender {
+	display: flex;
+	align-items: center;
+	gap: calc(var(--default-grid-baseline, 8px));
+}
+
 .envelope__task-marker {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	width: var(--default-clickable-area, 34px);
-	height: var(--default-clickable-area, 34px);
-	border-radius: var(--border-radius-element, 50%);
-	color: var(--color-text-maxcontrast) !important;
+	flex: 0 0 auto;
+	width: 24px;
+	height: 24px;
+	border-radius: var(--border-radius, 4px);
 	text-decoration: none !important;
+}
+
+/* Bottom-start on the avatar: important holds top-start, the star top-end. */
+.app-content-list-item-star.task-icon-style {
+	display: inline-block;
+	position: absolute;
+	top: 26px;
+	inset-inline-start: 0;
+	z-index: 1;
+	filter: drop-shadow(0 0 1px var(--color-main-background))
+		drop-shadow(0 0 1px var(--color-main-background));
 }
 
 .envelope__task-marker:hover,
