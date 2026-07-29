@@ -72,7 +72,20 @@ export async function linkTaskToMessage(messageId, { calendarUri, taskUid, summa
 export async function fetchTasksForMessage(messageId, { signal } = {}) {
 	const { data } = await axios.get(
 		generateUrl('/apps/mail/api/messages/{messageId}/tasks', { messageId }),
-		{ signal, mailWorkClass: WorkClass.SPECULATIVE },
+		// NOT speculative. The coordinator does not merely deprioritise that
+		// class -- it REJECTS it outright while there is foreground pressure
+		// ("Speculative mail request dropped under foreground pressure"), and
+		// opening a thread is foreground pressure by definition: the thread
+		// fetch, the body fetch and the list loads are all in flight at that
+		// moment. So this request was dropped essentially every time, the
+		// rejection was caught and logged at debug, and the chip silently
+		// never appeared. Confirmed from the access log: three 200s on
+		// /messages/1600225/thread and not one /tasks request behind them.
+		//
+		// This is the content of the view the user is looking at, which is
+		// what ACTIVE_CONTENT means. Same error, same reasoning, as the
+		// section refill in .65.
+		{ signal, mailWorkClass: WorkClass.ACTIVE_CONTENT },
 	)
 	return data.tasks ?? []
 }
