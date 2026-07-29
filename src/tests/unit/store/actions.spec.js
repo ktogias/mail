@@ -357,6 +357,42 @@ describe('Vuex store actions', () => {
 			.toEqual(known.map((envelope) => envelope.databaseId))
 	})
 
+	describe('the Priority view records that it has been assembled at least once', () => {
+		// "A refresh is in flight" and "is there anything to show yet" are
+		// different questions, and the sections need the second. On a cold
+		// load the Mailbox sections render before MailboxThread's mounted()
+		// hook has started a refresh at all, so reading only the in-flight
+		// flag put "No messages" under every section header -- beside counts
+		// that had already arrived from an independent request.
+		it('starts out never loaded', () => {
+			expect(store.priorityInboxViewEverLoaded).toBe(false)
+		})
+
+		it('records it once a refresh settles', async () => {
+			PriorityInboxService.fetchPriorityInboxStats.mockResolvedValue({ sections: {}, complete: true })
+			MessageService.fetchEnvelopes.mockResolvedValue([])
+
+			await store.refreshPriorityInboxView()
+
+			expect(store.priorityInboxViewEverLoaded).toBe(true)
+			expect(store.priorityInboxViewLoading).toBe(false)
+		})
+
+		it('records it even when the refresh FAILS', async () => {
+			// Set in the same finally as the in-flight flag. Leaving it false
+			// on failure would trade a wrong "No messages" for a permanent
+			// skeleton, which is the worse of the two: the empty state at
+			// least invites the user to retry.
+			PriorityInboxService.fetchPriorityInboxStats.mockRejectedValue(new Error('nope'))
+			MessageService.fetchEnvelopes.mockRejectedValue(new Error('nope'))
+
+			await store.refreshPriorityInboxView().catch(() => {})
+
+			expect(store.priorityInboxViewEverLoaded).toBe(true)
+			expect(store.priorityInboxViewLoading).toBe(false)
+		})
+	})
+
 	describe('exact Priority refresh versus overlapping optimistic section changes', () => {
 		const favoriteQuery = 'is:starred'
 		const importantQuery = 'not:starred is:pi-important'

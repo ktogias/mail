@@ -747,6 +747,23 @@ export default {
 
 	async mounted() {
 		setTimeout(this.saveStartMailbox, START_MAILBOX_DEBOUNCE)
+
+		// Started before the thread fetch below, not after it. These are two
+		// independent requests -- the open thread's messages, and the Priority
+		// sections' rows -- and awaiting the first before even asking for the
+		// second put the whole list behind a thread round trip on every cold
+		// load. On desktop that is every cold load, because the three-pane
+		// layout has a thread open while the list is on screen; on mobile the
+		// two are mutually exclusive, isThreadShown is false, and the delay
+		// never appeared, which is why it read as a mobile-only fix that had
+		// not reached desktop.
+		//
+		// Awaited further down instead, because registerPrioritySectionObserver()
+		// must not run before the sections have their rows.
+		const priorityInboxOpened = this.mailbox.isPriorityInbox
+			? this.onPriorityMailboxOpened({ refreshView: true })
+			: undefined
+
 		if (this.isThreadShown) {
 			await this.fetchEnvelopes()
 		}
@@ -776,8 +793,8 @@ export default {
 				onRefresh: () => this.onPullToRefresh(),
 			})
 		}
-		if (this.mailbox.isPriorityInbox) {
-			await this.onPriorityMailboxOpened({ refreshView: true })
+		if (priorityInboxOpened) {
+			await priorityInboxOpened
 			this.registerPrioritySectionObserver()
 		}
 	},

@@ -233,8 +233,19 @@ export default {
 		 * @return {boolean} true while rows are still on their way
 		 */
 		isLoadingList() {
-			return this.loadingEnvelopes
-				|| (this.isPriorityInbox && this.mainStore.priorityInboxViewLoading)
+			if (this.loadingEnvelopes) {
+				return true
+			}
+			if (!this.isPriorityInbox) {
+				return false
+			}
+			// Either a refresh is running, or none has finished yet. The
+			// second half is what covers the gap before MailboxThread's
+			// mounted() hook has even started one -- see
+			// priorityInboxViewEverLoaded in the store for why that gap is
+			// wide enough to see, and why it is wider on desktop.
+			return this.mainStore.priorityInboxViewLoading
+				|| !this.mainStore.priorityInboxViewEverLoaded
 		},
 
 		/**

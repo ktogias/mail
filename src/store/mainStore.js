@@ -107,6 +107,27 @@ export default defineStore('main', {
 			// A header count is not enough to distinguish the two states: it
 			// comes from an independent request and arrives first.
 			priorityInboxViewLoading: false,
+			// False until the first refreshPriorityInboxView() has settled.
+			//
+			// "A refresh is in flight" is not the same question as "is there
+			// anything to show yet", and the sections need the second one. On
+			// a cold load the Mailbox sections render BEFORE MailboxThread's
+			// own mounted() hook runs, so for that gap no refresh has started,
+			// the flag above is false, and every section falls through to
+			// "No messages" -- with the counts already beside them, because
+			// those come from an independent request that has landed.
+			//
+			// The gap is much wider on desktop, which is why this survived
+			// .36: mounted() awaits fetchEnvelopes() first whenever a thread
+			// is open, and on desktop the three-pane layout means a thread is
+			// open while the list is on screen. On mobile the two are
+			// mutually exclusive views, isThreadShown is false, and the
+			// refresh starts immediately -- so it looked like a fixed-on-
+			// mobile bug when it was really a never-triggered-on-mobile one.
+			//
+			// Set in the same finally as the flag above, so a FAILED refresh
+			// also ends the skeleton rather than pinning it forever.
+			priorityInboxViewEverLoaded: false,
 			// The envelope id of the currently open thread/message (the
 			// route's own :threadId, mirrored the same way
 			// currentViewMailboxId is -- see Thread.vue's own route

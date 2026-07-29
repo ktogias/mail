@@ -1335,11 +1335,45 @@ describe('Mailbox', () => {
 
 		it('shows the empty state once the refresh has finished with nothing', () => {
 			store.priorityInboxViewLoading = false
+			// Both halves: nothing running AND something has run. "No messages"
+			// is a claim about the mailbox, and it may only be made once the
+			// view has actually been assembled at least once.
+			store.priorityInboxViewEverLoaded = true
 			const wrapper = mountMailbox({ isPriorityInbox: true })
 
 			expect(wrapper.vm.isLoadingList).toBe(false)
 			expect(wrapper.findComponent({ name: 'LoadingSkeleton' }).exists()).toBe(false)
 			expect(wrapper.findComponent({ name: 'EmptyMailboxSection' }).exists()).toBe(true)
+		})
+
+		it('shows the skeleton before any refresh has even started', () => {
+			// The gap this whole flag exists for. The sections mount BEFORE
+			// MailboxThread's own mounted() hook runs, so for that window no
+			// refresh has started and priorityInboxViewLoading is still false.
+			// Reading only that flag put "Κανένα μήνυμα" under every section
+			// header on a cold load -- with the counts already beside them,
+			// because the stats come from an independent request that lands
+			// first. Reported live on 2026-07-29 with "Σημαντικό 1" and
+			// "Άλλο 12" above two empty sections.
+			store.priorityInboxViewLoading = false
+			store.priorityInboxViewEverLoaded = false
+			const wrapper = mountMailbox({ isPriorityInbox: true })
+
+			expect(wrapper.vm.isLoadingList).toBe(true)
+			expect(wrapper.findComponent({ name: 'LoadingSkeleton' }).exists()).toBe(true)
+			expect(wrapper.findComponent({ name: 'EmptyMailboxSection' }).exists()).toBe(false)
+		})
+
+		it('stops claiming to load when a refresh FAILS', () => {
+			// The flag is set in refreshPriorityInboxView()'s finally, so a
+			// failed refresh ends the skeleton too. Pinning it would trade a
+			// wrong "No messages" for a permanent placeholder, which is worse:
+			// the first at least tells the user to try again.
+			store.priorityInboxViewLoading = false
+			store.priorityInboxViewEverLoaded = true
+			const wrapper = mountMailbox({ isPriorityInbox: true })
+
+			expect(wrapper.vm.isLoadingList).toBe(false)
 		})
 
 		it('does not follow the Priority flag in an ordinary folder', () => {

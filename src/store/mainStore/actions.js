@@ -1781,6 +1781,7 @@ export default function mainStoreActions() {
 				return await this.refreshPriorityInboxViewInner(options)
 			} finally {
 				this.priorityInboxViewLoading = false
+				this.priorityInboxViewEverLoaded = true
 			}
 		},
 		async refreshPriorityInboxViewInner({
