@@ -31,16 +31,20 @@
  * !important is needed twice over: toastify writes `top` inline, and the
  * library's own `.toastify.dialogs.toastify-top` rule pins `right`.
  *
- * KNOWN LIMITATION: concurrent toasts overlap instead of stacking. Toastify
- * spaces a stack by writing increasing inline `top` values, and those are the
- * values overridden here. The library hardcodes the gravity, so there is no
- * option to flip; fixing it properly means upstreaming a `gravity` option
- * rather than reimplementing stacking in a stylesheet. This is not a
- * regression -- the previous mobile-only version of this rule had the same
- * behaviour -- and toasts here are near-always singular. */
+ * Stacking is a collaboration with util/toast.js. Toastify spaces a stack by
+ * writing increasing inline `top` values, and those are exactly the values
+ * this rule has to override -- so for one release concurrent toasts landed on
+ * top of each other, which cost the user sight of every undo window but the
+ * newest. restack() now supplies --mail-toast-offset per toast and the
+ * arithmetic happens here, so the stylesheet keeps what only it can know (the
+ * safe-area inset, and the !important that beats toastify's inline `top`) and
+ * the script supplies only the one number it measured. */
 .toastify.dialogs {
 	top: unset !important;
-	bottom: calc(env(safe-area-inset-bottom, 0px) + var(--default-grid-baseline, 8px) * 2) !important;
+	/* --mail-toast-offset is set per toast by util/toast.js so the stack is
+	 * laid out from the bottom edge upwards; the default is the position a
+	 * single toast takes, so nothing moves before the first restack. */
+	bottom: calc(env(safe-area-inset-bottom, 0px) + var(--mail-toast-offset, 16px)) !important;
 	inset-inline: 0 !important;
 	margin-inline: auto !important;
 	width: fit-content;
