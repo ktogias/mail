@@ -1241,6 +1241,99 @@ class MessagesControllerTest extends TestCase {
 		]), $response);
 	}
 
+	public function testSetFlagsBatchSkipsAPurgedMessageInsteadOfFailingTheWholeBatch(): void {
+		// Confirmed live on 2026-07-29: "Message 1597153 does not exist" from a
+		// mark-on-open batch. One id that had been purged since the browser
+		// read the list aborted the entire request, so opening a six-message
+		// thread marked NONE of it read and showed a red "Could not update
+		// read status" -- for the five messages that were sitting right there
+		// and perfectly writable.
+		$accountId = 17;
+		$mailboxId = 987;
+		$this->account->method('getId')->willReturn($accountId);
+		$survivor = new \OCA\Mail\Db\Message();
+		$survivor->setUid(441);
+		$survivor->setMailboxId($mailboxId);
+		$survivor->setHasUnseenInThread(false);
+		$mailbox = new \OCA\Mail\Db\Mailbox();
+		$mailbox->setId($mailboxId);
+		$mailbox->setName('INBOX');
+		$mailbox->setAccountId($accountId);
+		$this->mailManager->method('getMessage')
+			->willReturnCallback(static function ($userId, $id) use ($survivor) {
+				if ($id === 1597153) {
+					throw new DoesNotExistException('gone');
+				}
+				return $survivor;
+			});
+		$this->mailManager->method('getMailbox')->willReturn($mailbox);
+		$this->accountService->method('find')->willReturn($this->account);
+		// The survivor is still written, and the missing id contributes no UID.
+		$this->mailManager->expects($this->once())
+			->method('flagMessages')
+			->with($this->account, 'INBOX', [441], ['seen' => true]);
+
+		$response = $this->controller->setFlagsBatch([123, 1597153], ['seen' => true]);
+
+		// Only the survivor is reported. The browser reads a missing entry as
+		// "no authoritative value" and keeps its optimistic state, which is
+		// exactly right for a message that no longer exists.
+		$this->assertEquals(new JSONResponse([
+			'messages' => [
+				'123' => ['hasUnseenInThread' => false],
+			],
+		]), $response);
+	}
+
+	public function testSetFlagsBatchOfNothingButPurgedMessagesIsNotAFailure(): void {
+		// "Gone" is not a failure for a flag write, the same way it is not for
+		// a delete: there is no message left to carry the flag, so the intent
+		// is already satisfied. Reporting an error would put a red toast on
+		// screen for something the user cannot act on and need not know about.
+		$this->mailManager->method('getMessage')
+			->willThrowException(new DoesNotExistException('gone'));
+		$this->mailManager->expects($this->never())->method('flagMessages');
+
+		$response = $this->controller->setFlagsBatch([1597153], ['seen' => true]);
+
+		$this->assertEquals(new JSONResponse(['messages' => []]), $response);
+	}
+
+	public function testSetFlagsBatchToleratesAMessageVanishingBeforeItCanBeReported(): void {
+		// The window between the IMAP STORE and reading the rows back. The
+		// write already happened, so this is a reporting gap, not a failure --
+		// it used to escape as an uncaught DoesNotExistException, i.e. a 500
+		// for an operation that had in fact succeeded.
+		$accountId = 17;
+		$mailboxId = 987;
+		$this->account->method('getId')->willReturn($accountId);
+		$message = new \OCA\Mail\Db\Message();
+		$message->setUid(441);
+		$message->setMailboxId($mailboxId);
+		$message->setHasUnseenInThread(false);
+		$mailbox = new \OCA\Mail\Db\Mailbox();
+		$mailbox->setId($mailboxId);
+		$mailbox->setName('INBOX');
+		$mailbox->setAccountId($accountId);
+		$calls = 0;
+		$this->mailManager->method('getMessage')
+			->willReturnCallback(static function ($userId, $id) use ($message, &$calls) {
+				$calls++;
+				if ($calls > 1) {
+					// Resolved fine; gone by the time its row is read back.
+					throw new DoesNotExistException('vanished');
+				}
+				return $message;
+			});
+		$this->mailManager->method('getMailbox')->willReturn($mailbox);
+		$this->accountService->method('find')->willReturn($this->account);
+		$this->mailManager->expects($this->once())->method('flagMessages');
+
+		$response = $this->controller->setFlagsBatch([123], ['seen' => true]);
+
+		$this->assertEquals(new JSONResponse(['messages' => []]), $response);
+	}
+
 	public function testSetTagFailing() {
 		$accountId = 17;
 		$mailboxId = 987;

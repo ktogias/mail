@@ -1164,7 +1164,24 @@ class MessagesController extends Controller {
 						$mailbox = $this->mailManager->getMailbox($effectiveUserId, $message->getMailboxId());
 						$account = $this->accountService->find($effectiveUserId, $mailbox->getAccountId());
 					} catch (DoesNotExistException $e) {
-						throw new ClientException("Message $id does not exist", 0, $e);
+						// Skip it; do NOT fail the batch. One id that has since
+						// been purged -- moved, expunged elsewhere, dropped by a
+						// sync between the browser reading the list and clicking
+						// -- used to abort the whole request, so opening a
+						// six-message thread marked NONE of it read and put a red
+						// "Could not update read status" on screen. Confirmed
+						// live on 2026-07-29: "Message 1597153 does not exist"
+						// from a mark-on-open batch.
+						//
+						// "Gone" is also not a failure for a flag write, the way
+						// it is not for a delete: there is no message left to
+						// carry the flag, so the caller's intent is already
+						// satisfied. Same reasoning as reconcileOrRevert()'s
+						// authoritative-is-undefined branch on the client.
+						$this->logger->debug("Skipping message $id in a flag batch: it no longer exists", [
+							'exception' => $e,
+						]);
+						continue;
 					}
 					$key = $account->getId() . ':' . $mailbox->getId();
 					$groups[$key] ??= [
@@ -1190,8 +1207,20 @@ class MessagesController extends Controller {
 				}
 
 				$response = [];
-				foreach ($ids as $id) {
-					$updated = $this->mailManager->getMessage($effectiveUsers[$id], $id);
+				foreach ($effectiveUsers as $id => $effectiveUserId) {
+					try {
+						$updated = $this->mailManager->getMessage($effectiveUserId, $id);
+					} catch (DoesNotExistException $e) {
+						// A message can still vanish between the STORE above and
+						// this read. The flag write already happened, so this is
+						// a reporting gap, not a failure -- and the browser
+						// treats a missing entry as "no authoritative value",
+						// which is exactly right.
+						$this->logger->debug("Message $id vanished before its flag batch could be reported", [
+							'exception' => $e,
+						]);
+						continue;
+					}
 					$response[(string)$id] = [
 						'hasUnseenInThread' => $updated->getHasUnseenInThread(),
 					];
@@ -1203,7 +1232,12 @@ class MessagesController extends Controller {
 				));
 				$this->logger->info('User updated flags on a message batch', [
 					'userId' => $this->userId,
-					'messageCount' => count($ids),
+					// What was actually written, not what was asked for: the two
+					// differ whenever an id has been purged, and a count that
+					// silently includes skipped ones makes the log useless for
+					// noticing that.
+					'messageCount' => count($effectiveUsers),
+					'requestedCount' => count($ids),
 					'flags' => $flagsSummary,
 				]);
 
