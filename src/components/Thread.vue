@@ -26,6 +26,43 @@
 							@keydown.space.prevent="subjectExpanded = !subjectExpanded">
 							{{ threadSubject }}
 						</h2>
+						<!-- A conversation can carry tasks made from any of its
+						     messages. The chip says so where the subject is,
+						     and takes the user to the message it came from --
+						     which in a forty-message thread is the whole point:
+						     the instructions the task is about are usually IN
+						     that message, and hunting for it defeats the link.
+						     Several tasks means a menu rather than a jump to an
+						     arbitrary one, the way GitHub lists linked issues. -->
+						<div v-if="threadTasks.length" class="thread-tasks">
+							<NcActions
+								v-if="threadTasks.length > 1"
+								:aria-label="threadTasksLabel"
+								variant="tertiary">
+								<template #icon>
+									<CheckIcon :size="16" />
+								</template>
+								<NcActionButton
+									v-for="task in threadTasks"
+									:key="task.taskUid"
+									:close-after-click="true"
+									@click="revealTaskSource(task)">
+									<template #icon>
+										<CheckIcon :size="16" />
+									</template>
+									{{ task.summary || t('mail', 'Task') }}
+								</NcActionButton>
+							</NcActions>
+							<button
+								v-else
+								type="button"
+								class="thread-tasks__chip"
+								:title="threadTasksLabel"
+								@click="revealTaskSource(threadTasks[0])">
+								<CheckIcon :size="16" />
+								<span>{{ threadTasks[0].summary || t('mail', 'Task') }}</span>
+							</button>
+						</div>
 					</div>
 					<NcActions
 						id="mail-thread-menu"
@@ -189,6 +226,7 @@
 				:expanded="expandedThreads.includes(env.databaseId)"
 				:full-height="thread.length === 1"
 				:thread-index="index"
+				:tasks="tasksForEnvelope(env)"
 				@delete="$emit('delete', env.databaseId)"
 				@request-delete="onRequestDeleteOne"
 				@request-archive="onRequestArchiveOne"
@@ -239,9 +277,11 @@ import NoTrashMailboxConfiguredError from '../errors/NoTrashMailboxConfiguredErr
 import logger from '../logger.js'
 import UndoableActionMixin from '../mixins/UndoableActionMixin.js'
 import { summarizeThread } from '../service/AiIntergrationsService.js'
+import { fetchTasksForMessage } from '../service/MessageTaskService.js'
 import useMainStore from '../store/mainStore.js'
 import { getRandomMessageErrorMessage } from '../util/ErrorMessageFactory.js'
 import { formatDateTimeFromUnix } from '../util/formatDateTime.js'
+import { findMessageElement, revealMessage } from '../util/revealMessage.js'
 import { showError } from '../util/toast.js'
 
 export default {
@@ -282,6 +322,11 @@ export default {
 			errorMessage: '',
 			errorTitle: '',
 			expandedThreads: [],
+			// Tasks made from any message in this thread. A HINT: the rows are
+			// written when a task is created here and nothing tells us when one
+			// is deleted in the Tasks app, so a dangling entry is normal and
+			// following it is how we find out.
+			threadTasks: [],
 			subjectExpanded: false,
 			showMoveModal: false,
 			threadSnoozeOpen: false,
@@ -389,6 +434,12 @@ export default {
 		// happened yet.
 		visibleThread() {
 			return this.thread.filter((envelope) => !this.isPendingUndo(envelope.databaseId))
+		},
+
+		threadTasksLabel() {
+			return this.threadTasks.length === 1
+				? t('mail', 'A task was created from this conversation')
+				: n('mail', '{count} task created from this conversation', '{count} tasks created from this conversation', this.threadTasks.length, { count: this.threadTasks.length })
 		},
 
 		threadSubject() {
@@ -1185,6 +1236,51 @@ export default {
 			this.loadedThreads = 0
 		},
 
+		async loadThreadTasks(threadId) {
+			try {
+				const tasks = await fetchTasksForMessage(threadId)
+				// The user may have moved on while this was in flight; writing
+				// another thread's tasks into the header would be worse than
+				// showing none.
+				if (threadId === this.threadId) {
+					this.threadTasks = tasks
+				}
+			} catch (error) {
+				logger.debug('could not load the tasks for this thread', { error })
+				this.threadTasks = []
+			}
+		},
+
+		tasksForEnvelope(envelope) {
+			return this.threadTasks.filter((task) => task.messageId === envelope.messageId)
+		},
+
+		/**
+		 * Take the user to the message a task was made from.
+		 *
+		 * Expand first, then scroll -- in that order and with a tick between,
+		 * or the scroll lands on the collapsed height and stops short of what
+		 * it was aiming at.
+		 *
+		 * @param {object} task the indexed task
+		 */
+		revealTaskSource(task) {
+			const envelope = this.thread.find((env) => env.messageId === task.messageId)
+			if (!envelope) {
+				// Indexed against a message that is no longer in this thread --
+				// moved, deleted, or the thread was re-cut by a subject merge.
+				// Nothing to reveal, and nothing worth interrupting anyone over.
+				logger.debug('task source is not in the loaded thread', { task })
+				return
+			}
+			if (!this.expandedThreads.includes(envelope.databaseId)) {
+				this.expandedThreads.push(envelope.databaseId)
+			}
+			this.$nextTick(() => {
+				revealMessage(findMessageElement(envelope.databaseId))
+			})
+		},
+
 		async fetchThread() {
 			this.loading = true
 			this.errorMessage = ''
@@ -1221,6 +1317,11 @@ export default {
 				if (!this.expandedThreads.includes(target)) {
 					this.expandedThreads = [target]
 				}
+
+				// Fire-and-forget: the indicator is decoration on a thread that
+				// has already rendered, so it must never delay it nor be able
+				// to fail it.
+				this.loadThreadTasks(threadId)
 
 				this.prefetchThreadNeighborhood(target)
 
@@ -1775,5 +1876,60 @@ $mail-thread-header-inline-start: calc(var(--default-grid-baseline) * 14 + var(-
 
 .user-bubble__title {
 	cursor: pointer;
+}
+
+/* The reveal marker. Transient on purpose: after the jump several messages are
+   on screen and all look alike, so something has to say which one was meant --
+   but a permanent mark would compete with real selection state. Slack and
+   GitHub both flash and fade for the same reason. */
+:deep(.mail-message--revealed) {
+	animation: mail-reveal-flash 2s ease-out;
+	outline: none;
+}
+
+@keyframes mail-reveal-flash {
+	0%, 40% { background-color: var(--color-primary-element-light, rgba(0, 130, 201, 0.15)); }
+	100% { background-color: transparent; }
+}
+
+/* Honour the same preference the scroll does; a full-width colour pulse is
+   movement too. */
+@media (prefers-reduced-motion: reduce) {
+	:deep(.mail-message--revealed) {
+		animation: none;
+		box-shadow: inset 3px 0 0 0 var(--color-primary-element);
+	}
+}
+
+.thread-tasks {
+	display: flex;
+	align-items: center;
+	gap: var(--default-grid-baseline, 8px);
+	margin-block-start: calc(var(--default-grid-baseline, 8px) / 2);
+}
+
+.thread-tasks__chip {
+	display: inline-flex;
+	align-items: center;
+	gap: calc(var(--default-grid-baseline, 8px) / 2);
+	max-width: 320px;
+	padding: 2px calc(var(--default-grid-baseline, 8px) * 1.5);
+	border: none;
+	border-radius: var(--border-radius-pill, 16px);
+	background-color: var(--color-background-dark);
+	color: var(--color-main-text);
+	font-size: 90%;
+	cursor: pointer;
+}
+
+.thread-tasks__chip span {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.thread-tasks__chip:hover,
+.thread-tasks__chip:focus-visible {
+	background-color: var(--color-background-hover);
 }
 </style>

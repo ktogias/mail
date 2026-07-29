@@ -241,6 +241,38 @@ return [
 			'verb' => 'GET'
 		],
 		[
+			'name' => 'messageTasks#index',
+			'url' => '/api/messages/{id}/tasks',
+			'verb' => 'GET'
+		],
+		[
+			'name' => 'messageTasks#create',
+			'url' => '/api/messages/{id}/tasks',
+			'verb' => 'POST'
+		],
+		[
+			'name' => 'messageTasks#destroy',
+			'url' => '/api/tasks/{taskUid}',
+			'verb' => 'DELETE'
+		],
+		// Resolve a message from its RFC 5322 Message-ID and redirect to
+		// wherever it lives NOW. This is what a task's URL property points at,
+		// so the link survives the message being moved between folders or the
+		// local row being renumbered by a re-index -- neither of which a
+		// /box/<mailbox>/thread/<row id> link survives.
+		//
+		// The id travels as a QUERY parameter, not a path segment: a
+		// Message-ID may legally contain a slash, and %2F in a path is
+		// rejected or silently decoded by web servers before routing.
+		//
+		// DeepLinkController has been in the tree unrouted; this is the first
+		// caller for it.
+		[
+			'name' => 'deepLink#open',
+			'url' => '/message',
+			'verb' => 'GET'
+		],
+		[
 			'name' => 'messages#getSource',
 			'url' => '/api/messages/{id}/source',
 			'verb' => 'GET'

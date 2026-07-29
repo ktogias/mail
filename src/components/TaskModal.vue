@@ -82,6 +82,7 @@ import jstz from 'jstz'
 import { mapStores } from 'pinia'
 import CalendarPickerOption from './CalendarPickerOption.vue'
 import logger from '../logger.js'
+import { linkTaskToMessage, messageDeepLink } from '../service/MessageTaskService.js'
 import useMainStore from '../store/mainStore.js'
 import Task from '../task.js'
 import { showError, showSuccess } from '../util/toast.js'
@@ -208,6 +209,25 @@ export default {
 			if (taskData.allDay) {
 				task.allDay = taskData.allDay
 			}
+
+			// The link back to the message it came from, as the iCalendar URL
+			// property. That is what RFC 5545 defines URL for, and the Tasks
+			// app treats it as a first-class field -- it reads it into
+			// _customUrl and writes it back on save, so the value survives
+			// being edited there.
+			//
+			// Not RELATED-TO: Tasks uses that for the parent/subtask
+			// hierarchy, and a message is not a calendar component anyway.
+			// Not ATTACH: Tasks has no model getter for it, so it would be
+			// invisible to the person the link is for.
+			//
+			// The URL resolves the Message-ID at CLICK time rather than
+			// pointing at a mailbox and row id, so it still works after the
+			// message is filed somewhere else. See DeepLinkController.
+			if (taskData.messageLink) {
+				task.vtodo.updatePropertyWithValue('url', taskData.messageLink)
+			}
+
 			const vData = ICAL.stringify(task.jCal)
 
 			await task.calendar.dav.createVObject(vData)
@@ -225,11 +245,30 @@ export default {
 				due: this.endDate ? moment(this.endDate).set().format().toString() : null,
 				allDay: this.isAllDay,
 				note: this.note,
+				messageLink: messageDeepLink(this.envelope.messageId),
 			}
 			try {
 				logger.debug('create task', taskData)
 
-				await this.createTask(taskData)
+				const task = await this.createTask(taskData)
+
+				// Index it so the MESSAGE can find the task. CalDAV cannot be
+				// asked which tasks point at a message, so this is the only
+				// way the thread ever learns it has one.
+				//
+				// Deliberately not awaited into the failure path of the task
+				// itself: the task exists and carries its link back either
+				// way, so a failure here costs the indicator, and telling the
+				// user their task failed would be a lie.
+				try {
+					await linkTaskToMessage(this.envelope.databaseId, {
+						calendarUri: this.selectedCalendar.id,
+						taskUid: task.uid,
+						summary: this.taskTitle,
+					})
+				} catch (error) {
+					logger.warn('task created, but it could not be indexed against the message', { error })
+				}
 
 				showSuccess(t('mail', 'Task created'))
 

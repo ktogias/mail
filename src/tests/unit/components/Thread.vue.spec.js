@@ -15,6 +15,16 @@ vi.mock('../../../util/toast.js', async (importOriginal) => ({
 	...(await importOriginal()),
 	showUndo: vi.fn(),
 }))
+vi.mock('../../../util/revealMessage.js', () => ({
+	revealMessage: vi.fn(),
+	findMessageElement: vi.fn(() => document.createElement('div')),
+}))
+vi.mock('../../../service/MessageTaskService.js', () => ({
+	fetchTasksForMessage: vi.fn().mockResolvedValue([]),
+	taskDeepLink: vi.fn(() => '/apps/tasks/#/calendars/personal/tasks/uid-1'),
+}))
+
+import { revealMessage } from '../../../util/revealMessage.js'
 
 const localVue = createLocalVue()
 
@@ -1640,5 +1650,78 @@ describe('Thread', () => {
 			})
 			vi.useRealTimers()
 		})
+	})
+})
+
+describe('Thread: tasks made from a message', () => {
+	// A task is usually about the instructions IN one particular message. In a
+	// forty-message conversation, a chip that only said "there is a task"
+	// would leave the user hunting for which message it came from -- so the
+	// chip takes them there instead.
+	let taskStore
+
+	beforeEach(() => {
+		vi.clearAllMocks()
+		setActivePinia(createPinia())
+		taskStore = useMainStore()
+		taskStore.getEnvelope = vi.fn().mockReturnValue(undefined)
+		taskStore.getEnvelopes = vi.fn().mockReturnValue([])
+	})
+
+	/**
+	 * @param {object[]} thread envelopes in the thread
+	 * @param {object[]} tasks indexed tasks
+	 * @return {object} the mounted component
+	 */
+	const mountWithTasks = (thread, tasks) => {
+		const view = shallowMount(Thread, {
+			mocks: { $route: { params: { threadId: 100 } } },
+			localVue,
+		})
+		view.setData({ threadTasks: tasks })
+		vi.spyOn(view.vm, 'thread', 'get').mockReturnValue(thread)
+		return view
+	}
+
+	it('shows each task against the message it was made from', () => {
+		const view = mountWithTasks(
+			[{ databaseId: 1, messageId: '<a@b>' }, { databaseId: 2, messageId: '<c@d>' }],
+			[{ taskUid: 'uid-1', messageId: '<c@d>', calendarUri: 'personal' }],
+		)
+
+		expect(view.vm.tasksForEnvelope({ messageId: '<c@d>' })).toHaveLength(1)
+		expect(view.vm.tasksForEnvelope({ messageId: '<a@b>' })).toHaveLength(0)
+	})
+
+	it('expands the source message before jumping to it', async () => {
+		// Order matters and there has to be a tick between: scrolling first
+		// lands on the collapsed height and stops short of the message.
+		const view = mountWithTasks(
+			[{ databaseId: 1, messageId: '<a@b>' }, { databaseId: 2, messageId: '<c@d>' }],
+			[{ taskUid: 'uid-1', messageId: '<c@d>', calendarUri: 'personal' }],
+		)
+		view.setData({ expandedThreads: [1] })
+
+		view.vm.revealTaskSource({ taskUid: 'uid-1', messageId: '<c@d>' })
+
+		expect(view.vm.expandedThreads).toContain(2)
+		expect(revealMessage).not.toHaveBeenCalled()
+
+		await view.vm.$nextTick()
+		expect(revealMessage).toHaveBeenCalledTimes(1)
+	})
+
+	it('does nothing when the source message has left the thread', async () => {
+		// Moved, deleted, or the thread was re-cut by a subject merge. The
+		// index cannot know, and this is not worth interrupting anyone over.
+		const view = mountWithTasks(
+			[{ databaseId: 1, messageId: '<a@b>' }],
+			[{ taskUid: 'uid-1', messageId: '<gone@b>', calendarUri: 'personal' }],
+		)
+
+		view.vm.revealTaskSource({ taskUid: 'uid-1', messageId: '<gone@b>' })
+		await view.vm.$nextTick()
+
+		expect(revealMessage).not.toHaveBeenCalled()
 	})
 })

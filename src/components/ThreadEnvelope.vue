@@ -6,6 +6,7 @@
 <template>
 	<div
 		ref="envelope"
+		:data-thread-id="envelope.databaseId"
 		class="envelope"
 		:class="{ 'envelope--expanded': expanded }">
 		<div
@@ -116,6 +117,24 @@
 						</div>
 					</div>
 				</div>
+			</div>
+			<!-- This is the message a task was made from. Invisible until the
+			     user arrives here -- which is exactly when it is useful, and
+			     why it is not redundant with the chip in the thread header:
+			     that one says a task exists and brings you here, this one says
+			     you have arrived and opens it. -->
+			<div v-if="tasks.length" class="envelope__tasks">
+				<a
+					v-for="task in tasks"
+					:key="task.taskUid"
+					class="envelope__tasks__chip"
+					:href="taskUrl(task)"
+					:title="t('mail', 'Open the task created from this message')"
+					target="_blank"
+					rel="noopener noreferrer">
+					<CheckIcon :size="16" />
+					<span>{{ task.summary || t('mail', 'Task') }}</span>
+				</a>
 			</div>
 			<div class="right">
 				<Moment class="timestamp" :timestamp="envelope.dateInt" />
@@ -406,6 +425,7 @@ import { mapStores } from 'pinia'
 import NcActions from '@nextcloud/vue/components/NcActions'
 import NcActionText from '@nextcloud/vue/components/NcActionText'
 import ArchiveIcon from 'vue-material-design-icons/ArchiveArrowDownOutline.vue'
+import CheckIcon from 'vue-material-design-icons/CheckCircleOutline.vue'
 import ChevronDownIcon from 'vue-material-design-icons/ChevronDown.vue'
 import ChevronUpIcon from 'vue-material-design-icons/ChevronUp.vue'
 import EmailOffIcon from 'vue-material-design-icons/EmailOffOutline.vue'
@@ -443,6 +463,7 @@ import ViewportPrefetchMixin from '../mixins/ViewportPrefetchMixin.js'
 import { buildRecipients as buildReplyRecipients } from '../ReplyBuilder.js'
 import { smartReply } from '../service/AiIntergrationsService.js'
 import { unsubscribe } from '../service/ListService.js'
+import { taskDeepLink } from '../service/MessageTaskService.js'
 import { FOLLOW_UP_TAG_LABEL } from '../store/constants.js'
 import useMainStore from '../store/mainStore.js'
 import useOutboxStore from '../store/outboxStore.js'
@@ -473,6 +494,7 @@ function isSupplementaryCapacityError(error) {
 export default {
 	name: 'ThreadEnvelope',
 	components: {
+		CheckIcon,
 		MailFilterFromEnvelope,
 		EventModal,
 		TaskModal,
@@ -515,6 +537,17 @@ export default {
 		envelope: {
 			required: true,
 			type: Object,
+		},
+
+		/**
+		 * Tasks indexed against THIS message, passed down rather than fetched
+		 * here: the thread asks once for the whole conversation, because a
+		 * request per message is the shape the index exists to avoid.
+		 */
+		tasks: {
+			required: false,
+			type: Array,
+			default: () => [],
 		},
 
 		mailboxId: {
@@ -1105,6 +1138,10 @@ export default {
 			}
 		},
 
+		taskUrl(task) {
+			return taskDeepLink(task.calendarUri, task.taskUid)
+		},
+
 		scrollToThread(threadId) {
 			this.$nextTick(() => {
 				const threadElement = document.querySelector(`[data-thread-id="${threadId}"]`)
@@ -1404,6 +1441,38 @@ export default {
 </script>
 
 <style lang="scss" scoped>
+
+.envelope__tasks {
+	display: flex;
+	align-items: center;
+	gap: var(--default-grid-baseline, 8px);
+	flex-wrap: wrap;
+	padding-inline: calc(var(--default-grid-baseline, 8px) * 2);
+}
+
+.envelope__tasks__chip {
+	display: inline-flex;
+	align-items: center;
+	gap: calc(var(--default-grid-baseline, 8px) / 2);
+	max-width: 260px;
+	padding: 2px calc(var(--default-grid-baseline, 8px) * 1.5);
+	border-radius: var(--border-radius-pill, 16px);
+	background-color: var(--color-background-dark);
+	color: var(--color-main-text) !important;
+	font-size: 90%;
+	text-decoration: none !important;
+}
+
+.envelope__tasks__chip span {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.envelope__tasks__chip:hover,
+.envelope__tasks__chip:focus-visible {
+	background-color: var(--color-background-hover);
+}
 	.sender {
 		margin-inline-start: calc(var(--default-grid-baseline) * 3);
 
