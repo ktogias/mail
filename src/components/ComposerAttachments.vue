@@ -55,7 +55,6 @@
 
 <script>
 import { getRequestToken } from '@nextcloud/auth'
-import { showWarning } from '@nextcloud/dialogs'
 import { FilePickerVue as FilePicker } from '@nextcloud/dialogs/filepicker.js'
 import { formatFileSize } from '@nextcloud/files'
 import { translatePlural as n, translate as t } from '@nextcloud/l10n'
@@ -71,6 +70,7 @@ import logger from '../logger.js'
 import { uploadLocalAttachment } from '../service/AttachmentService.js'
 import { getFileData } from '../service/FileService.js'
 import { shareFile } from '../service/FileSharingService.js'
+import { showWarning } from '../util/toast.js'
 
 const mimes = [
 	'image/gif',

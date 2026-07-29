@@ -111,7 +111,6 @@
 <script>
 import { getCurrentUser } from '@nextcloud/auth'
 import axios from '@nextcloud/axios'
-import { showError, showSuccess } from '@nextcloud/dialogs'
 import { generateOcsUrl } from '@nextcloud/router'
 import { ShareType } from '@nextcloud/sharing'
 import { NcActionButton, NcAvatar, NcButton, NcDialog, NcInputField, NcListItem, NcLoadingIcon, NcSelectUsers } from '@nextcloud/vue'
@@ -126,6 +125,7 @@ import TextEditor from '../TextEditor.vue'
 import logger from '../../logger.js'
 import { getShares, shareTextBlock, unshareTextBlock } from '../../service/TextBlockService.js'
 import useMainStore from '../../store/mainStore.js'
+import { showError, showSuccess } from '../../util/toast.js'
 
 export default {
 	name: 'ListItem',

@@ -75,7 +75,6 @@
 </template>
 
 <script>
-import { showError, showSuccess } from '@nextcloud/dialogs'
 import moment from '@nextcloud/moment'
 import { NcDateTimePicker as DatetimePicker, NcModal as Modal, NcSelect } from '@nextcloud/vue'
 import ICAL from 'ical.js'
@@ -85,6 +84,7 @@ import CalendarPickerOption from './CalendarPickerOption.vue'
 import logger from '../logger.js'
 import useMainStore from '../store/mainStore.js'
 import Task from '../task.js'
+import { showError, showSuccess } from '../util/toast.js'
 
 export default {
 	name: 'TaskModal',

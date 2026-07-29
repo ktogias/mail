@@ -81,7 +81,6 @@
 </template>
 
 <script>
-import { showError, showSuccess } from '@nextcloud/dialogs'
 import { FilePickerVue as FilePicker } from '@nextcloud/dialogs/filepicker.js'
 import { generateUrl } from '@nextcloud/router'
 import { NcLoadingIcon as IconLoading, NcButton } from '@nextcloud/vue'
@@ -93,6 +92,7 @@ import MessageAttachment from './MessageAttachment.vue'
 import Logger from '../logger.js'
 import AttachmentMixin from '../mixins/AttachmentMixin.js'
 import { saveAttachmentsToFiles } from '../service/AttachmentService.js'
+import { showError, showSuccess } from '../util/toast.js'
 
 export default {
 	name: 'MessageAttachments',

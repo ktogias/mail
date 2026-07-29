@@ -13,10 +13,10 @@
 </template>
 
 <script>
-import { showInfo, showSuccess } from '@nextcloud/dialogs'
 import { mapStores } from 'pinia'
 import ConfirmationModal from './ConfirmationModal.vue'
 import useMainStore from '../store/mainStore.js'
+import { showInfo, showSuccess } from '../util/toast.js'
 
 export default {
 	name: 'DeleteTagModal',

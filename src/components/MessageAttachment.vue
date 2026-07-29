@@ -82,7 +82,6 @@
 
 <script>
 
-import { showError, showSuccess } from '@nextcloud/dialogs'
 import { FilePickerVue as FilePicker } from '@nextcloud/dialogs/filepicker.js'
 import { formatFileSize } from '@nextcloud/files'
 import { translate as t } from '@nextcloud/l10n'
@@ -94,6 +93,7 @@ import IconDownload from 'vue-material-design-icons/TrayArrowDown.vue'
 import Logger from '../logger.js'
 import { downloadAttachment, saveAttachmentToFiles } from '../service/AttachmentService.js'
 import { getUserCalendars, importCalendarEvent } from '../service/DAVService.js'
+import { showError, showSuccess } from '../util/toast.js'
 
 const PREVIEW_RETRY_DELAYS_MS = [750, 1500, 3000]
 

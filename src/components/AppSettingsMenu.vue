@@ -294,7 +294,6 @@
 </template>
 
 <script>
-import { showError } from '@nextcloud/dialogs'
 import { generateUrl } from '@nextcloud/router'
 import {
 	NcAppSettingsDialog,
@@ -331,6 +330,7 @@ import TextEditor from './TextEditor.vue'
 import TrustedSenders from './TrustedSenders.vue'
 import Logger from '../logger.js'
 import useMainStore from '../store/mainStore.js'
+import { showError } from '../util/toast.js'
 
 export default {
 	name: 'AppSettingsMenu',

@@ -211,7 +211,6 @@
 </template>
 
 <script>
-import { showError } from '@nextcloud/dialogs'
 import { loadState } from '@nextcloud/initial-state'
 import moment from '@nextcloud/moment'
 import { NcAppContentDetails as AppContentDetails, NcButton as ButtonVue, NcActionButton, NcActionSeparator } from '@nextcloud/vue'
@@ -243,6 +242,7 @@ import { summarizeThread } from '../service/AiIntergrationsService.js'
 import useMainStore from '../store/mainStore.js'
 import { getRandomMessageErrorMessage } from '../util/ErrorMessageFactory.js'
 import { formatDateTimeFromUnix } from '../util/formatDateTime.js'
+import { showError } from '../util/toast.js'
 
 export default {
 	name: 'Thread',

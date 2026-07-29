@@ -120,7 +120,6 @@
 </template>
 
 <script>
-import { showError, showSuccess } from '@nextcloud/dialogs'
 import { translate as t } from '@nextcloud/l10n'
 import {
 	NcEmptyContent as EmptyContent,
@@ -145,6 +144,7 @@ import useMainStore from '../store/mainStore.js'
 import useOutboxStore from '../store/outboxStore.js'
 import { messageBodyToTextInstance } from '../util/message.js'
 import { toPlain } from '../util/text.js'
+import { showError, showSuccess } from '../util/toast.js'
 
 export default {
 	name: 'NewMessageModal',

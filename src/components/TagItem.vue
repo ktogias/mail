@@ -65,7 +65,6 @@
 </template>
 
 <script>
-import { showInfo } from '@nextcloud/dialogs'
 import { NcActionInput as ActionInput, NcActions as Actions, NcActionText as ActionText, NcLoadingIcon as IconLoading, NcActionButton, NcColorPicker } from '@nextcloud/vue'
 import { mapStores } from 'pinia'
 import IconEdit from 'vue-material-design-icons/PencilOutline.vue'
@@ -73,6 +72,7 @@ import DeleteIcon from 'vue-material-design-icons/TrashCanOutline.vue'
 import logger from '../logger.js'
 import useMainStore from '../store/mainStore.js'
 import { translateTagDisplayName, validateTag } from '../util/tag.js'
+import { showInfo } from '../util/toast.js'
 
 export default {
 	name: 'TagItem',

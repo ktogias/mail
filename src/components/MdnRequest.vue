@@ -21,12 +21,12 @@
 </template>
 
 <script>
-import { showError } from '@nextcloud/dialogs'
 import { NcButton } from '@nextcloud/vue'
 import { mapStores } from 'pinia'
 import logger from '../logger.js'
 import { sendMdn } from '../service/MessageService.js'
 import useMainStore from '../store/mainStore.js'
+import { showError } from '../util/toast.js'
 
 export default {
 	name: 'MdnRequest',

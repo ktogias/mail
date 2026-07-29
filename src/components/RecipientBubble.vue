@@ -113,7 +113,6 @@
 </template>
 
 <script>
-import { showError, showSuccess } from '@nextcloud/dialogs'
 import { generateUrl } from '@nextcloud/router'
 import { NcButton as ButtonVue, NcPopover, NcSelect, NcUserBubble as UserBubble } from '@nextcloud/vue'
 import debouncePromise from 'debounce-promise'
@@ -128,6 +127,7 @@ import IconReply from 'vue-material-design-icons/ReplyOutline.vue'
 import logger from '../logger.js'
 import { fetchAvatarUrlMemoized } from '../service/AvatarService.js'
 import { addToContact, autoCompleteByName, findMatches, newContact } from '../service/ContactIntegrationService.js'
+import { showError, showSuccess } from '../util/toast.js'
 
 const debouncedSearch = debouncePromise(autoCompleteByName, 500)
 

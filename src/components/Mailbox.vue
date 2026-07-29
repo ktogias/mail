@@ -66,7 +66,6 @@
 </template>
 
 <script>
-import { showError, showWarning } from '@nextcloud/dialogs'
 import { NcLoadingIcon as IconLoading } from '@nextcloud/vue'
 import { mapStores } from 'pinia'
 import { findIndex, propEq } from 'ramda'
@@ -88,6 +87,7 @@ import ReturnScrollAnchorMixin from '../mixins/ReturnScrollAnchorMixin.js'
 import UndoableActionMixin from '../mixins/UndoableActionMixin.js'
 import useMainStore from '../store/mainStore.js'
 import { mailboxHasRights } from '../util/acl.js'
+import { showError, showWarning } from '../util/toast.js'
 import { wait } from '../util/wait.js'
 
 export default {

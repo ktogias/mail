@@ -398,7 +398,6 @@
 
 <script>
 import axios from '@nextcloud/axios'
-import { showError, showSuccess } from '@nextcloud/dialogs'
 import { loadState } from '@nextcloud/initial-state'
 import moment from '@nextcloud/moment'
 import { generateUrl } from '@nextcloud/router'
@@ -450,6 +449,7 @@ import useOutboxStore from '../store/outboxStore.js'
 import { mailboxHasRights } from '../util/acl.js'
 import { translateTagDisplayName } from '../util/tag.js'
 import { Text, toPlain } from '../util/text.js'
+import { showError, showSuccess } from '../util/toast.js'
 import { hiddenTags } from './tags.js'
 
 // Ternary loading state

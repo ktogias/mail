@@ -35,10 +35,10 @@
 </template>
 
 <script>
-import { showError, showSuccess } from '@nextcloud/dialogs'
 import { translate as t } from '@nextcloud/l10n'
 import logger from '../../logger.js'
 import { configure, unlink } from '../../service/MicrosoftIntegrationService.js'
+import { showError, showSuccess } from '../../util/toast.js'
 
 const PASSWORD_PLACEHOLDER = '*****'
 

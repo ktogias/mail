@@ -281,7 +281,6 @@
 </template>
 
 <script>
-import { showError, showSuccess } from '@nextcloud/dialogs'
 import { loadState } from '@nextcloud/initial-state'
 import ButtonVue from '@nextcloud/vue/components/NcButton'
 import NcCheckboxRadioSwitch from '@nextcloud/vue/components/NcCheckboxRadioSwitch'
@@ -304,6 +303,7 @@ import {
 	updateLlmEnabled,
 	updateProvisioningSettings,
 } from '../../service/SettingsService.js'
+import { showError, showSuccess } from '../../util/toast.js'
 
 const googleOauthClientId = loadState('mail', 'google_oauth_client_id', null) ?? undefined
 const googleOauthRedirectUrl = loadState('mail', 'google_oauth_redirect_url', null)

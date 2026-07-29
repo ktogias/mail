@@ -22,7 +22,6 @@
 </template>
 
 <script>
-import { showError, showSuccess } from '@nextcloud/dialogs'
 import { mapStores } from 'pinia'
 import CreateModal from './CreateModal.vue'
 import UpdateModal from './UpdateModal.vue'
@@ -38,6 +37,7 @@ import {
 } from '../../models/mailFilter.ts'
 import useMailFilterStore from '../../store/mailFilterStore.ts'
 import useMainStore from '../../store/mainStore.js'
+import { showError, showSuccess } from '../../util/toast.js'
 
 export default {
 	name: 'MailFilterFromEnvelope',

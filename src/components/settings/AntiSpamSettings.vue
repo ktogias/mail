@@ -65,13 +65,13 @@
 </template>
 
 <script>
-import { showError, showSuccess } from '@nextcloud/dialogs'
 import { loadState } from '@nextcloud/initial-state'
 import ButtonVue from '@nextcloud/vue/components/NcButton'
 import IconDelete from 'vue-material-design-icons/TrashCanOutline.vue'
 import IconUpload from 'vue-material-design-icons/TrayArrowUp.vue'
 import logger from '../../logger.js'
 import { deleteAntiSpamEmail, setAntiSpamEmail } from '../../service/SettingsService.js'
+import { showError, showSuccess } from '../../util/toast.js'
 
 const email = loadState('mail', 'antispam_setting', '[]')
 

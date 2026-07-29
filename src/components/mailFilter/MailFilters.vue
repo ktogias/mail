@@ -58,7 +58,6 @@
 </template>
 
 <script>
-import { showError, showSuccess } from '@nextcloud/dialogs'
 import { NcActionButton, NcButton, NcListItem } from '@nextcloud/vue'
 import { mapStores } from 'pinia'
 import NcLoadingIcon from '@nextcloud/vue/components/NcLoadingIcon'
@@ -70,6 +69,7 @@ import { MailFilterConditionField, MailFilterConditionOperator } from '../../mod
 import useMailFilterStore from '../../store/mailFilterStore.ts'
 import useMainStore from '../../store/mainStore.js'
 import { randomId } from '../../util/randomId.js'
+import { showError, showSuccess } from '../../util/toast.js'
 
 export default {
 	name: 'MailFilters',

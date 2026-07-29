@@ -106,7 +106,7 @@
 </template>
 
 <script>
-import { DialogBuilder, showError } from '@nextcloud/dialogs'
+import { DialogBuilder } from '@nextcloud/dialogs'
 import { formatFileSize } from '@nextcloud/files'
 import { generateUrl } from '@nextcloud/router'
 import { NcActionButton as ActionButton, NcActionCheckbox as ActionCheckbox, NcActionInput as ActionInput, NcActionText as ActionText, NcLoadingIcon as IconLoading, NcAppNavigationCaption, NcIconSvgWrapper } from '@nextcloud/vue'
@@ -121,6 +121,7 @@ import IconDelete from 'vue-material-design-icons/TrashCanOutline.vue'
 import logger from '../logger.js'
 import { fetchQuota } from '../service/AccountService.js'
 import useMainStore from '../store/mainStore.js'
+import { showError } from '../util/toast.js'
 import IconDelegation from './../../img/delegation.svg'
 
 export default {

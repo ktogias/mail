@@ -47,7 +47,6 @@
 </template>
 
 <script>
-import { showError, showSuccess } from '@nextcloud/dialogs'
 import moment from '@nextcloud/moment'
 import ical from 'ical.js'
 import md5 from 'md5'
@@ -56,6 +55,7 @@ import ArrowIcon from 'vue-material-design-icons/ArrowRight.vue'
 import CalendarImport from './CalendarImport.vue'
 import logger from '../../logger.js'
 import { importCalendarEvent } from '../../service/DAVService.js'
+import { showError, showSuccess } from '../../util/toast.js'
 
 export default {
 	name: 'FlightReservation',

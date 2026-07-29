@@ -38,13 +38,13 @@
 </template>
 
 <script>
-import { showError, showSuccess } from '@nextcloud/dialogs'
 import moment from '@nextcloud/moment'
 import { NcButton, NcNoteCard, NcSelect } from '@nextcloud/vue'
 import { mapState, mapStores } from 'pinia'
 import Logger from '../logger.js'
 import useMainStore from '../store/mainStore.js'
 import { compareSmimeCertificates } from '../util/smime.js'
+import { showError, showSuccess } from '../util/toast.js'
 
 export default {
 	name: 'CertificateSettings',

@@ -56,7 +56,6 @@
 </template>
 
 <script>
-import { showError, showInfo } from '@nextcloud/dialogs'
 import { NcActionInput as ActionInput, NcActionText as ActionText, NcLoadingIcon as IconLoading, NcModal as Modal, NcButton } from '@nextcloud/vue'
 import { mapStores } from 'pinia'
 import IconAdd from 'vue-material-design-icons/Plus.vue'
@@ -66,6 +65,7 @@ import TagItem from './TagItem.vue'
 import logger from '../logger.js'
 import useMainStore from '../store/mainStore.js'
 import { validateTag } from '../util/tag.js'
+import { showError, showInfo } from '../util/toast.js'
 import { hiddenTags } from './tags.js'
 
 function randomColor() {

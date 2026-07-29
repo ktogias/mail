@@ -32,7 +32,6 @@
 
 <script>
 
-import { showError } from '@nextcloud/dialogs'
 import { NcActionButton, NcListItem } from '@nextcloud/vue'
 import prop from 'lodash/fp/prop.js'
 import sortBy from 'lodash/fp/sortBy.js'
@@ -41,6 +40,7 @@ import IconEmail from 'vue-material-design-icons/EmailOutline.vue'
 import IconDelete from 'vue-material-design-icons/TrashCanOutline.vue'
 import logger from '../logger.js'
 import { fetchTrustedSenders, trustSender } from '../service/TrustedSenderService.js'
+import { showError } from '../util/toast.js'
 
 const sortByEmail = sortBy(prop('email'))
 

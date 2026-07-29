@@ -117,7 +117,6 @@
 
 <script>
 import { AttendeeProperty, createEvent, DateTimeValue, TextProperty } from '@nextcloud/calendar-js'
-import { showError, showSuccess } from '@nextcloud/dialogs'
 import { loadState } from '@nextcloud/initial-state'
 import { getTimezoneManager } from '@nextcloud/timezones'
 import { NcDateTimePicker as DatetimePicker, NcModal as Modal, NcSelect } from '@nextcloud/vue'
@@ -129,6 +128,7 @@ import logger from '../logger.js'
 import { generateEventData } from '../service/AiIntergrationsService.js'
 import { getUserCalendars, importCalendarEvent } from '../service/DAVService.js'
 import useMainStore from '../store/mainStore.js'
+import { showError, showSuccess } from '../util/toast.js'
 
 export default {
 	name: 'EventModal',

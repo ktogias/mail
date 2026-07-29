@@ -81,7 +81,6 @@
 </template>
 
 <script>
-import { showError, showSuccess } from '@nextcloud/dialogs'
 import { getLanguage } from '@nextcloud/l10n'
 import { NcButton, NcDialog, NcLoadingIcon, NcRichText, NcSelect } from '@nextcloud/vue'
 import { mapState } from 'pinia'
@@ -91,6 +90,7 @@ import ContentCopy from 'vue-material-design-icons/ContentCopy.vue'
 import logger from '../logger.js'
 import { translateText } from '../service/translationService.js'
 import useMainStore from '../store/mainStore.js'
+import { showError, showSuccess } from '../util/toast.js'
 
 export default {
 	name: 'TranslationModal',

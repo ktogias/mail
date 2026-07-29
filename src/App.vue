@@ -8,7 +8,6 @@
 </template>
 
 <script>
-import { showError } from '@nextcloud/dialogs'
 import { translate as t } from '@nextcloud/l10n'
 import { mapState, mapStores } from 'pinia'
 import MailboxLockedError from './errors/MailboxLockedError.js'
@@ -29,6 +28,7 @@ import {
 } from './service/RequestCoordinator.js'
 import { PRIORITY_INBOX_ID } from './store/constants.js'
 import useMainStore from './store/mainStore.js'
+import { showError } from './util/toast.js'
 
 const WATCHED_MAILBOX_LEASE_MS = 45_000
 const CROSS_TAB_REVALIDATION_COOLDOWN_MS = 60_000

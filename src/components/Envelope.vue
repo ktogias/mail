@@ -550,7 +550,6 @@
 </template>
 
 <script>
-import { showError, showSuccess, showWarning } from '@nextcloud/dialogs'
 import { isRTL } from '@nextcloud/l10n'
 import moment from '@nextcloud/moment'
 import { generateUrl } from '@nextcloud/router'
@@ -617,6 +616,7 @@ import { threadIsUnread } from '../util/priorityInbox.js'
 import { isScrollingRecently } from '../util/scrollActivityTracker.js'
 import { messageDateTime, shortRelativeDatetime } from '../util/shortRelativeDatetime.js'
 import { translateTagDisplayName } from '../util/tag.js'
+import { showError, showSuccess, showWarning } from '../util/toast.js'
 import { hiddenTags } from './tags.js'
 
 export default {

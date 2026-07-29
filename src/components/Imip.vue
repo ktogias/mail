@@ -123,7 +123,6 @@
 <script>
 import { AttendeeProperty, CalendarComponent, DateTimeValue, EventComponent, getParserManager, Parameter, Property } from '@nextcloud/calendar-js'
 import { namespaces as NS } from '@nextcloud/cdav-library'
-import { showError } from '@nextcloud/dialogs'
 import { NcButton, NcLoadingIcon, NcSelect } from '@nextcloud/vue'
 import pLimit from 'p-limit'
 import { mapState } from 'pinia'
@@ -137,6 +136,7 @@ import useMainStore from '../store/mainStore.js'
 import { uidToHexColor } from '../util/calendarColor.js'
 import { removeMailtoPrefix } from '../util/eventAttendee.js'
 import { randomId } from '../util/randomId.js'
+import { showError } from '../util/toast.js'
 
 // iMIP methods
 const REQUEST = 'REQUEST'

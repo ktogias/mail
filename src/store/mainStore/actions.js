@@ -4,7 +4,7 @@
  */
 
 import axios from '@nextcloud/axios'
-import { showError, showWarning, TOAST_DEFAULT_TIMEOUT } from '@nextcloud/dialogs'
+import { TOAST_DEFAULT_TIMEOUT } from '@nextcloud/dialogs'
 import { translate as t } from '@nextcloud/l10n'
 import DOMPurify from 'dompurify'
 import escapeRegExp from 'lodash/fp/escapeRegExp.js'
@@ -136,6 +136,7 @@ import {
 	threadCarriesFlag,
 	threadIsUnread,
 } from '../../util/priorityInbox.js'
+import { showError, showWarning } from '../../util/toast.js'
 import { wait } from '../../util/wait.js'
 import {
 	ENVELOPE_LIST_BASELINE_SIZE,

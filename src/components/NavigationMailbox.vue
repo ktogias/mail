@@ -241,7 +241,6 @@
 
 <script>
 
-import { showError, showInfo } from '@nextcloud/dialogs'
 import { translatePlural as n } from '@nextcloud/l10n'
 import { NcActionButton as ActionButton, NcActionCheckbox as ActionCheckbox, NcActionInput as ActionInput, NcActionText as ActionText, NcAppNavigationItem as AppNavigationItem, NcCounterBubble as CounterBubble, NcLoadingIcon as IconLoading } from '@nextcloud/vue'
 import { mapStores } from 'pinia'
@@ -283,6 +282,7 @@ import { clearCache } from '../service/MessageService.js'
 import { PRIORITY_INBOX_ID, UNIFIED_INBOX_ID } from '../store/constants.js'
 import useMainStore from '../store/mainStore.js'
 import { mailboxHasRights } from '../util/acl.js'
+import { showError, showInfo } from '../util/toast.js'
 
 export default {
 	name: 'NavigationMailbox',

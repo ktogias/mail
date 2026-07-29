@@ -5,17 +5,46 @@
  */
 
 /* @nextcloud/dialogs toasts (incl. the delete/archive/move/snooze Undo toast)
- * default to the top of the screen. On mobile that lands right under the app
- * header and covers the sticky thread header, with no obvious way out. Move
- * them to the bottom -- the standard snackbar position (Material) and the
- * reachable thumb zone -- so they never obscure the header. Toastify sets the
- * top offset inline, hence the !important. `close: true` (UndoableAction.js)
- * adds an explicit dismiss button on top of the action + auto-timeout. */
-@media only screen and (max-width: 1024px) {
-	.toastify.dialogs {
-		top: unset !important;
-		bottom: calc(env(safe-area-inset-bottom, 0px) + var(--default-grid-baseline, 8px) * 2) !important;
-	}
+ * are hardcoded to gravity "top" / position "right" inside the library, so
+ * placement can only be changed from here.
+ *
+ * Top-right is wrong for both layouts. On mobile it lands under the app header
+ * and covers the sticky thread header. On desktop it covers the thread's own
+ * next/previous and action buttons, which live in exactly that corner --
+ * reported live with "Το μήνυμα διαγράφηκε" sitting on top of them.
+ *
+ * Bottom-CENTRE rather than a corner, and the same position on every width.
+ * Both bottom corners are already taken here: the folder list's "show all
+ * folders" control sits bottom-start, and ComposerSessionIndicator is fixed
+ * bottom-end whenever a composer session is open -- which is precisely when
+ * someone is most likely to also delete something and want the Undo. Centre is
+ * the only edge position that owes nothing to either, and it needs no
+ * navigation-width offset and no RTL mirroring, because centre is centre in
+ * both directions.
+ *
+ * Centred without a transform: toastify animates the entry by transitioning
+ * the inline `top` it writes, and a transform here would fight that. `inset-
+ * inline: 0` + `margin-inline: auto` + a fit-content width is toastify's own
+ * `.toastify-center` recipe and stays clear of the animation. The width is
+ * capped so a long message does not stretch across a wide screen.
+ *
+ * !important is needed twice over: toastify writes `top` inline, and the
+ * library's own `.toastify.dialogs.toastify-top` rule pins `right`.
+ *
+ * KNOWN LIMITATION: concurrent toasts overlap instead of stacking. Toastify
+ * spaces a stack by writing increasing inline `top` values, and those are the
+ * values overridden here. The library hardcodes the gravity, so there is no
+ * option to flip; fixing it properly means upstreaming a `gravity` option
+ * rather than reimplementing stacking in a stylesheet. This is not a
+ * regression -- the previous mobile-only version of this rule had the same
+ * behaviour -- and toasts here are near-always singular. */
+.toastify.dialogs {
+	top: unset !important;
+	bottom: calc(env(safe-area-inset-bottom, 0px) + var(--default-grid-baseline, 8px) * 2) !important;
+	inset-inline: 0 !important;
+	margin-inline: auto !important;
+	width: fit-content;
+	max-width: min(560px, calc(100% - var(--default-grid-baseline, 8px) * 4));
 }
 
 .loading {

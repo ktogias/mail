@@ -117,7 +117,6 @@
 </template>
 
 <script>
-import { showError, showSuccess } from '@nextcloud/dialogs'
 import { NcActionButton, NcActions, NcButton, NcListItem, NcLoadingIcon, NcModal, NcTextField } from '@nextcloud/vue'
 import { Container, Draggable } from 'vue-dndrop'
 import AlertOctagonIcon from 'vue-material-design-icons/AlertOctagonOutline.vue'
@@ -135,6 +134,7 @@ import Action from './Action.vue'
 import logger from '../../logger.js'
 import { createActionStep, deleteActionStep, updateActionStep } from '../../service/QuickActionsService.js'
 import useMainStore from '../../store/mainStore.js'
+import { showError, showSuccess } from '../../util/toast.js'
 
 export default {
 	name: 'Settings',

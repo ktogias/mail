@@ -3,11 +3,11 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-import { showUndo } from '@nextcloud/dialogs'
 import DroppableMailbox, { DroppableMailboxDirective } from '../../../directives/drag-and-drop/droppable-mailbox/index.js'
 import dragEventBus from '../../../directives/drag-and-drop/util/dragEventBus.js'
+import { showUndo } from '../../../util/toast.js'
 
-vi.mock('@nextcloud/dialogs', async (importOriginal) => ({
+vi.mock('../../../util/toast.js', async (importOriginal) => ({
 	...(await importOriginal()),
 	showUndo: vi.fn(),
 }))

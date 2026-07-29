@@ -7,9 +7,9 @@
 // Slightly modified for use in Mail
 
 import axios from '@nextcloud/axios'
-import { showError } from '@nextcloud/dialogs'
 import { generateOcsUrl } from '@nextcloud/router'
 import logger from '../logger.js'
+import { showError } from '../util/toast.js'
 
 /**
  * Makes a share link for a given file or directory.

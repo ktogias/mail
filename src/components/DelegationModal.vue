@@ -95,7 +95,6 @@
 import IconCheck from '@mdi/svg/svg/check.svg?raw'
 import { getCurrentUser } from '@nextcloud/auth'
 import axios from '@nextcloud/axios'
-import { showError, showSuccess } from '@nextcloud/dialogs'
 import { generateOcsUrl } from '@nextcloud/router'
 import { ShareType } from '@nextcloud/sharing'
 import { NcAvatar, NcButton, NcDialog, NcListItem, NcLoadingIcon, NcModal, NcSelectUsers } from '@nextcloud/vue'
@@ -104,6 +103,7 @@ import IconClose from 'vue-material-design-icons/Close.vue'
 import IconPlus from 'vue-material-design-icons/Plus.vue'
 import logger from '../logger.js'
 import { delegate, fetchDelegatedUsers, unDelegate } from '../service/DelegationService.js'
+import { showError, showSuccess } from '../util/toast.js'
 
 export default {
 	name: 'DelegationModal',

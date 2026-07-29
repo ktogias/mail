@@ -180,7 +180,6 @@
 </template>
 
 <script>
-import { showError, showSuccess } from '@nextcloud/dialogs'
 import { NcActionButton as ActionButton, NcActions as Actions, NcButton, NcDialog } from '@nextcloud/vue'
 import { mapStores } from 'pinia'
 import AlertOctagonIcon from 'vue-material-design-icons/AlertOctagonOutline.vue'
@@ -210,6 +209,7 @@ import UndoableActionMixin from '../mixins/UndoableActionMixin.js'
 import { ENVELOPE_LIST_MAX_ANIMATED_SIZE } from '../store/constants.js'
 import useMainStore from '../store/mainStore.js'
 import { listTransitionDurationMs } from '../util/listTransitionDuration.js'
+import { showError, showSuccess } from '../util/toast.js'
 
 export default {
 	name: 'EnvelopeList',

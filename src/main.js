@@ -14,6 +14,7 @@ import App from './App.vue'
 import Nextcloud from './mixins/Nextcloud.js'
 import router from './router.js'
 import { installRequestCoordinator } from './service/RequestCoordinator.js'
+import { registerToastDismissal } from './util/toast.js'
 
 import '@nextcloud/dialogs/style.css'
 import './directives/drag-and-drop/styles/drag-and-drop.scss'
@@ -35,6 +36,10 @@ registerDavProperty('nc:share-attributes', { nc: 'http://nextcloud.org/ns' })
 // Install before constructing Vue: child route components mount before App's
 // mounted hook and may start initial Mail API requests immediately.
 installRequestCoordinator()
+
+// Same reasoning: a toast can be raised before App mounts, and the Escape
+// handler is delegated from the document, so it has to exist first.
+registerToastDismissal()
 
 export default new Vue({
 	el: '#content',

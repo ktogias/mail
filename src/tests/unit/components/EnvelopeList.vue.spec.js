@@ -3,14 +3,14 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-import { showUndo } from '@nextcloud/dialogs'
 import { createLocalVue, shallowMount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import EnvelopeList from '../../../components/EnvelopeList.vue'
 import Nextcloud from '../../../mixins/Nextcloud.js'
 import useMainStore from '../../../store/mainStore.js'
+import { showUndo } from '../../../util/toast.js'
 
-vi.mock('@nextcloud/dialogs', async (importOriginal) => ({
+vi.mock('../../../util/toast.js', async (importOriginal) => ({
 	...(await importOriginal()),
 	showUndo: vi.fn(),
 }))

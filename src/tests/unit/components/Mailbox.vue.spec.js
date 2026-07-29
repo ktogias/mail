@@ -3,7 +3,6 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-import { showError, showUndo } from '@nextcloud/dialogs'
 import { createLocalVue, shallowMount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
 import Mailbox from '../../../components/Mailbox.vue'
@@ -11,8 +10,9 @@ import MailboxLockedError from '../../../errors/MailboxLockedError.js'
 import MailboxNotCachedError from '../../../errors/MailboxNotCachedError.js'
 import Nextcloud from '../../../mixins/Nextcloud.js'
 import useMainStore from '../../../store/mainStore.js'
+import { showError, showUndo } from '../../../util/toast.js'
 
-vi.mock('@nextcloud/dialogs', async (importOriginal) => ({
+vi.mock('../../../util/toast.js', async (importOriginal) => ({
 	...(await importOriginal()),
 	showUndo: vi.fn(),
 	showError: vi.fn(),

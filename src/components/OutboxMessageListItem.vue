@@ -56,7 +56,6 @@
 </template>
 
 <script>
-import { showError, showSuccess } from '@nextcloud/dialogs'
 import { getLanguage, translate as t } from '@nextcloud/l10n'
 import moment from '@nextcloud/moment'
 import { NcActionButton as ActionButton, NcListItem as ListItem } from '@nextcloud/vue'
@@ -76,6 +75,7 @@ import {
 } from '../store/constants.js'
 import useMainStore from '../store/mainStore.js'
 import useOutboxStore from '../store/outboxStore.js'
+import { showError, showSuccess } from '../util/toast.js'
 
 export default {
 	name: 'OutboxMessageListItem',

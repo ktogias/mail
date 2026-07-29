@@ -3,13 +3,13 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
-import { showError } from '@nextcloud/dialogs'
 import { shallowMount } from '@vue/test-utils'
 import MessageAttachment from '../../../components/MessageAttachment.vue'
 import * as DAVService from '../../../service/DAVService.js'
+import { showError } from '../../../util/toast.js'
 
 vi.mock('../../../service/DAVService.js')
-vi.mock('@nextcloud/dialogs', async (importOriginal) => ({
+vi.mock('../../../util/toast.js', async (importOriginal) => ({
 	...(await importOriginal()),
 	showError: vi.fn(),
 	showSuccess: vi.fn(),
