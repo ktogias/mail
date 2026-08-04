@@ -42,6 +42,25 @@
 					{{ t('mail', 'All day') }}
 				</label>
 			</div>
+			<div class="task-reminder">
+				<label :for="reminderPickerId">{{ t('mail', 'Reminder') }}</label>
+				<NcSelect
+					:id="reminderPickerId"
+					v-model="selectedReminderChoice"
+					label="label"
+					:input-id="reminderPickerId"
+					:disabled="!canRemind"
+					:clearable="false"
+					:aria-label-combobox="t('mail', 'Select reminder')"
+					:options="reminderChoices" />
+				<!-- Said once, here, rather than left for the user to discover:
+				     a relative trigger needs something to be relative TO, and
+				     with neither date there is nothing. -->
+				<p v-if="!canRemind" class="task-reminder__hint">
+					{{ t('mail', 'Pick a start or due date to set a reminder.') }}
+				</p>
+			</div>
+
 			<!-- FIXME: is broken due to upstream select component serializing options to JSON -->
 			<NcSelect
 				v-model="selectedCalendarChoice"
@@ -85,6 +104,13 @@ import logger from '../logger.js'
 import { linkTaskToMessage, messageDeepLink } from '../service/MessageTaskService.js'
 import useMainStore from '../store/mainStore.js'
 import Task from '../task.js'
+import { randomId } from '../util/randomId.js'
+import {
+	parseReminder,
+	REMINDER_NONE,
+	reminderChoices,
+	reminderRelatedTo,
+} from '../util/taskReminder.js'
 import { showError, showSuccess } from '../util/toast.js'
 
 export default {
@@ -118,6 +144,11 @@ export default {
 			endTimezoneId: defaultTimezoneId,
 			saving: false,
 			selectedCalendarChoice: undefined,
+			// Held as the raw preference spelling ('none' or a signed integer
+			// as a string) rather than a number, so it round-trips through the
+			// preference unchanged and 'none' needs no special case.
+			reminder: REMINDER_NONE,
+			reminderPickerId: randomId(),
 			note: this.envelope.previewText,
 		}
 	},
@@ -152,6 +183,29 @@ export default {
 			}))
 		},
 
+		reminderChoices() {
+			return reminderChoices(this.isAllDay)
+		},
+
+		/**
+		 * A relative trigger needs an anchor, and the anchor is a date the
+		 * user has actually picked. Both start blank here.
+		 */
+		canRemind() {
+			return reminderRelatedTo({ due: this.endDate, start: this.startDate }) !== null
+		},
+
+		selectedReminderChoice: {
+			get() {
+				return this.reminderChoices.find((choice) => choice.value === this.reminder)
+					?? this.reminderChoices[0]
+			},
+
+			set(choice) {
+				this.reminder = choice?.value ?? REMINDER_NONE
+			},
+		},
+
 		selectedCalendar() {
 			if (!this.selectedCalendarChoice) {
 				return undefined
@@ -161,7 +215,20 @@ export default {
 		},
 	},
 
+	watch: {
+		isAllDay(allDay) {
+			// The two option sets share no values -- an all-day reminder is
+			// built around 09:00 and a timed one around the due moment -- so a
+			// selection cannot simply carry over. Re-read the preference for
+			// the kind of task this now is, which is also what the user set it
+			// for; silently keeping a number from the other set would put a
+			// 23:45-the-night-before alarm on an all-day task.
+			this.reminder = this.preferredReminder(allDay)
+		},
+	},
+
 	created() {
+		this.reminder = this.preferredReminder(this.isAllDay)
 		logger.debug('creating task from envelope', {
 			envelope: this.envelope,
 		})
@@ -174,6 +241,24 @@ export default {
 	},
 
 	methods: {
+		/**
+		 * The user's default reminder for this kind of task.
+		 *
+		 * Two preferences, not one, for the same reason the Calendar app keeps
+		 * defaultReminderPartDay and defaultReminderFullDay apart: the offsets
+		 * that make sense for a task due at a moment and one due on a day are
+		 * different numbers with different signs.
+		 *
+		 * @param {boolean} allDay whether the task has no time of day
+		 * @return {string} 'none' or the offset, as stored
+		 */
+		preferredReminder(allDay) {
+			const key = allDay ? 'task-reminder-full-day' : 'task-reminder-part-day'
+			const stored = this.mainStore.getPreference(key, REMINDER_NONE)
+			const seconds = parseReminder(stored, allDay)
+			return seconds === null ? REMINDER_NONE : String(seconds)
+		},
+
 		/**
 		 * @param {string} id The calendar id
 		 * @return {object|undefined} The calendar object (if it exists)
@@ -228,6 +313,28 @@ export default {
 				task.vtodo.updatePropertyWithValue('url', taskData.messageLink)
 			}
 
+			// A reminder, if one is set AND there is something to anchor it to.
+			//
+			// RELATED=END on a VTODO means its DUE time (RFC 5545), which is
+			// what "remind me before this is due" actually asks for. DTSTART is
+			// the fallback; with neither date the trigger has no referent and
+			// no alarm is written at all.
+			//
+			// DISPLAY carries a mandatory DESCRIPTION -- an alarm without one
+			// is invalid, and clients that do honour task alarms are the whole
+			// audience for this.
+			const relatedTo = reminderRelatedTo({ due: taskData.due, start: taskData.start })
+			if (taskData.reminder !== null && relatedTo !== null) {
+				const alarm = new ICAL.Component('valarm')
+				alarm.addPropertyWithValue('action', 'DISPLAY')
+				alarm.addPropertyWithValue('description', taskData.summary)
+				const trigger = new ICAL.Property('trigger')
+				trigger.setParameter('related', relatedTo)
+				trigger.setValue(ICAL.Duration.fromSeconds(taskData.reminder))
+				alarm.addProperty(trigger)
+				task.vtodo.addSubcomponent(alarm)
+			}
+
 			const vData = ICAL.stringify(task.jCal)
 
 			// KEEP the created object. The response carries the name CalDAV
@@ -253,6 +360,9 @@ export default {
 				allDay: this.isAllDay,
 				note: this.note,
 				messageLink: messageDeepLink(this.envelope.messageId),
+				// Re-parsed rather than trusted: the picker holds a string that
+				// came from a preference nothing on the server validates.
+				reminder: parseReminder(this.reminder, this.isAllDay),
 			}
 			try {
 				logger.debug('create task', taskData)
@@ -298,6 +408,15 @@ export default {
 </script>
 
 <style lang="scss" scoped>
+.task-reminder {
+	margin-block: calc(var(--default-grid-baseline, 4px) * 2);
+
+	&__hint {
+		color: var(--color-text-maxcontrast);
+		font-size: 0.9em;
+	}
+}
+
 :deep(.modal-wrapper .modal-container) {
 	width: calc(100vw - 120px) !important;
 	height: calc(100vh - 120px) !important;

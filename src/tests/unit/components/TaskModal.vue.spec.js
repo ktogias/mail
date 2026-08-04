@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: AGPL-3.0-or-later
  */
 
+import ICAL from 'ical.js'
 import TaskModal from '../../../components/TaskModal.vue'
 
 /**
@@ -53,5 +54,130 @@ describe('TaskModal.createTask', () => {
 
 		expect(task.vtodo.getFirstPropertyValue('url'))
 			.toBe('https://home.example/cloud/apps/mail/message?messageId=%3Ca%40b%3E')
+	})
+	describe('reminders', () => {
+		const calendar = () => calendarWith('/remote.php/dav/calendars/kt/isi-comb/X.ics')
+
+		/**
+		 * The VALARM the created task carries, if any.
+		 *
+		 * @param {object} task the created task
+		 * @return {object|null} the alarm component
+		 */
+		const alarmOf = (task) => task.vtodo.getFirstSubcomponent('valarm')
+
+		it('anchors the trigger to the due date', async () => {
+			// RELATED=END on a VTODO is its DUE time (RFC 5545), which is what
+			// "remind me before this is due" actually asks for.
+			const task = await TaskModal.methods.createTask.call(context, {
+				summary: 'Pay the invoice',
+				calendar: calendar(),
+				due: '2026-07-31T00:00:00Z',
+				start: '2026-07-01T00:00:00Z',
+				reminder: -3600,
+			})
+
+			const trigger = alarmOf(task).getFirstProperty('trigger')
+			expect(trigger.getParameter('related')).toBe('END')
+			expect(trigger.getFirstValue().toSeconds()).toBe(-3600)
+			// What actually reaches the client. ical.js is free to normalise
+			// the in-memory shape; the wire format is the contract.
+			expect(ICAL.stringify(task.jCal)).toContain('TRIGGER;RELATED=END:-PT1H')
+		})
+
+		it('falls back to the start date when nothing is due', async () => {
+			// An END-related trigger on a task with no DUE has no referent and
+			// is invalid, not merely unhelpful.
+			const task = await TaskModal.methods.createTask.call(context, {
+				summary: 'x',
+				calendar: calendar(),
+				start: '2026-07-01T00:00:00Z',
+				reminder: -900,
+			})
+
+			expect(alarmOf(task).getFirstProperty('trigger').getParameter('related')).toBe('START')
+		})
+
+		it('writes no alarm at all when there is no date to anchor to', async () => {
+			// Both date pickers start empty in this modal, so this is the
+			// ordinary case, not an edge one.
+			const task = await TaskModal.methods.createTask.call(context, {
+				summary: 'x',
+				calendar: calendar(),
+				reminder: -900,
+			})
+
+			expect(alarmOf(task)).toBeNull()
+		})
+
+		it('writes no alarm when no reminder was chosen', async () => {
+			const task = await TaskModal.methods.createTask.call(context, {
+				summary: 'x',
+				calendar: calendar(),
+				due: '2026-07-31T00:00:00Z',
+				reminder: null,
+			})
+
+			expect(alarmOf(task)).toBeNull()
+		})
+
+		it('gives the alarm the description a DISPLAY action requires', async () => {
+			// An alarm without one is invalid, and clients that honour task
+			// alarms are this feature's entire audience.
+			const task = await TaskModal.methods.createTask.call(context, {
+				summary: 'Pay the invoice',
+				calendar: calendar(),
+				due: '2026-07-31T00:00:00Z',
+				reminder: 0,
+			})
+
+			const alarm = alarmOf(task)
+			expect(alarm.getFirstPropertyValue('action')).toBe('DISPLAY')
+			expect(alarm.getFirstPropertyValue('description')).toBe('Pay the invoice')
+		})
+	})
+	describe('the default that comes from settings', () => {
+		const withPreferences = (preferences) => ({
+			mainStore: {
+				getPreference: (key, fallback) => preferences[key] ?? fallback,
+			},
+		})
+
+		it('reads a different preference for each kind of task', () => {
+			const ctx = withPreferences({
+				'task-reminder-part-day': '-900',
+				'task-reminder-full-day': '32400',
+			})
+
+			expect(TaskModal.methods.preferredReminder.call(ctx, false)).toBe('-900')
+			expect(TaskModal.methods.preferredReminder.call(ctx, true)).toBe('32400')
+		})
+
+		it('ignores a stored value that does not belong to the set', () => {
+			// Reachable by hand-editing: no server-side validation exists for
+			// preference values. A timed offset on an all-day task would fire
+			// at 23:45 the night before.
+			const ctx = withPreferences({ 'task-reminder-full-day': '-900' })
+
+			expect(TaskModal.methods.preferredReminder.call(ctx, true)).toBe('none')
+		})
+
+		it('re-reads the preference when the all-day toggle flips', () => {
+			// The two option sets are disjoint, so a chosen value cannot carry
+			// over. Falling back to the OTHER preference is what the user asked
+			// for; keeping the old number would be silently wrong.
+			const ctx = {
+				...withPreferences({
+					'task-reminder-part-day': '-900',
+					'task-reminder-full-day': '32400',
+				}),
+				reminder: '-900',
+				preferredReminder: TaskModal.methods.preferredReminder,
+			}
+
+			TaskModal.watch.isAllDay.call(ctx, true)
+
+			expect(ctx.reminder).toBe('32400')
+		})
 	})
 })

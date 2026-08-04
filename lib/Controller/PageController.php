@@ -237,6 +237,16 @@ class PageController extends Controller {
 			'sort-favorites' => $this->preferences->getPreference($this->userId, 'sort-favorites', 'false'),
 			'index-context-chat' => $this->contextChatSettingsService->isIndexingEnabled($this->userId) ? 'true' : 'false',
 			'compact-mode' => $this->preferences->getPreference($this->userId, 'compact-mode', 'false'),
+			// Default reminder for a task created from a message. Two keys, as
+			// the Calendar app also keeps defaultReminderPartDay and
+			// defaultReminderFullDay apart: an all-day task is due at midnight,
+			// so the offsets that suit it are a different set with different
+			// signs. 'none' preserves the behaviour before this existed.
+			//
+			// The app value gives an admin an instance-wide default, which is
+			// how Calendar layers the same setting.
+			'task-reminder-part-day' => $this->preferences->getPreference($this->userId, 'task-reminder-part-day', $this->config->getAppValue('mail', 'task_reminder_part_day', 'none')),
+			'task-reminder-full-day' => $this->preferences->getPreference($this->userId, 'task-reminder-full-day', $this->config->getAppValue('mail', 'task_reminder_full_day', 'none')),
 		]);
 		$this->initialStateService->provideInitialState(
 			'prefill_displayName',
