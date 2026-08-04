@@ -180,7 +180,7 @@ class PageControllerTest extends TestCase {
 		$account1 = $this->createMock(Account::class);
 		$account2 = $this->createMock(Account::class);
 		$mailbox = $this->createStub(Mailbox::class);
-		$this->preferences->expects($this->exactly(14))
+		$this->preferences->expects($this->exactly(17))
 			->method('getPreference')
 			->willReturnMap([
 				[$this->userId, 'account-settings', '[]', json_encode([])],
@@ -197,6 +197,9 @@ class PageControllerTest extends TestCase {
 				[$this->userId, 'smime-sign-aliases', '[]', '[]'],
 				[$this->userId, 'sort-favorites', 'false', 'false'],
 				[$this->userId, 'compact-mode', 'false', 'false'],
+				[$this->userId, 'task-start-date', 'none', 'none'],
+				[$this->userId, 'task-reminder-part-day', 'none', 'none'],
+				[$this->userId, 'task-reminder-full-day', 'none', 'none'],
 			]);
 		$this->accountService->expects($this->once())
 			->method('findByUserId')
@@ -275,11 +278,17 @@ class PageControllerTest extends TestCase {
 				['version', '0.0.0', '26.0.0'],
 				['app.mail.attachment-size-limit', 0, 123],
 			]);
-		$this->config->expects($this->exactly(7))
+		// The three task defaults are admin-overridable, so each adds a
+		// getAppValue call in the order the preferences block lists them:
+		// start date first, then the two reminders.
+		$this->config->expects($this->exactly(10))
 			->method('getAppValue')
 			->withConsecutive(
 				[ 'mail', 'installed_version' ],
 				['mail', 'layout_message_view' ],
+				['mail', 'task_start_date', 'none'],
+				['mail', 'task_reminder_part_day', 'none'],
+				['mail', 'task_reminder_full_day', 'none'],
 				['mail', 'google_oauth_client_id' ],
 				['mail', 'microsoft_oauth_client_id' ],
 				['mail', 'microsoft_oauth_tenant_id' ],
@@ -288,6 +297,9 @@ class PageControllerTest extends TestCase {
 			)->willReturnOnConsecutiveCalls(
 				$this->returnValue('1.2.3'),
 				$this->returnValue('threaded'),
+				$this->returnValue('none'),
+				$this->returnValue('none'),
+				$this->returnValue('none'),
 				$this->returnValue(''),
 				$this->returnValue(''),
 				$this->returnValue(''),
@@ -359,7 +371,10 @@ class PageControllerTest extends TestCase {
 					'follow-up-reminders' => 'true',
 					'sort-favorites' => 'false',
 					'index-context-chat' => 'true',
-					'compact-mode' => 'false'
+					'compact-mode' => 'false',
+					'task-start-date' => 'none',
+					'task-reminder-part-day' => 'none',
+					'task-reminder-full-day' => 'none'
 				]],
 				['prefill_displayName', 'Jane Doe'],
 				['importance_classification_default', true],

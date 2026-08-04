@@ -36,7 +36,7 @@
 			v-else-if="isCancel"
 			class="imip__type">
 			<CloseIcon :size="20" fill-color="red" />
-			<span>{{ t('mail', 'This event was cancelled') }}</span>
+			<span>{{ cancelStatusMessage }}</span>
 		</div>
 
 		<EventData :event="attachedVEvent" />
@@ -114,7 +114,24 @@
 				{{ t('mail', 'None of this account\'s addresses is a participant. Accepting adds you and notifies the organizer.') }}
 			</p>
 		</template>
-		<div v-if="!userIsAttendee && !allowUnmatchedAccept" class="imip__actions imip__actions--hint">
+		<div
+			v-if="isCancel && isExistingEvent"
+			class="imip__actions imip__actions--buttons">
+			<!-- The established pattern: process the cancellation automatically
+			     (the background job marks the event CANCELLED) and offer an
+			     explicit removal, the way Outlook's "Remove from Calendar"
+			     does. Never delete silently -- a meeting that vanishes without
+			     a trace is worse than one visibly called off. -->
+			<NcButton
+				variant="secondary"
+				:disabled="loading"
+				:aria-label="t('mail', 'Remove from calendar')"
+				@click="removeCancelledEvent">
+				{{ t('mail', 'Remove from calendar') }}
+			</NcButton>
+			<NcLoadingIcon v-if="loading" />
+		</div>
+		<div v-if="!isCancel && !userIsAttendee && !allowUnmatchedAccept" class="imip__actions imip__actions--hint">
 			{{ t('mail', 'This message has an attached invitation but the invitation does not contain a participant that matches any configured mail account address') }}
 		</div>
 	</div>
@@ -136,7 +153,7 @@ import useMainStore from '../store/mainStore.js'
 import { uidToHexColor } from '../util/calendarColor.js'
 import { removeMailtoPrefix } from '../util/eventAttendee.js'
 import { randomId } from '../util/randomId.js'
-import { showError } from '../util/toast.js'
+import { showError, showSuccess } from '../util/toast.js'
 
 // iMIP methods
 const REQUEST = 'REQUEST'
@@ -256,6 +273,39 @@ export default {
 		 */
 		isCancel() {
 			return this.method === CANCEL
+		},
+
+		/**
+		 * What to say about a cancellation.
+		 *
+		 * Whether the calendar was actually updated is worth stating. The
+		 * background job cannot always apply a cancellation -- one that arrived
+		 * through a mailing list names the list as its attendee, and until the
+		 * account opts in the calendar layer refuses it -- so "this was
+		 * cancelled" alone can be true while the meeting still sits in the
+		 * calendar looking confirmed.
+		 *
+		 * @return {string}
+		 */
+		cancelStatusMessage() {
+			if (!this.existingEventFetched) {
+				return this.t('mail', 'This event was cancelled')
+			}
+			if (!this.isExistingEvent) {
+				return this.t('mail', 'This event was cancelled and is not in your calendar')
+			}
+			return this.eventIsCancelledInCalendar
+				? this.t('mail', 'This event was cancelled and marked as such in your calendar')
+				: this.t('mail', 'This event was cancelled but is still in your calendar')
+		},
+
+		/**
+		 * Whether the copy in the calendar already carries the cancellation.
+		 *
+		 * @return {boolean}
+		 */
+		eventIsCancelledInCalendar() {
+			return this.existingVEvent?.status?.toUpperCase() === 'CANCELLED'
 		},
 
 		/**
@@ -625,6 +675,32 @@ export default {
 			await this.fetchExistingEvent(vEvent.uid, true)
 
 			this.loading = false
+		},
+
+		/**
+		 * Take the cancelled event out of the calendar.
+		 *
+		 * Deletion, not another STATUS change: the automatic path already marks
+		 * it cancelled, so the only thing left for a person to ask for is that
+		 * it stop taking up space. Outlook spells this exact action "Remove
+		 * from Calendar".
+		 */
+		async removeCancelledEvent() {
+			if (!this.existingEvent) {
+				return
+			}
+
+			this.loading = true
+			try {
+				await this.existingEvent.delete()
+				this.existingEvent = undefined
+				showSuccess(this.t('mail', 'Event removed from your calendar'))
+			} catch (error) {
+				showError(this.t('mail', 'Could not remove the event from your calendar'))
+				logger.error('Failed to remove a cancelled event from the calendar', { error })
+			} finally {
+				this.loading = false
+			}
 		},
 
 		async fetchExistingEvent(uid, force = false) {

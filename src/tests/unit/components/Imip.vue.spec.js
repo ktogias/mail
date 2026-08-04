@@ -195,4 +195,62 @@ describe('Imip', () => {
 
 		expect(view.vm.targetCalendar.url).toBe('https://cal/default/')
 	})
+	describe('cancellations', () => {
+		const cancelStatus = (ctx) => Imip.computed.cancelStatusMessage.call({
+			t: (app, s) => s,
+			...ctx,
+		})
+
+		it('says the calendar still holds the event when it does', () => {
+			// The background job cannot always apply a cancellation: one that
+			// arrived through a mailing list names the list as its attendee,
+			// and the calendar layer refuses it. Saying only "this was
+			// cancelled" would be true while the meeting sat in the calendar
+			// looking confirmed -- which is exactly what happened here.
+			expect(cancelStatus({
+				existingEventFetched: true,
+				isExistingEvent: true,
+				eventIsCancelledInCalendar: false,
+			})).toBe('This event was cancelled but is still in your calendar')
+		})
+
+		it('confirms when the calendar was updated', () => {
+			expect(cancelStatus({
+				existingEventFetched: true,
+				isExistingEvent: true,
+				eventIsCancelledInCalendar: true,
+			})).toBe('This event was cancelled and marked as such in your calendar')
+		})
+
+		it('says nothing about the calendar before the lookup finishes', () => {
+			// Claiming either way while the query is in flight would be a guess.
+			expect(cancelStatus({ existingEventFetched: false })).toBe('This event was cancelled')
+		})
+
+		it('deletes the event and forgets it', async () => {
+			// Deletion, not another STATUS change: the automatic path already
+			// marks it cancelled, so the only thing left to ask for is that it
+			// stop taking up space.
+			const existingEvent = { delete: vi.fn().mockResolvedValue(undefined) }
+			const ctx = { existingEvent, loading: false, t: (app, s) => s }
+
+			await Imip.methods.removeCancelledEvent.call(ctx)
+
+			expect(existingEvent.delete).toHaveBeenCalled()
+			expect(ctx.existingEvent).toBeUndefined()
+			expect(ctx.loading).toBe(false)
+		})
+
+		it('keeps the event when the deletion fails', async () => {
+			// Forgetting it locally would tell the user it is gone when it is
+			// not, and there would be no second chance to remove it.
+			const existingEvent = { delete: vi.fn().mockRejectedValue(new Error('nope')) }
+			const ctx = { existingEvent, loading: false, t: (app, s) => s }
+
+			await Imip.methods.removeCancelledEvent.call(ctx)
+
+			expect(ctx.existingEvent).toBe(existingEvent)
+			expect(ctx.loading).toBe(false)
+		})
+	})
 })

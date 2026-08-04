@@ -21,12 +21,14 @@ use OCA\Mail\Db\MessageMapper;
 use OCA\Mail\Exception\ServiceException;
 use OCA\Mail\Model\IMAPMessage;
 use OCA\Mail\Service\AccountService;
+use OCA\Mail\Service\IMipAttendeeRewriter;
 use OCA\Mail\Service\IMipService;
 use OCA\Mail\Service\MailManager;
 use OCA\Mail\Util\ServerVersion;
 use OCP\Calendar\IManager;
 use OCP\ServerVersion as OCPServerVersion;
 use PHPUnit\Framework\MockObject\MockObject;
+use OCP\IUserManager;
 use Psr\Log\LoggerInterface;
 
 class IMipServiceTest extends TestCase {
@@ -49,6 +51,10 @@ class IMipServiceTest extends TestCase {
 
 	private IMipService $service;
 
+	private $attendeeRewriter;
+
+	private $userManager;
+
 	private ServerVersion|MockObject $serverVersion;
 
 	private OCPServerVersion $OCPServerVersion;
@@ -65,6 +71,9 @@ class IMipServiceTest extends TestCase {
 		$this->serverVersion = $this->createMock(ServerVersion::class);
 		$this->OCPServerVersion = new OCPServerVersion();
 
+		$this->attendeeRewriter = $this->createMock(IMipAttendeeRewriter::class);
+		$this->userManager = $this->createMock(IUserManager::class);
+
 		$this->service = new IMipService(
 			$this->accountService,
 			$this->calendarManager,
@@ -72,7 +81,9 @@ class IMipServiceTest extends TestCase {
 			$this->mailboxMapper,
 			$this->mailManager,
 			$this->messageMapper,
-			$this->serverVersion
+			$this->serverVersion,
+			$this->attendeeRewriter,
+			$this->userManager,
 		);
 	}
 

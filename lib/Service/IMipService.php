@@ -19,6 +19,7 @@ use OCA\Mail\Model\IMAPMessage;
 use OCA\Mail\Util\ServerVersion;
 use OCP\AppFramework\Db\DoesNotExistException;
 use OCP\Calendar\IManager;
+use OCP\IUserManager;
 use Psr\Log\LoggerInterface;
 use Throwable;
 use function array_filter;
@@ -34,6 +35,8 @@ class IMipService {
 		private MailManager $mailManager,
 		private MessageMapper $messageMapper,
 		private ServerVersion $serverVersion,
+		private IMipAttendeeRewriter $attendeeRewriter,
+		private IUserManager $userManager,
 	) {
 		$this->calendarManager = $manager;
 	}
@@ -132,15 +135,41 @@ class IMipService {
 					// an IMAP message could contain more than one iMIP object
 					foreach ($imapMessage->scheduling as $schedulingInfo) {
 						$processed = false;
+						$contents = $schedulingInfo['contents'];
+
+						// An invitation that arrived through a mailing list
+						// names the LIST as its attendee, never this user, and
+						// the calendar layer refuses such a message outright --
+						// which silently loses the CANCELs as well, leaving
+						// called-off meetings in the calendar looking
+						// confirmed. The account can opt into accepting them,
+						// and until now that setting reached only the browser.
+						if ($account->getMailAccount()->getImipAllowUnmatched()) {
+							$rewritten = $this->attendeeRewriter->addRecipientIfUnmatched(
+								$contents,
+								// The CalDAV principal's address, not the mail
+								// account's: the recipient check compares
+								// against calendar-user-address-set, which the
+								// account's own address is usually absent from.
+								(string)$this->userManager->get($userId)?->getSystemEMailAddress(),
+							);
+							if ($rewritten !== null) {
+								$this->logger->debug('Added the user as an attendee to an unmatched iMIP message', [
+									'messageId' => $message->getId(),
+									'method' => $schedulingInfo['method'],
+								]);
+								$contents = $rewritten;
+							}
+						}
 						if ($systemVersion < 33) {
 							$principalUri = 'principals/users/' . $userId;
 							if ($schedulingInfo['method'] === 'REQUEST') {
-								$processed = $this->calendarManager->handleIMipRequest($principalUri, $sender, $recipient, $schedulingInfo['contents']);
+								$processed = $this->calendarManager->handleIMipRequest($principalUri, $sender, $recipient, $contents);
 							} elseif ($schedulingInfo['method'] === 'REPLY') {
-								$processed = $this->calendarManager->handleIMipReply($principalUri, $sender, $recipient, $schedulingInfo['contents']);
+								$processed = $this->calendarManager->handleIMipReply($principalUri, $sender, $recipient, $contents);
 							} elseif ($schedulingInfo['method'] === 'CANCEL') {
 								$replyTo = $imapMessage->getReplyTo()->first()?->getEmail();
-								$processed = $this->calendarManager->handleIMipCancel($principalUri, $sender, $replyTo, $recipient, $schedulingInfo['contents']);
+								$processed = $this->calendarManager->handleIMipCancel($principalUri, $sender, $replyTo, $recipient, $contents);
 							}
 						} else {
 							if (!method_exists($this->calendarManager, 'handleIMip')) {
@@ -149,7 +178,7 @@ class IMipService {
 							}
 							$processed = $this->calendarManager->handleIMip(
 								$userId,
-								$schedulingInfo['contents'],
+								$contents,
 								[
 									'recipient' => $recipient,
 									'absent' => $imipCreate ? 'create' : 'ignore',
