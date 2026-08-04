@@ -1534,20 +1534,6 @@ class MessageMapper extends QBMapper {
 
 		$select->from($this->getTableName(), 'm');
 
-		if ($query->getThreaded()) {
-			$selfJoin = $select->expr()->andX(
-				$select->expr()->eq('m.mailbox_id', 'm2.mailbox_id', IQueryBuilder::PARAM_INT),
-				$select->expr()->eq('m.thread_root_id', 'm2.thread_root_id', IQueryBuilder::PARAM_INT),
-				$select->expr()->orX(
-					$select->expr()->lt('m.sent_at', 'm2.sent_at', IQueryBuilder::PARAM_INT),
-					$select->expr()->andX(
-						$select->expr()->eq('m.sent_at', 'm2.sent_at', IQueryBuilder::PARAM_INT),
-						$select->expr()->lt('m.message_id', 'm2.message_id', IQueryBuilder::PARAM_STR),
-					),
-				),
-			);
-			$select->leftJoin('m', $this->getTableName(), 'm2', $selfJoin);
-		}
 
 		$select->where(
 			$qb->expr()->eq('m.mailbox_id', $qb->createNamedParameter($mailbox->getId()), IQueryBuilder::PARAM_INT)
@@ -1740,7 +1726,7 @@ class MessageMapper extends QBMapper {
 		}
 
 		if ($query->getThreaded()) {
-			$select->andWhere($qb->expr()->isNull('m2.id'));
+			$select->andWhere($qb->createFunction($this->threadHeadCondition()));
 		}
 
 		// One bounded query per section, selected by a parameter, instead of
@@ -1951,6 +1937,54 @@ class MessageMapper extends QBMapper {
 		}
 	}
 
+	/**
+	 * "This message is the head of its thread", as an anti-join.
+	 *
+	 * Written as NOT EXISTS rather than the LEFT JOIN ... IS NULL the same
+	 * condition used to be. The two are the same anti-join and return
+	 * byte-identical rows -- verified across whole mailboxes, 108,115 and
+	 * 214,225 thread heads, zero differing in either direction -- but
+	 * PostgreSQL plans them completely differently.
+	 *
+	 * With the LEFT JOIN it estimated ONE surviving row, concluded the LIMIT
+	 * could not be satisfied early, and chose a merge join that sorted every
+	 * message in the mailbox and spilled to disk. On mailbox 194 (193,847
+	 * messages) that was 31,810 shared buffers plus 11,493 temp blocks to
+	 * return 20 rows -- past the 60s search timeout, so opening the folder
+	 * returned a gateway timeout. 97 of them in one 48-hour window.
+	 *
+	 * With NOT EXISTS the estimate is right (175,735 survive), so the planner
+	 * walks mail_msg_mailbox_sent_id_idx in output order, probes
+	 * mail_msg_thrd_root_snt_idx per row, and stops at the limit: 104 buffers,
+	 * no sort, no temp files.
+	 *
+	 * The query itself is upstream's and was never wrong. What changed is the
+	 * data: this fork's BackfillJob grew these mailboxes past the size at
+	 * which a plan that scales with the whole mailbox can finish.
+	 *
+	 * @param bool $newestFirst which direction counts as "later" in the thread
+	 * @return string a correlated NOT EXISTS, to be used with createFunction()
+	 */
+	private function threadHeadCondition(bool $newestFirst = true): string {
+		$qb = $this->db->getQueryBuilder();
+		$sub = $qb->select($qb->expr()->literal(1))
+			->from($this->getTableName(), 'm2')
+			->where(
+				$qb->expr()->eq('m2.mailbox_id', 'm.mailbox_id', IQueryBuilder::PARAM_INT),
+				$qb->expr()->eq('m2.thread_root_id', 'm.thread_root_id', IQueryBuilder::PARAM_STR),
+				$qb->expr()->orX(
+					$newestFirst
+						? $qb->expr()->lt('m.sent_at', 'm2.sent_at', IQueryBuilder::PARAM_INT)
+						: $qb->expr()->gt('m.sent_at', 'm2.sent_at', IQueryBuilder::PARAM_INT),
+					$qb->expr()->andX(
+						$qb->expr()->eq('m.sent_at', 'm2.sent_at', IQueryBuilder::PARAM_INT),
+						$qb->expr()->lt('m.message_id', 'm2.message_id', IQueryBuilder::PARAM_STR),
+					),
+				),
+			);
+		return 'NOT EXISTS (' . $sub->getSQL() . ')';
+	}
+
 	private function executeWithSearchTimeout(callable $fn) {
 		if ($this->db->getDatabaseProvider() !== IDBConnection::PLATFORM_POSTGRES) {
 			return $fn();
@@ -1973,20 +2007,7 @@ class MessageMapper extends QBMapper {
 		// more than one row per message in the first place.
 		$select = $qb->select(['m.id', 'm.sent_at']);
 
-		$selfJoin = $select->expr()->andX(
-			$select->expr()->eq('m.mailbox_id', 'm2.mailbox_id', IQueryBuilder::PARAM_INT),
-			$select->expr()->eq('m.thread_root_id', 'm2.thread_root_id', IQueryBuilder::PARAM_INT),
-			$select->expr()->orX(
-				$select->expr()->lt('m.sent_at', 'm2.sent_at', IQueryBuilder::PARAM_INT),
-				$select->expr()->andX(
-					$select->expr()->eq('m.sent_at', 'm2.sent_at', IQueryBuilder::PARAM_INT),
-					$select->expr()->lt('m.message_id', 'm2.message_id', IQueryBuilder::PARAM_STR),
-				),
-			),
-		);
-
-		$select->from($this->getTableName(), 'm')
-			->leftJoin('m', $this->getTableName(), 'm2', $selfJoin);
+		$select->from($this->getTableName(), 'm');
 
 		$selectMailboxIds = $qbMailboxes->select('mb.id')
 			->from('mail_mailboxes', 'mb')
@@ -2068,7 +2089,7 @@ class MessageMapper extends QBMapper {
 			);
 		}
 
-		$select->andWhere($qb->expr()->isNull('m2.id'));
+		$select->andWhere($qb->createFunction($this->threadHeadCondition()));
 
 		// See findAllIds()'s own comment: sent_at alone ties across
 		// mailboxes even more readily than within one, and this method
@@ -2598,22 +2619,9 @@ class MessageMapper extends QBMapper {
 				)
 			);
 
-		$selfJoin = $select->expr()->andX(
-			$select->expr()->eq('m.mailbox_id', 'm2.mailbox_id', IQueryBuilder::PARAM_INT),
-			$select->expr()->eq('m.thread_root_id', 'm2.thread_root_id', IQueryBuilder::PARAM_INT),
-			$select->expr()->orX(
-				$sortOrder === IMailSearch::ORDER_NEWEST_FIRST
-					? $select->expr()->lt('m.sent_at', 'm2.sent_at', IQueryBuilder::PARAM_INT)
-					: $select->expr()->gt('m.sent_at', 'm2.sent_at', IQueryBuilder::PARAM_INT),
-				$select->expr()->andX(
-					$select->expr()->eq('m.sent_at', 'm2.sent_at', IQueryBuilder::PARAM_INT),
-					$select->expr()->lt('m.message_id', 'm2.message_id', IQueryBuilder::PARAM_STR),
-				),
-			),
-		);
 		$wheres = [$select->expr()->eq('m.mailbox_id', $select->createNamedParameter($mailbox->getId(), IQueryBuilder::PARAM_INT)),
 			$select->expr()->andX($subSelect->expr()->notIn('m.id', $select->createParameter('ids'), IQueryBuilder::PARAM_INT_ARRAY)),
-			$select->expr()->isNull('m2.id'),
+			$select->createFunction($this->threadHeadCondition($sortOrder === IMailSearch::ORDER_NEWEST_FIRST)),
 		];
 		if ($sortOrder === IMailSearch::ORDER_NEWEST_FIRST) {
 			$wheres[] = $select->expr()->gt('m.sent_at', $select->createFunction('(' . $subSelect->getSQL() . ')'), IQueryBuilder::PARAM_INT);
@@ -2629,7 +2637,6 @@ class MessageMapper extends QBMapper {
 		$select
 			->select(['m.id', 'm.sent_at'])
 			->from($this->getTableName(), 'm')
-			->leftJoin('m', $this->getTableName(), 'm2', $selfJoin)
 			->where(...$wheres)
 			->orderBy('m.sent_at', $sortOrder === IMailSearch::ORDER_NEWEST_FIRST ? 'desc' : 'asc');
 
