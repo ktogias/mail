@@ -180,4 +180,66 @@ describe('TaskModal.createTask', () => {
 			expect(ctx.reminder).toBe('32400')
 		})
 	})
+	describe('the default start date', () => {
+		const ctxWith = (preferences) => ({
+			mainStore: { getPreference: (key, fallback) => preferences[key] ?? fallback },
+			preferredStartDate: TaskModal.methods.preferredStartDate,
+			preferredReminder: TaskModal.methods.preferredReminder,
+			startDateIsOurs: true,
+			seededStartDate: null,
+			startDate: null,
+			reminder: 'none',
+		})
+
+		it('sets nothing unless the user has asked for it', () => {
+			// The Tasks app dates a task only when the collection it was created
+			// in implies one, and a message implies nothing. Off by default.
+			expect(TaskModal.methods.preferredStartDate.call(ctxWith({}), true)).toBeNull()
+		})
+
+		it('seeds the picker from the preference', () => {
+			const ctx = ctxWith({ 'task-start-date': '1' })
+
+			const date = TaskModal.methods.preferredStartDate.call(ctx, true)
+
+			expect(date).not.toBeNull()
+			expect(Math.round((date - new Date()) / 86400000)).toBeGreaterThanOrEqual(0)
+			// Remembered, so a later toggle can tell our value from the user's.
+			expect(ctx.seededStartDate).toBe(date)
+		})
+
+		it('re-derives on the all-day toggle, because truncation differs', () => {
+			// Day-truncated for an all-day task, hour-truncated otherwise, so
+			// the same offset means a different moment either side of the
+			// toggle.
+			const ctx = ctxWith({ 'task-start-date': '0' })
+			ctx.startDate = TaskModal.methods.preferredStartDate.call(ctx, false)
+			const timed = ctx.startDate
+
+			TaskModal.watch.isAllDay.call(ctx, true)
+
+			expect(ctx.startDate).not.toBe(timed)
+			expect(ctx.startDate.getHours()).toBe(0)
+		})
+
+		it('never overwrites a date the user picked themselves', () => {
+			// Re-seeding on every toggle would throw away a deliberate choice.
+			const ctx = ctxWith({ 'task-start-date': '0' })
+			ctx.startDate = new Date('2026-12-24T00:00:00Z')
+			ctx.startDateIsOurs = false
+
+			TaskModal.watch.isAllDay.call(ctx, true)
+
+			expect(ctx.startDate).toEqual(new Date('2026-12-24T00:00:00Z'))
+		})
+
+		it('stops treating the date as ours once it changes', () => {
+			const ctx = ctxWith({ 'task-start-date': '0' })
+			ctx.seededStartDate = new Date('2026-01-01T00:00:00Z')
+
+			TaskModal.watch.startDate.call(ctx, new Date('2026-12-24T00:00:00Z'))
+
+			expect(ctx.startDateIsOurs).toBe(false)
+		})
+	})
 })

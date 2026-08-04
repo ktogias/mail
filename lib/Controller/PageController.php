@@ -245,6 +245,12 @@ class PageController extends Controller {
 			//
 			// The app value gives an admin an instance-wide default, which is
 			// how Calendar layers the same setting.
+			// A START date, not a due one. The Tasks app surfaces a task through
+			// its "Current" collection by way of the start date, so this gives
+			// a task somewhere to appear without inventing a deadline -- and an
+			// invented deadline makes everything overdue, which is why the
+			// Tasks app itself has no default-due-date setting either.
+			'task-start-date' => $this->preferences->getPreference($this->userId, 'task-start-date', $this->config->getAppValue('mail', 'task_start_date', 'none')),
 			'task-reminder-part-day' => $this->preferences->getPreference($this->userId, 'task-reminder-part-day', $this->config->getAppValue('mail', 'task_reminder_part_day', 'none')),
 			'task-reminder-full-day' => $this->preferences->getPreference($this->userId, 'task-reminder-full-day', $this->config->getAppValue('mail', 'task_reminder_full_day', 'none')),
 		]);

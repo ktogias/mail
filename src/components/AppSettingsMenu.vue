@@ -56,7 +56,8 @@
 					</NcFormBox>
 				</NcFormGroup>
 
-				<NcFormGroup :label="t('mail', 'Default reminder for tasks created from a message')">
+				<NcFormGroup :label="t('mail', 'Defaults for tasks created from a message')">
+					<TaskStartDateSettings />
 					<TaskReminderSettings />
 				</NcFormGroup>
 			</NcAppSettingsSection>
@@ -330,6 +331,7 @@ import IconAdd from 'vue-material-design-icons/Plus.vue'
 import InternalAddress from './InternalAddress.vue'
 import SmimeCertificateModal from './smime/SmimeCertificateModal.vue'
 import TaskReminderSettings from './TaskReminderSettings.vue'
+import TaskStartDateSettings from './TaskStartDateSettings.vue'
 import List from './textBlocks/List.vue'
 import TextEditor from './TextEditor.vue'
 import TrustedSenders from './TrustedSenders.vue'
@@ -341,6 +343,7 @@ export default {
 	name: 'AppSettingsMenu',
 	components: {
 		TaskReminderSettings,
+		TaskStartDateSettings,
 		TrustedSenders,
 		InternalAddress,
 		NcButton,

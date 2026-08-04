@@ -111,6 +111,7 @@ import {
 	reminderChoices,
 	reminderRelatedTo,
 } from '../util/taskReminder.js'
+import { parseStartOffset, START_NONE, startDateFor } from '../util/taskStartDate.js'
 import { showError, showSuccess } from '../util/toast.js'
 
 export default {
@@ -149,6 +150,10 @@ export default {
 			// preference unchanged and 'none' needs no special case.
 			reminder: REMINDER_NONE,
 			reminderPickerId: randomId(),
+			// Whether the start date still holds the value we seeded, so a
+			// date the user chose is never silently replaced.
+			startDateIsOurs: true,
+			seededStartDate: null,
 			note: this.envelope.previewText,
 		}
 	},
@@ -224,11 +229,30 @@ export default {
 			// for; silently keeping a number from the other set would put a
 			// 23:45-the-night-before alarm on an all-day task.
 			this.reminder = this.preferredReminder(allDay)
+
+			// Re-derived rather than left alone: the Tasks app truncates a
+			// start date to the day for an all-day task and to the hour
+			// otherwise, so the same offset means a different moment either
+			// side of this toggle. Only touched while the field still holds
+			// what we put there -- once the user has picked a date themselves,
+			// overwriting it would be rude.
+			if (this.startDateIsOurs) {
+				this.startDate = this.preferredStartDate(allDay)
+			}
+		},
+
+		startDate(value) {
+			// Any change we did not make ourselves is the user's, and from then
+			// on the field is theirs.
+			if (value !== this.seededStartDate) {
+				this.startDateIsOurs = false
+			}
 		},
 	},
 
 	created() {
 		this.reminder = this.preferredReminder(this.isAllDay)
+		this.startDate = this.preferredStartDate(this.isAllDay)
 		logger.debug('creating task from envelope', {
 			envelope: this.envelope,
 		})
@@ -257,6 +281,25 @@ export default {
 			const stored = this.mainStore.getPreference(key, REMINDER_NONE)
 			const seconds = parseReminder(stored, allDay)
 			return seconds === null ? REMINDER_NONE : String(seconds)
+		},
+
+		/**
+		 * The user's default start date, if they have set one.
+		 *
+		 * A START date and not a due one: inside Nextcloud the due date is the
+		 * only thing that surfaces a task, but inventing a deadline makes
+		 * everything overdue and the marker stops meaning anything. The Tasks
+		 * app's "Current" collection is entered by having STARTED, so this buys
+		 * the visibility without the false deadline.
+		 *
+		 * @param {boolean} allDay whether the task has no time of day
+		 * @return {Date|null} the start date to seed the picker with
+		 */
+		preferredStartDate(allDay) {
+			const stored = this.mainStore.getPreference('task-start-date', START_NONE)
+			const date = startDateFor(parseStartOffset(stored), allDay)
+			this.seededStartDate = date
+			return date
 		},
 
 		/**
