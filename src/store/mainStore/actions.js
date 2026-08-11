@@ -6456,7 +6456,7 @@ export default function mainStoreActions() {
 						if (!stored.threadRootId) {
 							continue
 						}
-						const key = `${stored.accountId} ${stored.threadRootId}`
+						const key = `${stored.accountId}\0${stored.threadRootId}`
 						const bucket = threadMembersIndex.get(key)
 						if (bucket) {
 							bucket.push(stored)
@@ -6465,7 +6465,7 @@ export default function mainStoreActions() {
 						}
 					}
 				}
-				return threadMembersIndex.get(`${accountId} ${threadRootId}`) ?? []
+				return threadMembersIndex.get(`${accountId}\0${threadRootId}`) ?? []
 			}
 
 			envelopes.forEach((envelope) => {
