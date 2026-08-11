@@ -1693,6 +1693,9 @@ export async function mapWithConcurrencyLimit(items, limit, fn) {
  */
 const PREFETCH_BATCH_SIZE = 10
 
+/** The one prefetch allowed to be in flight or queued at a time. */
+let prefetchController
+
 const LOCK_RETRY_BASE_MS = 1500
 const LOCK_RETRY_MAX_MS = 30 * 1000
 // A mailbox freshly locked near the start of a long sync can have nearly
@@ -5298,7 +5301,21 @@ export default function mainStoreActions() {
 				return
 			}
 
-			await prefetchMessageBodies(wanted)
+			// Only the newest head is worth having. A queued prefetch is by
+			// definition not urgent, so while the user works down the list the
+			// earlier ones would still be waiting for a slot with a list
+			// position the user has already passed. Replace rather than pile
+			// up.
+			prefetchController?.abort()
+			const controller = new AbortController()
+			prefetchController = controller
+			try {
+				await prefetchMessageBodies(wanted, { signal: controller.signal })
+			} finally {
+				if (prefetchController === controller) {
+					prefetchController = undefined
+				}
+			}
 		},
 
 		async fetchItineraries(id, { signal } = {}) {

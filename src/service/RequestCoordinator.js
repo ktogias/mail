@@ -12,16 +12,18 @@ export const WorkClass = Object.freeze({
 	EXPLICIT_HEAVY: 'explicit-heavy',
 	VISIBLE_REVALIDATION: 'visible-revalidation',
 	SPECULATIVE: 'speculative',
+	PREFETCH: 'prefetch',
 	MAINTENANCE: 'maintenance',
 })
 
-const PRIORITY = Object.freeze({
+export const PRIORITY = Object.freeze({
 	[WorkClass.QUICK_MUTATION]: 0,
 	[WorkClass.ACTIVE_CONTENT]: 1,
 	[WorkClass.EXPLICIT_HEAVY]: 2,
 	[WorkClass.VISIBLE_REVALIDATION]: 3,
 	[WorkClass.SPECULATIVE]: 4,
-	[WorkClass.MAINTENANCE]: 5,
+	[WorkClass.PREFETCH]: 5,
+	[WorkClass.MAINTENANCE]: 6,
 })
 const HTTP_PRIORITY = Object.freeze({
 	[WorkClass.QUICK_MUTATION]: 'u=0',
@@ -29,6 +31,7 @@ const HTTP_PRIORITY = Object.freeze({
 	[WorkClass.EXPLICIT_HEAVY]: 'u=2',
 	[WorkClass.VISIBLE_REVALIDATION]: 'u=3',
 	[WorkClass.SPECULATIVE]: 'u=6, i',
+	[WorkClass.PREFETCH]: 'u=6, i',
 	[WorkClass.MAINTENANCE]: 'u=7, i',
 })
 const FOREGROUND_CLASSES = new Set([
@@ -38,16 +41,18 @@ const FOREGROUND_CLASSES = new Set([
 ])
 const LOW_PRIORITY_CLASSES = new Set([
 	WorkClass.SPECULATIVE,
+	WorkClass.PREFETCH,
 	WorkClass.MAINTENANCE,
 ])
 const HIDDEN_CANCEL_CLASSES = new Set([
 	WorkClass.VISIBLE_REVALIDATION,
 	WorkClass.SPECULATIVE,
+	WorkClass.PREFETCH,
 	WorkClass.MAINTENANCE,
 ])
 const GLOBAL_CONCURRENCY = 4
 const PER_ACCOUNT_CONCURRENCY = 3
-const AGING_INTERVAL_MS = 30_000
+export const AGING_INTERVAL_MS = 30_000
 const FAIRNESS_AFTER_FOREGROUND_STARTS = 8
 const FAIRNESS_MIN_WAIT_MS = 30_000
 const MAX_PERMIT_HOLD_MS = 150_000
@@ -183,13 +188,33 @@ export class RequestCoordinator {
 		) {
 			return Promise.reject(cancellationError('Background mail request skipped while connectivity is recovering'))
 		}
+		// Neither speculative nor prefetch work is worth starting for a tab
+		// nobody is looking at.
 		if (
-			workClass === WorkClass.SPECULATIVE
-			&& (
-				(typeof document !== 'undefined' && document.visibilityState === 'hidden')
-				|| this.hasForegroundPressure()
-			)
+			(workClass === WorkClass.SPECULATIVE || workClass === WorkClass.PREFETCH)
+			&& typeof document !== 'undefined'
+			&& document.visibilityState === 'hidden'
 		) {
+			return Promise.reject(cancellationError('Off-screen mail request dropped while the tab is hidden'))
+		}
+		// Speculative work is dropped outright under foreground pressure --
+		// it is a guess about something on screen, and a guess that has to
+		// queue is worthless by the time it arrives.
+		//
+		// Prefetch is NOT. It queues. This distinction is the whole of .95:
+		// .94 gave body prefetching the SPECULATIVE class, and
+		// hasForegroundPressure() is true whenever a single ACTIVE_CONTENT or
+		// QUICK_MUTATION request is in flight or queued -- which, while
+		// someone works through a backlog, is essentially always. The feature
+		// was rejected before it ever became an HTTP request, so it did
+		// nothing in exactly the situation it was built for: zero prefetch
+		// calls reached the server in the first hour after deployment.
+		//
+		// Queuing is right because prefetch is not competing for the user's
+		// attention, only for a spare connection. It sits at the bottom of
+		// the queue, runs in the pauses between actions, and is cancelled if
+		// the tab is hidden or connectivity degrades.
+		if (workClass === WorkClass.SPECULATIVE && this.hasForegroundPressure()) {
 			return Promise.reject(cancellationError('Speculative mail request dropped under foreground pressure'))
 		}
 
@@ -266,6 +291,13 @@ export class RequestCoordinator {
 			return basePriority
 		}
 		const ageBoost = Math.floor((now - item.queuedAt) / AGING_INTERVAL_MS)
+		if (item.workClass === WorkClass.PREFETCH) {
+			// Prefetch ages -- otherwise sustained activity would starve it
+			// forever, which is the .94 failure by a slower route -- but never
+			// past speculative. Warming a body the user has not asked for must
+			// not outrank anything they can see.
+			return Math.max(basePriority - ageBoost, PRIORITY[WorkClass.SPECULATIVE])
+		}
 		// Maintenance may age ahead of speculative/visible revalidation, but
 		// never ahead of an explicit user action.
 		return Math.max(basePriority - ageBoost, PRIORITY[WorkClass.EXPLICIT_HEAVY])

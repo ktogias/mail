@@ -4,9 +4,11 @@
  */
 
 import {
+	AGING_INTERVAL_MS,
 	coordinateMailRequest,
 	isConnectivityFailure,
 	isMailRequest,
+	PRIORITY,
 	releaseCrossTabLeadership,
 	RequestCoordinator,
 	runCrossTabLeader,
@@ -210,6 +212,78 @@ describe('RequestCoordinator', () => {
 		})).rejects.toMatchObject({ code: 'ERR_CANCELED' })
 
 		releaseMutation()
+	})
+
+	it('queues prefetch under foreground pressure instead of dropping it', async () => {
+		// THE .95 contract, and the reason .95 exists. .94 gave body
+		// prefetching the SPECULATIVE class, and the test directly above
+		// documents what that means: dropped whenever a foreground action is
+		// active. While working through a backlog something always is, so the
+		// feature made zero calls in its first hour live.
+		//
+		// If prefetch is ever put back on SPECULATIVE, this rejects and says so.
+		const coordinator = new RequestCoordinator()
+		const releaseMutation = await coordinator.acquire({
+			workClass: WorkClass.QUICK_MUTATION,
+			accountId: 'account-1',
+		})
+
+		// Both asked for under identical conditions. Speculative is refused,
+		// prefetch is not: that difference IS the fix, and asserting them
+		// together is what makes the test fail if prefetch goes back to
+		// SPECULATIVE rather than merely testing that some class works.
+		await expect(coordinator.acquire({
+			workClass: WorkClass.SPECULATIVE,
+			accountId: 'account-1',
+		})).rejects.toMatchObject({ code: 'ERR_CANCELED' })
+
+		const releasePrefetch = await coordinator.acquire({
+			workClass: WorkClass.PREFETCH,
+			accountId: 'account-1',
+		})
+
+		releasePrefetch()
+		releaseMutation()
+	})
+
+	it('never lets an aged prefetch outrank anything the user can see', async () => {
+		// Prefetch has to age or sustained activity starves it forever -- the
+		// .94 failure by a slower route. But it warms a body nobody asked for,
+		// so it must not climb past speculative and start displacing work for
+		// content that is actually on screen.
+		const coordinator = new RequestCoordinator()
+		const now = Date.now()
+		const aged = {
+			workClass: WorkClass.PREFETCH,
+			queuedAt: now - (60 * AGING_INTERVAL_MS),
+		}
+
+		expect(coordinator.effectivePriority(aged, now))
+			.toBe(PRIORITY[WorkClass.SPECULATIVE])
+		expect(coordinator.effectivePriority(aged, now))
+			.toBeGreaterThan(PRIORITY[WorkClass.VISIBLE_REVALIDATION])
+	})
+
+	it('does not start prefetch for a tab nobody is looking at', async () => {
+		const coordinator = new RequestCoordinator()
+		const original = Object.getOwnPropertyDescriptor(document, 'visibilityState')
+		Object.defineProperty(document, 'visibilityState', {
+			configurable: true,
+			get: () => 'hidden',
+		})
+
+		try {
+			await expect(coordinator.acquire({
+				workClass: WorkClass.PREFETCH,
+				accountId: 'account-1',
+			})).rejects.toMatchObject({ code: 'ERR_CANCELED' })
+		} finally {
+			if (original) {
+				Object.defineProperty(document, 'visibilityState', original)
+			} else {
+				delete document.visibilityState
+			}
+		}
 	})
 
 	it('cancels queued maintenance when the browser goes offline', async () => {

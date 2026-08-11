@@ -592,7 +592,11 @@ export async function prefetchMessageBodies(ids, { signal } = {}) {
 	try {
 		await axios.post(url, { ids }, {
 			signal,
-			mailWorkClass: WorkClass.SPECULATIVE,
+			// PREFETCH, not SPECULATIVE. Speculative requests are rejected
+			// outright whenever any foreground request is in flight, which
+			// while triaging is always -- .94 shipped that way and never made
+			// a single call. Prefetch queues instead and runs in the pauses.
+			mailWorkClass: WorkClass.PREFETCH,
 		})
 	} catch (error) {
 		// Deliberately swallowed, including capacity rejections and aborts.
