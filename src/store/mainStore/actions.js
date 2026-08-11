@@ -5008,6 +5008,55 @@ export default function mainStoreActions() {
 		 * @param {object} options.envelope the row that was acted on
 		 * @param {boolean} options.addTag true to mark important, false to clear
 		 */
+		/**
+		 * The same thing for a whole selection, in one pass.
+		 *
+		 * Calling markEnvelopeImportantOrUnimportant() per row looks equivalent
+		 * and is not: each call begins with `await knownOrFetchedThreadMembers()`,
+		 * which fetches the thread when the client does not already hold every
+		 * member. So a selection of twenty cost twenty sequential-ish round trips
+		 * BEFORE any of them could touch a flag, and the rows migrated one by
+		 * one at whatever pace the server answered -- visibly so while it is
+		 * under load. In between, each row showed the outlined badge, which is
+		 * the honest report of "this thread still has an important member",
+		 * because the members that would clear it had not arrived yet.
+		 *
+		 * Fetching every thread first, in parallel, collapses that to one wait.
+		 * The flag writes then all happen in the same tick, so the whole
+		 * selection reclassifies at once, which is what the button appears to
+		 * promise.
+		 *
+		 * @param {object} data the payload
+		 * @param {object[]} data.envelopes the selected envelopes
+		 * @param {boolean} data.addTag whether this marks important or not
+		 * @return {Promise<void>} resolves once every write has been attempted
+		 */
+		async markEnvelopesImportantOrUnimportant({ envelopes, addTag }) {
+			this.setInteractionPriorityMutation()
+			return handleHttpAuthErrors(async () => {
+				const threaded = this.getPreference('layout-message-view', 'threaded') === 'threaded'
+				if (!threaded) {
+					await Promise.all(envelopes.map((envelope) => this.setEnvelopeImportant(envelope, addTag)))
+					return
+				}
+				// One wait for the whole selection, not one per row.
+				const targetsPerEnvelope = await Promise.all(envelopes.map((envelope) => this.knownOrFetchedThreadMembers(envelope)))
+				// Deduplicated: two selected rows in the same thread would
+				// otherwise write the same member's flag twice, and the second
+				// write races the first one's revert-on-failure path.
+				const seen = new Set()
+				const targets = []
+				for (const members of targetsPerEnvelope) {
+					for (const member of members) {
+						if (member && !seen.has(member.databaseId)) {
+							seen.add(member.databaseId)
+							targets.push(member)
+						}
+					}
+				}
+				await Promise.all(targets.map((member) => this.setEnvelopeImportant(member, addTag)))
+			})
+		},
 		async markEnvelopeImportantOrUnimportant({
 			envelope,
 			addTag,

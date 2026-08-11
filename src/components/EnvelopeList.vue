@@ -532,11 +532,9 @@ export default {
 		},
 
 		markSelectionImportant() {
-			this.selectedEnvelopes.forEach((envelope) => {
-				this.mainStore.markEnvelopeImportantOrUnimportant({
-					envelope,
-					addTag: true,
-				})
+			this.mainStore.markEnvelopesImportantOrUnimportant({
+				envelopes: this.selectedEnvelopes,
+				addTag: true,
 			})
 			// The message leaves the current section (e.g. Other) for the
 			// Important section immediately (see the store's reclassify) --
@@ -549,11 +547,9 @@ export default {
 		},
 
 		markSelectionUnimportant() {
-			this.selectedEnvelopes.forEach((envelope) => {
-				this.mainStore.markEnvelopeImportantOrUnimportant({
-					envelope,
-					addTag: false,
-				})
+			this.mainStore.markEnvelopesImportantOrUnimportant({
+				envelopes: this.selectedEnvelopes,
+				addTag: false,
 			})
 			showSuccess(t('mail', 'Marked as unimportant'))
 			this.retainSelectionOfVisible()

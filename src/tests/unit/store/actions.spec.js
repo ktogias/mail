@@ -5485,6 +5485,49 @@ describe('Vuex store actions', () => {
 			expect(envelope.tags).not.toContain(importantTag.id)
 		})
 
+		it('waits ONCE for a whole selection instead of once per row', async () => {
+			// Marking a multi-selection unimportant used to call the
+			// single-envelope action per row, and each call opens with
+			// `await knownOrFetchedThreadMembers()` -- a thread fetch whenever
+			// the client does not already hold every member. Twenty selected
+			// rows meant twenty waits before any flag moved, so the rows
+			// migrated between sections one at a time, each showing the
+			// outlined badge in between because the members that would clear
+			// it had not arrived yet.
+			//
+			// Asserting on CONCURRENCY, not on a count: the fix is that the
+			// fetches overlap, and only a fixture that holds them open can
+			// tell an overlapping batch from a sequential one.
+			let inFlight = 0
+			let maxInFlight = 0
+			let release
+			const held = new Promise((resolve) => {
+				release = resolve
+			})
+			const envelopes = [1, 2, 3].map((id) => {
+				const envelope = { databaseId: id, threadRootId: `t${id}`, flags: { important: true }, tags: [] }
+				store.envelopes[id] = envelope
+				return envelope
+			})
+			store.fetchThread = vi.fn(async () => {
+				inFlight++
+				maxInFlight = Math.max(maxInFlight, inFlight)
+				await held
+				inFlight--
+				return []
+			})
+			MessageService.setEnvelopeFlags.mockResolvedValue({})
+
+			const marking = store.markEnvelopesImportantOrUnimportant({ envelopes, addTag: false })
+			await vi.waitFor(() => expect(maxInFlight).toBe(3))
+			release()
+			await marking
+
+			// All three threads were in flight together; sequential per-row
+			// calls would never exceed one.
+			expect(maxInFlight).toBe(3)
+		})
+
 		it('markEnvelopeImportantOrUnimportant is a no-op when the message already matches the requested state', async () => {
 			const envelope = seedEnvelope(false, [])
 
