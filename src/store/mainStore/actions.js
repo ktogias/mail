@@ -322,6 +322,17 @@ function furthestEnvelope(envelopes, sortOrder) {
  * @return {object[]} the contiguous prefix of the page
  */
 function contiguousFannedOutPage(page, openTails, sortOrder) {
+	// A source with NO tail has delivered nothing for this query, and the
+	// caller has already filtered out the ones that answered with nothing (see
+	// exhaustedConstituents). So this is a source that was asked and has not
+	// answered -- a failed fetch -- and the merge cannot be said to reach
+	// anywhere yet. Skipping it, as this reduce used to, let the boundary come
+	// only from the sources that worked, so the merge ran past the silent one
+	// and everything it held in that range vanished: the July-to-May jump.
+	if (openTails.some((tail) => tail === undefined)) {
+		return []
+	}
+
 	const boundary = openTails.reduce((newest, tail) => {
 		if (tail === undefined) {
 			return newest
@@ -3410,13 +3421,33 @@ export default function mainStoreActions() {
 							// failing must not fail pagination for every other
 							// account sharing this unified/priority mailbox.
 							return pipe(
-								map((mb) => this.fetchNextEnvelopes({
-									mailboxId: mb.databaseId,
-									query,
-									quantity,
-									addToUnifiedMailboxes: false,
-									workClass,
-								}).then((fetched) => {
+								map((mb) => (
+									// A constituent with no list for this query has
+									// never successfully loaded -- what a failed
+									// initial load leaves behind. fetchNextEnvelopes()
+									// returns [] for it WITHOUT contacting the server
+									// ("envelope list is not defined"), and that empty
+									// array then reads as "answered with nothing", so
+									// the source is retired as exhausted having never
+									// been asked. Retired, it stops constraining the
+									// boundary and the merge runs straight past it.
+									// Ask for its FIRST page instead, so an empty
+									// answer really does mean there is nothing there.
+									this.getEnvelopes(mb.databaseId, query).length > 0
+										? this.fetchNextEnvelopes({
+												mailboxId: mb.databaseId,
+												query,
+												quantity,
+												addToUnifiedMailboxes: false,
+												workClass,
+											})
+										: this.fetchEnvelopes({
+												mailboxId: mb.databaseId,
+												query,
+												addToUnifiedMailboxes: false,
+												workClass,
+											})
+								).then((fetched) => {
 									if (fetched.length === 0) {
 										exhaustedConstituents.add(mb.databaseId)
 									}

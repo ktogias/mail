@@ -3276,6 +3276,55 @@ describe('Vuex store actions', () => {
 		expect(unified[unified.length - 1]).toEqual(11026)
 	})
 
+	it('refuses to publish a fanned-out page when a constituent fetch FAILED', async () => {
+		// The live recurrence of the July-to-May jump, reproduced. .31 hardened
+		// the CANCELLED path and .65 added truncation, but a source whose fetch
+		// fails outright (a 502 -- this install produced 444 in a day) delivers
+		// NOTHING, so it has no tail. contiguousFannedOutPage skipped tail-less
+		// sources, the boundary came only from the source that worked, and the
+		// merge ran on to wherever that one reached. Everything the failed
+		// source held in between disappeared: "last Sunday, then 22 May".
+		//
+		// The failing source must therefore hold NO local envelopes here. An
+		// earlier version of this test gave it some, which left it with a tail
+		// and let a different guard catch the page -- it passed with both
+		// fixes reverted, which is how it was caught.
+		const account13 = { id: 13 }
+		const account26 = { id: 26 }
+		store.preferences['sort-order'] = 'newest'
+		store.preferences['layout-message-view'] = 'threaded'
+		store.addAccountMutation(account13)
+		store.addAccountMutation(account26)
+		store.addMailboxMutation({
+			account: account13,
+			mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+		})
+		store.addMailboxMutation({
+			account: account26,
+			mailbox: { name: 'INBOX', databaseId: 21, specialRole: 'inbox' },
+		})
+		// Only the healthy source has anything cached. The other has never
+		// answered -- the state a fresh section load leaves it in.
+		store.addEnvelopesMutation({ envelopes: reverse(range(30, 35)).map(mockEnvelope(11)) })
+
+		MessageService.fetchEnvelopes.mockImplementation(async (accountId, mailboxId) => {
+			if (mailboxId === 11) {
+				return reverse(range(26, 30)).map(mockEnvelope(11))
+			}
+			throw new Error('Request failed with status code 502')
+		})
+
+		await expect(store.fetchNextEnvelopePage({
+			mailboxId: UNIFIED_INBOX_ID,
+			quantity: PAGE_SIZE,
+		})).rejects.toThrow()
+
+		// Nothing past the point the failed source stopped speaking for.
+		const unified = store.getEnvelopes(UNIFIED_INBOX_ID, undefined).map((e) => e.databaseId)
+		expect(unified).not.toContain(11029)
+		expect(unified).not.toContain(11026)
+	})
+
 	it('lets an exhausted source stop constraining the merge', async () => {
 		// The other half of the same rule, and the reason it cannot simply be
 		// "never emit past any source's tail": the tiny inbox's tail IS the
