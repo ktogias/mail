@@ -64,7 +64,6 @@ import {
 	getDeepSearch,
 	startDeepSearch,
 } from '../../service/DeepSearchService.js'
-import { reportDiagnostic } from '../../service/DiagnosticsService.js'
 import { moveDraft, updateDraft } from '../../service/DraftService.js'
 import * as FollowUpService from '../../service/FollowUpService.js'
 import {
@@ -3059,16 +3058,6 @@ export default function mainStoreActions() {
 							const completedLists = partialLists.filter((list) => list !== undefined)
 							const partial = sliceToPage(combineEnvelopeLists(this.getPreference('sort-order'))(completedLists))
 							if (partial.length > 0) {
-								reportDiagnostic('fanout-partial', {
-									mailboxId,
-									virtualQuery: String(virtualQuery),
-									answered: completedLists.length,
-									of: mbs.length,
-									rows: partial.length,
-									newest: partial[0]?.dateInt,
-									oldest: partial[partial.length - 1]?.dateInt,
-									from: completedLists.map((l) => l.length).join('/'),
-								})
 								this.addEnvelopesMutation({
 									envelopes: partial,
 									query: virtualQuery,
@@ -3113,15 +3102,6 @@ export default function mainStoreActions() {
 						andThen(combineEnvelopeLists(this.getPreference('sort-order'))),
 						andThen(sliceToPage),
 						andThen(tap((envelopes) => {
-							reportDiagnostic('fanout-final', {
-								branch: 'unified',
-								mailboxId,
-								query: String(query),
-								rows: envelopes.length,
-								newest: envelopes[0]?.dateInt,
-								oldest: envelopes[envelopes.length - 1]?.dateInt,
-								listBefore: (this.getEnvelopes(mailboxId, query) ?? []).length,
-							})
 							this.addEnvelopesMutation({
 								envelopes,
 								query,
@@ -3176,20 +3156,6 @@ export default function mainStoreActions() {
 							andThen(combineEnvelopeLists(this.getPreference('sort-order'))),
 							andThen(sliceToPage),
 							andThen(tap((envelopes) => {
-								const before = this.getEnvelopes(mailboxId, query) ?? []
-								reportDiagnostic('fanout-final', {
-									branch: 'priority',
-									mailboxId,
-									query: String(query),
-									rows: envelopes.length,
-									newest: envelopes[0]?.dateInt,
-									oldest: envelopes[envelopes.length - 1]?.dateInt,
-									listBefore: before.length,
-									// The number that decides it: if the list is
-									// still longer than the page after a replace,
-									// something else is writing this key.
-									oldestBefore: before[before.length - 1]?.dateInt,
-								})
 								return this.addEnvelopesMutation({
 									envelopes,
 									query,
