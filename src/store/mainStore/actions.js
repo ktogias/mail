@@ -3942,10 +3942,39 @@ export default function mainStoreActions() {
 
 						const unifiedMailbox = this.getUnifiedMailbox(mailbox.specialRole)
 
+						// A constituent's sync may report messages that are new to
+						// THIS client but old in time -- a mailbox catching up, or
+						// one whose newest mail is months behind the others. Put
+						// straight into the unified list they land below today's
+						// rows, and everything between them stays unfetched from
+						// the other sources: the July-to-May jump, arriving by a
+						// third route after .87 covered pagination and .88 the
+						// initial load.
+						//
+						// So the unified list only takes what falls inside the
+						// range it already covers. The rest is NOT lost: it stays
+						// in this mailbox's own list, and pagination merges it in
+						// its proper place once every source has been asked that
+						// far back.
+						const unifiedTail = unifiedMailbox
+							? last(this.getEnvelopes(unifiedMailbox.databaseId, query) ?? [])
+							: undefined
+						const unifiedReach = unifiedTail?.dateInt
+						const withinReach = unifiedReach === undefined
+							? syncData.newMessages
+							: syncData.newMessages.filter((envelope) => envelope.dateInt >= unifiedReach)
+
 						this.addEnvelopesMutation({
 							envelopes: syncData.newMessages,
 							query,
+							addToUnifiedMailboxes: false,
 						})
+						if (withinReach.length > 0) {
+							this.addEnvelopesMutation({
+								envelopes: withinReach,
+								query,
+							})
+						}
 
 						syncData.newMessages.forEach((envelope) => {
 							if (unifiedMailbox) {

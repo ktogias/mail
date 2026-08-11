@@ -3229,6 +3229,46 @@ describe('Vuex store actions', () => {
 		expect(unified).toContain(11080)
 	})
 
+	it('keeps a lagging constituent\'s old mail out of the unified list', async () => {
+		// The third route to the July-to-May jump. .87 covered pagination and
+		// .88 the initial load; the SYNC path publishes each constituent's new
+		// messages straight into the unified list with no boundary at all.
+		//
+		// "New" means new to this client, not new in time. A mailbox catching
+		// up -- or one whose newest mail is months behind the others -- lands
+		// its rows below today's, and everything between stays unfetched from
+		// the other sources. Nothing is lost: the rows stay in that mailbox's
+		// own list and pagination merges them in properly.
+		const account13 = { id: 13 }
+		store.preferences['sort-order'] = 'newest'
+		store.addAccountMutation(account13)
+		store.addMailboxMutation({
+			account: account13,
+			mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+		})
+		// The unified list currently reaches back only to envelope 30.
+		store.addEnvelopesMutation({ envelopes: reverse(range(30, 35)).map(mockEnvelope(11)) })
+		const reachedBefore = store.getEnvelopes(UNIFIED_INBOX_ID, undefined).length
+
+		MessageService.syncEnvelopes.mockResolvedValue({
+			newMessages: [mockEnvelope(11)(2), mockEnvelope(11)(40)],
+			changedMessages: [],
+			vanishedMessages: [],
+			stats: {},
+		})
+
+		await store.syncEnvelopes({ mailboxId: 11 })
+
+		const unified = store.getEnvelopes(UNIFIED_INBOX_ID, undefined).map((e) => e.databaseId)
+		// 40 is newer than everything on screen and belongs there.
+		expect(unified).toContain(11040)
+		// 2 is far older than the list's reach -- publishing it would open the
+		// gap. It stays in the mailbox's own list instead.
+		expect(unified).not.toContain(11002)
+		expect(store.getEnvelopes(11, undefined).map((e) => e.databaseId)).toContain(11002)
+		expect(unified.length).toBeGreaterThan(reachedBefore)
+	})
+
 	it('refuses to publish a fanned-out page when a constituent fetch was cancelled', async () => {
 		// Live on 2026-07-27: a 504 on the Gmail folder list stalled the UI,
 		// repeated pull-ups had the two large inboxes' page fetches cancelled
