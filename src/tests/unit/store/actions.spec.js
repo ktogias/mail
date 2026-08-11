@@ -3172,6 +3172,63 @@ describe('Vuex store actions', () => {
 		].map((e) => e.databaseId).sort())
 	})
 
+	it('does not leave a fast tiny inbox\'s ancient rows below the real page', async () => {
+		// The recurring July-to-May jump, finally on the path that produces it.
+		//
+		// The progressive publish emits whatever has answered so far. A
+		// six-message inbox answers instantly; the busy ones take seconds. So
+		// the first thing in the list is that inbox ALONE -- ancient rows with
+		// nothing to bound them -- and merging today's page in afterwards used
+		// to leave both, with everything in between never asked for.
+		//
+		// Modelling the RACE is the whole point: earlier attempts resolved both
+		// sources together, where sliceToPage discards the ancient rows anyway,
+		// so they passed with the fix reverted.
+		const account13 = { id: 13 }
+		const account26 = { id: 26 }
+		store.preferences['sort-order'] = 'newest'
+		store.preferences['layout-message-view'] = 'threaded'
+		store.addAccountMutation(account13)
+		store.addAccountMutation(account26)
+		store.addMailboxMutation({
+			account: account13,
+			mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+		})
+		store.addMailboxMutation({
+			account: account26,
+			mailbox: { name: 'INBOX', databaseId: 21, specialRole: 'inbox' },
+		})
+
+		let releaseBusy
+		MessageService.fetchEnvelopes.mockImplementation(async (accountId, mailboxId) => {
+			if (mailboxId === 21) {
+				// Tiny and instant: everything it has, all of it ancient.
+				return reverse(range(1, 4)).map(mockEnvelope(21))
+			}
+			// Busy and slow: a full page of today's mail.
+			await new Promise((resolve) => {
+				releaseBusy = resolve
+			})
+			return reverse(range(80, 80 + PAGE_SIZE)).map(mockEnvelope(11))
+		})
+
+		const fetching = store.fetchEnvelopes({ mailboxId: UNIFIED_INBOX_ID })
+		// The tiny inbox has landed on its own by now -- that is the point of
+		// publishing progressively, and it must stay allowed.
+		await vi.waitFor(() => expect(releaseBusy).toBeTypeOf('function'))
+		expect(store.getEnvelopes(UNIFIED_INBOX_ID, undefined).length).toBeGreaterThan(0)
+
+		releaseBusy()
+		await fetching
+
+		const unified = store.getEnvelopes(UNIFIED_INBOX_ID, undefined).map((e) => e.databaseId)
+		// Once the real answer is in, the ancient rows must be gone rather than
+		// sitting underneath it.
+		expect(unified).not.toContain(21003)
+		expect(unified).not.toContain(21001)
+		expect(unified).toContain(11080)
+	})
+
 	it('refuses to publish a fanned-out page when a constituent fetch was cancelled', async () => {
 		// Live on 2026-07-27: a 504 on the Gmail folder list stalled the UI,
 		// repeated pull-ups had the two large inboxes' page fetches cancelled

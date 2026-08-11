@@ -3105,6 +3105,26 @@ export default function mainStoreActions() {
 							this.addEnvelopesMutation({
 								envelopes,
 								query,
+								// REPLACE, not merge. The progressive publish
+								// above emits whatever has answered so far, and a
+								// six-message inbox answers instantly while the
+								// busy ones take seconds -- so the first thing in
+								// this list is that inbox ALONE, five rows from
+								// May, with nothing to bound them. Merging today's
+								// page in afterwards leaves both: today on top,
+								// May at the bottom, and the thousands in between
+								// never asked for. Worse, the unified cursor then
+								// sits on the May row, so every further pull walks
+								// AWAY from the gap -- visible in the request
+								// trace as a source pinned at cursorId=2 forever.
+								//
+								// This page is the authoritative snapshot of what
+								// matches, which is exactly what `replace` exists
+								// for; the partial stays visible while the slow
+								// source is pending, and stops existing once the
+								// real answer arrives.
+								replace: true,
+								replaceMailboxId: mailboxId,
 							})
 							// Same tick as the list write above, not the
 							// outer .finally() below (an extra microtask
@@ -3138,6 +3158,26 @@ export default function mainStoreActions() {
 							andThen(tap((envelopes) => this.addEnvelopesMutation({
 								envelopes,
 								query,
+								// REPLACE, not merge. The progressive publish
+								// above emits whatever has answered so far, and a
+								// six-message inbox answers instantly while the
+								// busy ones take seconds -- so the first thing in
+								// this list is that inbox ALONE, five rows from
+								// May, with nothing to bound them. Merging today's
+								// page in afterwards leaves both: today on top,
+								// May at the bottom, and the thousands in between
+								// never asked for. Worse, the unified cursor then
+								// sits on the May row, so every further pull walks
+								// AWAY from the gap -- visible in the request
+								// trace as a source pinned at cursorId=2 forever.
+								//
+								// This page is the authoritative snapshot of what
+								// matches, which is exactly what `replace` exists
+								// for; the partial stays visible while the slow
+								// source is pending, and stops existing once the
+								// real answer arrives.
+								replace: true,
+								replaceMailboxId: mailboxId,
 							}))),
 						)
 						return fetchPriorityEnvelopes(this.getAccounts)
