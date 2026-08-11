@@ -92,6 +92,7 @@ import {
 	messageBodyRequestKey,
 	messageThreadRequestKey,
 	moveMessage,
+	prefetchMessageBodies,
 	removeEnvelopeTag,
 	setEnvelopeFlags,
 	setEnvelopeFlagsBatch,
@@ -1682,6 +1683,15 @@ export async function mapWithConcurrencyLimit(items, limit, fn) {
 	await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
 	return results
 }
+
+/**
+ * How many unopened messages to warm in one prefetch call.
+ *
+ * Matched to the server's own cap. Larger batches do not help much -- the
+ * saving is the single login, and that is already won at two -- while a longer
+ * request holds an IMAP connection open for messages the user may never reach.
+ */
+const PREFETCH_BATCH_SIZE = 10
 
 const LOCK_RETRY_BASE_MS = 1500
 const LOCK_RETRY_MAX_MS = 30 * 1000
@@ -5264,6 +5274,33 @@ export default function mainStoreActions() {
 				}
 			}
 		},
+		/**
+		 * Warm the server-side body cache for envelopes the user has not
+		 * opened yet, so that when they do it costs no IMAP login.
+		 *
+		 * Only ever asks for what is not already known to be cached, and the
+		 * server skips the rest again on its side -- prefetching the same page
+		 * twice must cost nothing, because both call sites will overlap.
+		 *
+		 * Fire and forget. Nothing on screen depends on the result.
+		 *
+		 * @param {number[]} ids envelope database ids, in the order the user
+		 *   will most likely reach them
+		 * @return {Promise<void>}
+		 */
+		async prefetchBodies(ids) {
+			const wanted = (ids ?? [])
+				.filter((id) => Number.isInteger(id))
+				.filter((id) => this.messages[id] === undefined)
+				.slice(0, PREFETCH_BATCH_SIZE)
+
+			if (wanted.length === 0) {
+				return
+			}
+
+			await prefetchMessageBodies(wanted)
+		},
+
 		async fetchItineraries(id, { signal } = {}) {
 			return handleHttpAuthErrors(async () => {
 				const itineraries = await fetchMessageItineraries(id, { signal })

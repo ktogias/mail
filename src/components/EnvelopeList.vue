@@ -211,6 +211,16 @@ import useMainStore from '../store/mainStore.js'
 import { listTransitionDurationMs } from '../util/listTransitionDuration.js'
 import { showError, showSuccess } from '../util/toast.js'
 
+/**
+ * How many rows at the top of the list to warm.
+ *
+ * Matches the store and server caps. It is deliberately the visible head
+ * rather than everything loaded: a page can hold hundreds of envelopes and
+ * warming all of them would pull bodies the user will never look at, over the
+ * very connection budget this is trying to protect.
+ */
+const PREFETCH_HEAD_SIZE = 10
+
 export default {
 	name: 'EnvelopeList',
 	components: {
@@ -306,6 +316,9 @@ export default {
 			lastToggledIndex: undefined,
 			defaultView: false,
 			showQuickActionsSettings: false,
+			// Not reactive state anyone renders -- only the memo that stops
+			// prefetchHeadOfList() re-asking for a head it already asked for.
+			lastPrefetchedHead: undefined,
 		}
 	},
 
@@ -461,6 +474,12 @@ export default {
 
 	watch: {
 		sortedEnvelops(newVal, oldVal) {
+			// Warm the bodies at the head of the list. Triage consumes the
+			// list from the top -- read it, delete it, the next one moves up --
+			// so the head changing IS the user moving through their mail, and
+			// this fires for both the first load and every step afterwards.
+			this.prefetchHeadOfList(newVal)
+
 			// Unselect vanished envelopes
 			const newIds = new Set(newVal.map((env) => env.databaseId))
 			this.selection = this.selection.filter((id) => newIds.has(id))
@@ -485,6 +504,9 @@ export default {
 
 	mounted() {
 		dragEventBus.on('envelopes-dropped', this.unselectAll)
+		// The watcher only fires on change, and a list that is already
+		// populated when this mounts would otherwise never be warmed.
+		this.prefetchHeadOfList(this.sortedEnvelops)
 	},
 
 	beforeDestroy() {
@@ -499,6 +521,38 @@ export default {
 	},
 
 	methods: {
+		/**
+		 * Ask the server to warm the bodies of the first few rows.
+		 *
+		 * Guarded by the head itself: the watcher fires on any list update,
+		 * including ones that change nothing at the top (a flag, a counter, a
+		 * tail trim), and re-asking for the same rows would be a request per
+		 * mutation while triaging. Only a genuinely new head is worth a call.
+		 *
+		 * The store drops ids it already holds and the server drops ids it has
+		 * already cached, so an overlapping range costs nothing on either side.
+		 *
+		 * @param {object[]} envelopes the sorted list
+		 */
+		prefetchHeadOfList(envelopes) {
+			const head = (envelopes ?? [])
+				.slice(0, PREFETCH_HEAD_SIZE)
+				.map((envelope) => envelope.databaseId)
+				.filter((id) => Number.isInteger(id))
+
+			if (head.length === 0) {
+				return
+			}
+
+			const key = head.join(',')
+			if (key === this.lastPrefetchedHead) {
+				return
+			}
+			this.lastPrefetchedHead = key
+
+			this.mainStore.prefetchBodies(head)
+		},
+
 		isEnvelopeSelected(idx) {
 			if (this.selection.length === 0) {
 				return false

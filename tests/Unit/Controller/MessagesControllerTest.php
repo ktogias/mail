@@ -446,7 +446,7 @@ class MessagesControllerTest extends TestCase {
 		$this->assertSame('Live subject', $response->getData()['subject']);
 	}
 
-	public function testGetBodyDoesNotCacheAPlainTextOnlyMessage(): void {
+	public function testGetBodyCachesAPlainTextOnlyMessage(): void {
 		$accountId = 17;
 		$mailboxId = 13;
 		$messageId = 4321;
@@ -463,8 +463,14 @@ class MessagesControllerTest extends TestCase {
 		$client = $this->createStub(Horde_Imap_Client_Socket::class);
 		$this->clientFactory->method('getClient')->with($this->account)->willReturn($client);
 		$imapMessage = $this->createMock(IMAPMessage::class);
-		// Plain-text-only message -- matches the existing (unchanged)
-		// gating: never cached, same as before this fix.
+		// Plain-text-only message. Upstream gated the cache write on
+		// hasHtmlMessage(), and this test used to pin that as "unchanged" --
+		// it was characterising inherited behaviour, not protecting a
+		// decision. The gate is gone: it bought nothing and cost a fresh IMAP
+		// login every single time such a message was opened, which is the
+		// exact currency Gmail throttles on. Safe because getHtmlBody()
+		// serves $cached['body'] on a hit and computes the identical
+		// $fullMessage['body'] on a miss.
 		$imapMessage->method('hasHtmlMessage')->willReturn(false);
 		$imapMessage->method('getFullMessage')->willReturn([
 			'uid' => 123,
@@ -476,7 +482,7 @@ class MessagesControllerTest extends TestCase {
 
 		$cache = $this->createMock(ICache::class);
 		$cache->method('get')->willReturn(null);
-		$cache->expects($this->never())->method('set');
+		$cache->expects($this->once())->method('set');
 		$this->rebuildControllerWithCache($cache);
 
 		$this->controller->getBody($messageId);
@@ -722,6 +728,7 @@ class MessagesControllerTest extends TestCase {
 		$mailbox->setAccountId($accountId);
 		$this->mailManager->method('getMessage')->willReturn($message);
 		$this->mailManager->method('getMailbox')->willReturn($mailbox);
+		$this->account->method('getId')->willReturn(42);
 		$this->accountService->method('find')->willReturn($this->account);
 		$this->inlineAttachmentCache->expects(self::once())
 			->method('get')
@@ -1267,6 +1274,7 @@ class MessagesControllerTest extends TestCase {
 				return $survivor;
 			});
 		$this->mailManager->method('getMailbox')->willReturn($mailbox);
+		$this->account->method('getId')->willReturn(42);
 		$this->accountService->method('find')->willReturn($this->account);
 		// The survivor is still written, and the missing id contributes no UID.
 		$this->mailManager->expects($this->once())
@@ -1326,6 +1334,7 @@ class MessagesControllerTest extends TestCase {
 				return $message;
 			});
 		$this->mailManager->method('getMailbox')->willReturn($mailbox);
+		$this->account->method('getId')->willReturn(42);
 		$this->accountService->method('find')->willReturn($this->account);
 		$this->mailManager->expects($this->once())->method('flagMessages');
 
@@ -2391,5 +2400,134 @@ class MessagesControllerTest extends TestCase {
 		$actualResponse = $this->controller->smartReply(100);
 		$expectedResponse = new JSONResponse([], Http::STATUS_NO_CONTENT);
 		$this->assertEquals($expectedResponse, $actualResponse);
+	}
+
+
+	/**
+	 * @param int[] $ids
+	 */
+	private function stubMessagesInOneMailbox(array $ids): void {
+		$mailbox = new Mailbox();
+		$mailbox->setId(77);
+		$mailbox->setAccountId(42);
+
+		$this->mailManager->method('getMessage')
+			->willReturnCallback(function (string $uid, int $id) {
+				$message = new DbMessage();
+				$message->setId($id);
+				$message->setUid($id + 1000);
+				$message->setMailboxId(77);
+				return $message;
+			});
+		$this->mailManager->method('getMailbox')->willReturn($mailbox);
+		$this->account->method('getId')->willReturn(42);
+		$this->accountService->method('find')->willReturn($this->account);
+
+		$imapMessage = $this->createStub(IMAPMessage::class);
+		$imapMessage->method('getFullMessage')->willReturn([
+			'body' => 'x',
+			'attachments' => [],
+			'inlineAttachments' => [],
+		]);
+		$this->mailManager->method('getImapMessage')->willReturn($imapMessage);
+	}
+
+	public function testPrefetchOpensOneConnectionForTheWholeBatch(): void {
+		// THE contract. The endpoint exists for exactly one reason: Gmail
+		// throttles on login rate, and a per-message client means a login per
+		// message. If a refactor ever moves getClient() inside the loop this
+		// test is what says so -- the bodies would still be fetched and every
+		// other assertion here would still pass.
+		$cache = $this->createMock(ICache::class);
+		$this->rebuildControllerWithCache($cache);
+		$controller = $this->controller;
+		$this->stubMessagesInOneMailbox([1, 2, 3, 4, 5]);
+		$cache->method('get')->willReturn(null);
+		$cache->expects($this->exactly(5))->method('set');
+
+		$client = $this->createMock(Horde_Imap_Client_Socket::class);
+		$this->clientFactory->expects($this->once())
+			->method('getClient')
+			->willReturn($client);
+		$client->expects($this->once())->method('logout');
+
+		$response = $controller->prefetchBodies([1, 2, 3, 4, 5]);
+
+		$this->assertSame(['cached' => 5, 'skipped' => 0], $response->getData());
+	}
+
+	public function testPrefetchIsCappedSoTheBrowserCannotHoldAWorker(): void {
+		$cache = $this->createMock(ICache::class);
+		$this->rebuildControllerWithCache($cache);
+		$controller = $this->controller;
+		$this->stubMessagesInOneMailbox(range(1, 25));
+		$cache->method('get')->willReturn(null);
+		// Ten, not twenty-five: the list comes from the browser.
+		$cache->expects($this->exactly(10))->method('set');
+
+		$client = $this->createMock(Horde_Imap_Client_Socket::class);
+		$this->clientFactory->method('getClient')->willReturn($client);
+
+		$response = $controller->prefetchBodies(range(1, 25));
+
+		$this->assertSame(10, $response->getData()['cached']);
+	}
+
+	public function testPrefetchOpensNoConnectionWhenEverythingIsCached(): void {
+		// Prefetching the same page twice -- which the client will do, because
+		// it prefetches on list load AND as the user moves -- must be free.
+		$cache = $this->createMock(ICache::class);
+		$this->rebuildControllerWithCache($cache);
+		$controller = $this->controller;
+		$this->stubMessagesInOneMailbox([1, 2]);
+		$cache->method('get')->willReturn(['body' => 'already here']);
+		$cache->expects($this->never())->method('set');
+
+		$this->clientFactory->expects($this->never())->method('getClient');
+
+		$response = $controller->prefetchBodies([1, 2]);
+
+		$this->assertSame(['cached' => 0, 'skipped' => 0], $response->getData());
+	}
+
+	public function testOneUnfetchableMessageDoesNotCostTheRestTheirConnection(): void {
+		$cache = $this->createMock(ICache::class);
+		$this->rebuildControllerWithCache($cache);
+		$controller = $this->controller;
+		$mailbox = new Mailbox();
+		$mailbox->setId(77);
+		$mailbox->setAccountId(42);
+		$this->mailManager->method('getMessage')
+			->willReturnCallback(function (string $uid, int $id) {
+				$message = new DbMessage();
+				$message->setId($id);
+				$message->setUid($id + 1000);
+				$message->setMailboxId(77);
+				return $message;
+			});
+		$this->mailManager->method('getMailbox')->willReturn($mailbox);
+		$this->account->method('getId')->willReturn(42);
+		$this->accountService->method('find')->willReturn($this->account);
+		$cache->method('get')->willReturn(null);
+
+		$good = $this->createStub(IMAPMessage::class);
+		$good->method('getFullMessage')->willReturn(['body' => 'x', 'attachments' => [], 'inlineAttachments' => []]);
+		$this->mailManager->method('getImapMessage')
+			->willReturnCallback(function ($client, $account, $mailbox, int $uid) use ($good) {
+				if ($uid === 1002) {
+					throw new ServiceException('gone');
+				}
+				return $good;
+			});
+
+		$client = $this->createMock(Horde_Imap_Client_Socket::class);
+		$this->clientFactory->method('getClient')->willReturn($client);
+		// The connection is still closed even though a fetch threw.
+		$client->expects($this->once())->method('logout');
+		$cache->expects($this->exactly(2))->method('set');
+
+		$response = $controller->prefetchBodies([1, 2, 3]);
+
+		$this->assertSame(['cached' => 2, 'skipped' => 1], $response->getData());
 	}
 }

@@ -58,6 +58,7 @@ use OCP\IRequest;
 use OCP\IURLGenerator;
 use OCP\Lock\LockedException;
 use Psr\Log\LoggerInterface;
+use Throwable;
 use function array_map;
 
 #[OpenAPI(scope: OpenAPI::SCOPE_IGNORE)]
@@ -68,6 +69,13 @@ class MessagesController extends Controller {
 	// already use for their own (HTTP-level) response caching in this
 	// same controller, rather than inventing a new number.
 	private const BODY_CACHE_TTL = 24 * 60 * 60;
+	/**
+	 * Ceiling on one prefetch call. Ten is the point where the saving is
+	 * already almost all of what it will ever be -- ten logins collapse to
+	 * one -- while the request stays short enough that it cannot squat on a
+	 * worker or an IMAP connection.
+	 */
+	private const PREFETCH_MAX_MESSAGES = 10;
 
 	private IMimeTypeDetector $mimeTypeDetector;
 	private IL10N $l10n;
@@ -206,6 +214,133 @@ class MessagesController extends Controller {
 	}
 
 	/**
+	 * Warm the body cache for several messages over ONE IMAP connection.
+	 *
+	 * PHP-FPM shares nothing between requests, so every getBody() opens its
+	 * own connection and issues its own LOGIN. That is invisible until the
+	 * account is Gmail and the user is working through a backlog: 212 distinct
+	 * messages opened in a day cost 230 live IMAP fetches, each a separate
+	 * login, and Gmail answers that rate by refusing to authenticate -- with
+	 * the wording of a bad password, which is the trap .92 exists for. The
+	 * body cache cannot help, because reading NEW mail is all first opens.
+	 *
+	 * So the saving is not fewer fetches, it is fewer *logins*. This opens one
+	 * client per account+mailbox group and fetches each message over it, then
+	 * writes the exact cache entry getBody() and getHtmlBody() already read.
+	 * Ten messages become one login instead of ten.
+	 *
+	 * Deliberately sequential per message rather than one findByIds() with
+	 * loadBody: the batch call would hold every body in memory at once, and a
+	 * measured single body request already peaks near 30 MB on a NAS with 1.6
+	 * GB of RAM. Fetching one at a time on the shared connection keeps the
+	 * peak at one message while still costing a single login -- the whole
+	 * point. Trading a throttle for an OOM would not be a fix.
+	 *
+	 * Best effort by contract: a message that cannot be fetched is skipped,
+	 * never fatal. The caller is a prefetch and its failure must be invisible;
+	 * the real getBody() will report any genuine problem when the user
+	 * actually opens that message.
+	 *
+	 * @NoAdminRequired
+	 *
+	 * @param int[] $ids
+	 *
+	 * @return JSONResponse
+	 */
+	#[TrapError]
+	public function prefetchBodies(array $ids): JSONResponse {
+		if ($this->userId === null) {
+			return new JSONResponse([], Http::STATUS_UNAUTHORIZED);
+		}
+
+		// Cap before doing any work. The list arrives from the browser, and an
+		// unbounded one would hold a worker -- and an IMAP connection -- for
+		// as long as the caller cared to ask for.
+		$ids = array_slice(
+			array_values(array_unique(array_filter($ids, static fn ($id) => is_int($id) || ctype_digit((string)$id)))),
+			0,
+			self::PREFETCH_MAX_MESSAGES,
+		);
+		if ($ids === []) {
+			return new JSONResponse(['cached' => 0, 'skipped' => 0]);
+		}
+
+		/** @var array<string, array{account: \OCA\Mail\Account, mailbox: \OCA\Mail\Db\Mailbox, messages: Message[]}> $groups */
+		$groups = [];
+		$skipped = 0;
+		foreach ($ids as $id) {
+			$id = (int)$id;
+			try {
+				$effectiveUserId = $this->delegationService->resolveMessageUserId($id, $this->userId);
+				$message = $this->mailManager->getMessage($effectiveUserId, $id);
+				$mailbox = $this->mailManager->getMailbox($effectiveUserId, $message->getMailboxId());
+				$account = $this->accountService->find($effectiveUserId, $mailbox->getAccountId());
+			} catch (DoesNotExistException | ClientException) {
+				// Not ours, or gone. Prefetch never reports on someone else's
+				// mail, not even by admitting it exists.
+				$skipped++;
+				continue;
+			}
+
+			$key = $account->getId() . ':' . $mailbox->getId();
+			if (!isset($groups[$key])) {
+				$groups[$key] = ['account' => $account, 'mailbox' => $mailbox, 'messages' => []];
+			}
+			$groups[$key]['messages'][] = $message;
+		}
+
+		$cached = 0;
+		foreach ($groups as $group) {
+			$account = $group['account'];
+			$mailbox = $group['mailbox'];
+			$cacheInstance = $this->getCacheForAccount($account->getId());
+
+			// Skip the whole group if every message is already cached, so a
+			// repeat prefetch over the same page costs no connection at all.
+			$wanted = array_filter(
+				$group['messages'],
+				static fn (Message $m) => !is_array($cacheInstance->get('message_' . $m->getId())),
+			);
+			if ($wanted === []) {
+				continue;
+			}
+
+			$client = $this->clientFactory->getClient($account, workClass: ImapWorkClass::ACTIVE_CONTENT);
+			try {
+				foreach ($wanted as $message) {
+					try {
+						$imapMessage = $this->mailManager->getImapMessage(
+							$client,
+							$account,
+							$mailbox,
+							$message->getUid(),
+							true,
+						);
+						$json = $imapMessage->getFullMessage($message->getId());
+						$json['smimeIsEncrypted'] = $imapMessage->isEncrypted();
+						$json['smimeIsSigned'] = $imapMessage->isSigned();
+						$json['smimeSignatureValid'] = $imapMessage->isSigned() && $imapMessage->isSignatureValid();
+						$cacheInstance->set('message_' . $message->getId(), $json, self::BODY_CACHE_TTL);
+						$cached++;
+						// Release before the next one. The bound on this
+						// endpoint's memory is one message, not the batch.
+						unset($json, $imapMessage);
+					} catch (Throwable $e) {
+						// One unfetchable message must not cost the rest of
+						// the group the connection they are sharing.
+						$this->logger->debug('Could not prefetch a message body', ['exception' => $e]);
+						$skipped++;
+					}
+				}
+			} finally {
+				$client->logout();
+			}
+		}
+
+		return new JSONResponse(['cached' => $cached, 'skipped' => $skipped]);
+	}
+
+	/**
 	 * @NoAdminRequired
 	 *
 	 * @param int $id
@@ -263,9 +398,15 @@ class MessagesController extends Controller {
 				$json['smimeIsEncrypted'] = $imapMessage->isEncrypted();
 				$json['smimeIsSigned'] = $imapMessage->isSigned();
 				$json['smimeSignatureValid'] = $imapMessage->isSigned() && $imapMessage->isSignatureValid();
-				if ($imapMessage->hasHtmlMessage()) {
-					$cacheInstance->set($imapMessageCacheKey, $json, self::BODY_CACHE_TTL);
-				}
+				// Cache regardless of whether the message has an HTML part.
+				// The gate here used to be hasHtmlMessage(), which meant a
+				// plain-text message was re-fetched from IMAP on every single
+				// open -- a fresh login each time, for content that never
+				// changes. It was safe to remove: getHtmlBody() serves
+				// $cached['body'] on a hit and computes the identical
+				// $fullMessage['body'] on a miss, so the two paths already
+				// produce the same bytes for a plain-text message.
+				$cacheInstance->set($imapMessageCacheKey, $json, self::BODY_CACHE_TTL);
 			} finally {
 				$client->logout();
 			}
@@ -720,9 +861,10 @@ class MessagesController extends Controller {
 					$inlineAttachments = is_array($fullMessageInlineAttachments)
 						? $fullMessageInlineAttachments
 						: [];
-					if ($imapMessage->hasHtmlMessage()) {
-						$cacheInstance->set($imapMessageCacheKey, $fullMessage, self::BODY_CACHE_TTL);
-					}
+					// Unconditional for the same reason as getBody(): the
+					// hasHtmlMessage() gate only ever bought a repeat IMAP
+					// login for plain-text mail.
+					$cacheInstance->set($imapMessageCacheKey, $fullMessage, self::BODY_CACHE_TTL);
 				} finally {
 					$client->logout();
 				}

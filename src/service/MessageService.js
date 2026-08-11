@@ -555,6 +555,51 @@ function parseSupplementaryError(error) {
 	}
 }
 
+/**
+ * Ask the server to warm the body cache for several messages at once.
+ *
+ * Not an optimisation of the network -- it is one HTTP request instead of ten,
+ * but that was never the expensive part. Every body request opens its own IMAP
+ * connection and logs in, because PHP-FPM shares nothing between requests, and
+ * Gmail throttles on login rate. Measured on this install: 212 distinct
+ * messages opened in a day cost 230 live IMAP fetches and Gmail began refusing
+ * to authenticate, which surfaces as "Mail server denied authentication" and
+ * reads exactly like a wrong password.
+ *
+ * The server fetches this batch over a single connection. Ten messages, one
+ * login.
+ *
+ * SPECULATIVE on purpose: this is work for messages not on screen, and being
+ * dropped outright under foreground pressure is the correct outcome. It must
+ * never take a slot from the body the user is actually waiting for.
+ *
+ * Failure is silent by contract. A prefetch that does not happen costs a
+ * slower open later, nothing else, and the real fetch reports any genuine
+ * problem.
+ *
+ * @param {number[]} ids message database ids, at most ten are honoured
+ * @param {object} options options
+ * @param {AbortSignal} options.signal abort signal
+ * @return {Promise<void>}
+ */
+export async function prefetchMessageBodies(ids, { signal } = {}) {
+	if (!ids || ids.length === 0) {
+		return
+	}
+
+	const url = generateUrl('/apps/mail/api/messages/prefetch')
+
+	try {
+		await axios.post(url, { ids }, {
+			signal,
+			mailWorkClass: WorkClass.SPECULATIVE,
+		})
+	} catch (error) {
+		// Deliberately swallowed, including capacity rejections and aborts.
+		logger.debug('Prefetching message bodies did not complete', { error })
+	}
+}
+
 export async function fetchMessageItineraries(id, { signal } = {}) {
 	const url = generateUrl('/apps/mail/api/messages/{id}/itineraries', {
 		id,

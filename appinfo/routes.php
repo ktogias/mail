@@ -206,6 +206,14 @@ return [
 			'verb' => 'POST'
 		],
 		[
+			// Warm several message bodies over one IMAP connection. POST
+			// because the id list is a body, not because it changes anything:
+			// it is a cache warm and is safe to repeat.
+			'name' => 'messages#prefetchBodies',
+			'url' => '/api/messages/prefetch',
+			'verb' => 'POST',
+		],
+		[
 			'name' => 'messages#downloadAttachment',
 			'url' => '/api/messages/{id}/attachment/{attachmentId}',
 			'verb' => 'GET'
