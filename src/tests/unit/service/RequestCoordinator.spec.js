@@ -246,6 +246,45 @@ describe('RequestCoordinator', () => {
 		releaseMutation()
 	})
 
+	it('still prefetches while connectivity is degraded', async () => {
+		// The live condition, encoded. A throttled Gmail body fetch returns
+		// 503, that request is ACTIVE_CONTENT, and isConnectivityFailure()
+		// counts a 5xx on a foreground class as a connectivity failure -- so
+		// the whole app goes 'degraded' every time the throttle bites.
+		//
+		// .95 first put PREFETCH in LOW_PRIORITY_CLASSES, which is skipped
+		// while degraded. That is a loop with the sign backwards: the throttle
+		// disables the one mechanism that reduces the logins causing it.
+		// Prefetch is not extra load, it is the same work in fewer
+		// connections, so degraded is exactly when it should keep running.
+		const coordinator = new RequestCoordinator()
+		coordinator.setNetworkState('degraded')
+
+		// Maintenance still stands down -- that part was never wrong.
+		await expect(coordinator.acquire({
+			workClass: WorkClass.MAINTENANCE,
+			accountId: 'account-1',
+		})).rejects.toMatchObject({ code: 'ERR_CANCELED' })
+
+		const release = await coordinator.acquire({
+			workClass: WorkClass.PREFETCH,
+			accountId: 'account-1',
+		})
+		release()
+	})
+
+	it('abandons prefetch when the browser goes offline', async () => {
+		// Degraded is not offline. With no network at all there is nothing to
+		// warm and the request must not sit in a queue holding state.
+		const coordinator = new RequestCoordinator()
+		coordinator.setNetworkState('offline')
+
+		await expect(coordinator.acquire({
+			workClass: WorkClass.PREFETCH,
+			accountId: 'account-1',
+		})).rejects.toMatchObject({ code: 'ERR_CANCELED' })
+	})
+
 	it('never lets an aged prefetch outrank anything the user can see', async () => {
 		// Prefetch has to age or sustained activity starves it forever -- the
 		// .94 failure by a slower route. But it warms a body nobody asked for,

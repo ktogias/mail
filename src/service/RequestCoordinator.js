@@ -39,9 +39,18 @@ const FOREGROUND_CLASSES = new Set([
 	WorkClass.ACTIVE_CONTENT,
 	WorkClass.EXPLICIT_HEAVY,
 ])
+// Skipped while connectivity is recovering. PREFETCH is deliberately NOT here.
+//
+// A throttled Gmail body fetch returns 503; that request is ACTIVE_CONTENT,
+// and isConnectivityFailure() counts a 5xx on a foreground class as a
+// connectivity failure -- so the app goes 'degraded' every time the throttle
+// bites. Standing prefetch down there is a loop with the sign backwards: the
+// throttle would disable the one mechanism that reduces the logins causing it.
+// Prefetch is not additional load; it is the same bodies over fewer
+// connections. 'offline' still cancels it, via the check that precedes this
+// one and via HIDDEN_CANCEL_CLASSES.
 const LOW_PRIORITY_CLASSES = new Set([
 	WorkClass.SPECULATIVE,
-	WorkClass.PREFETCH,
 	WorkClass.MAINTENANCE,
 ])
 const HIDDEN_CANCEL_CLASSES = new Set([
