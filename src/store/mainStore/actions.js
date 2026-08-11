@@ -321,6 +321,19 @@ function furthestEnvelope(envelopes, sortOrder) {
  * @param {string} sortOrder active envelope sort order
  * @return {object[]} the contiguous prefix of the page
  */
+/**
+ * Log a line and evaluate to false, so it can sit inside a condition.
+ *
+ * @param {object} log the logger
+ * @param {string} message what happened
+ * @param {object} context structured detail
+ * @return {boolean} always false
+ */
+function logAndFalse(log, message, context) {
+	log.debug(message, context)
+	return false
+}
+
 function contiguousFannedOutPage(page, openTails, sortOrder) {
 	// A source with NO tail has delivered nothing for this query, and the
 	// caller has already filtered out the ones that answered with nothing (see
@@ -3434,6 +3447,13 @@ export default function mainStoreActions() {
 									// Ask for its FIRST page instead, so an empty
 									// answer really does mean there is nothing there.
 									this.getEnvelopes(mb.databaseId, query).length > 0
+									// Worth a line: this is the state that
+									// silently retired a source and skipped
+									// months of mail, and nothing said so.
+									|| logAndFalse(logger, 'fanned-out source has nothing cached for this query, fetching its first page', {
+										mailboxId: mb.databaseId,
+										query,
+									})
 										? this.fetchNextEnvelopes({
 												mailboxId: mb.databaseId,
 												query,
