@@ -11,6 +11,14 @@ declare(strict_types=1);
 return [
 	'routes' => [
 		[
+			// Temporary: a drain for client-side diagnostics, because the
+			// fault under investigation lives in the browser store and the
+			// reproducing device is a phone with no readable console.
+			'name' => 'diagnostics#log',
+			'url' => '/api/diagnostics/log',
+			'verb' => 'POST',
+		],
+		[
 			'name' => 'deep_link#open',
 			'url' => '/open/{messageId}',
 			'verb' => 'GET',
