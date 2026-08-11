@@ -133,6 +133,27 @@ class ErrorMiddleware extends Middleware {
 					Horde_Imap_Client_Exception::DISCONNECT,
 					Horde_Imap_Client_Exception::SERVER_READERROR,
 					Horde_Imap_Client_Exception::SERVER_WRITEERROR,
+					// Gmail refuses a connection it is throttling with
+					// "Mail server denied authentication", which is
+					// indistinguishable from a bad password at this layer.
+					// Observed live: opening one message returned 500 and the
+					// UI said "Not found", and the SAME message opened fine
+					// seconds later -- nothing was wrong with the credentials,
+					// there was simply no connection slot free while the
+					// fan-out and a sync held theirs.
+					//
+					// Reporting that as a server error is wrong twice over: it
+					// tells the user something final about a message that is
+					// still there, and it denies the client the 429 +
+					// Retry-After it already knows how to act on.
+					//
+					// The trade-off is deliberate. Credentials that are
+					// genuinely broken fail every other request too, and the
+					// account carries its own auth-error state for that (see
+					// SyncJob, which checks this same code to disable an
+					// account) -- so nothing here hides a real problem, while
+					// a transient refusal stops looking like a missing message.
+					Horde_Imap_Client_Exception::LOGIN_AUTHENTICATIONFAILED,
 				],
 				true
 			);

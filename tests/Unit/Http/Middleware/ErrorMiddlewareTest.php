@@ -173,6 +173,13 @@ class ErrorMiddlewareTest extends TestCase {
 			[new ServiceException('temporary', 0, new Horde_Imap_Client_Exception('', Horde_Imap_Client_Exception::SERVER_CONNECT)), false],
 			[new ServiceException('temporary', 0, new Horde_Imap_Client_Exception('', Horde_Imap_Client_Exception::SERVER_READERROR)), true],
 			[new ServiceException('temporary', 0, new Horde_Imap_Client_Exception('', Horde_Imap_Client_Exception::SERVER_WRITEERROR)), true],
+			// Gmail refuses a connection it is throttling with "Mail server
+			// denied authentication", identical at this layer to a bad
+			// password. Observed live: one message returned 500 and the UI
+			// said "Not found"; the same message opened fine seconds later.
+			// Treating it as final is wrong -- the message is there, and the
+			// client already knows what to do with a 429 + Retry-After.
+			[new ServiceException('throttled', 0, new Horde_Imap_Client_Exception('Mail server denied authentication.', Horde_Imap_Client_Exception::LOGIN_AUTHENTICATIONFAILED)), true],
 		];
 	}
 
