@@ -210,6 +210,7 @@ import { reportPrefetchProbe } from '../service/MessageService.js'
 import { ENVELOPE_LIST_MAX_ANIMATED_SIZE } from '../store/constants.js'
 import useMainStore from '../store/mainStore.js'
 import { listTransitionDurationMs } from '../util/listTransitionDuration.js'
+import { selectPrefetchIds, updateDirection } from '../util/prefetchSelection.js'
 import { showError, showSuccess } from '../util/toast.js'
 
 /**
@@ -320,6 +321,12 @@ export default {
 			// Not reactive state anyone renders -- only the memo that stops
 			// prefetchHeadOfList() re-asking for a head it already asked for.
 			lastPrefetchedHead: undefined,
+			// Direction of travel and the anchor it was derived from. Three
+			// scalars, not a model: everything that decides anything lives in
+			// util/prefetchSelection.js where it can be tested.
+			prefetchDirection: { direction: 'none', lastIndex: undefined, against: 0 },
+			lastPrefetchAnchor: undefined,
+			recentOpensUnread: [],
 		}
 	},
 
@@ -327,6 +334,11 @@ export default {
 		...mapStores(useMainStore),
 		sortOrder() {
 			return this.mainStore.getPreference('sort-order', 'newest')
+		},
+
+		openThreadId() {
+			const id = Number.parseInt(this.$route?.params?.threadId, 10)
+			return Number.isInteger(id) ? id : undefined
 		},
 
 		sortedEnvelops() {
@@ -474,6 +486,14 @@ export default {
 	},
 
 	watch: {
+		openThreadId() {
+			// Anchoring on the open message is the whole of .99. Warming the
+			// top ten instead left 79 of 82 opened messages coming live from
+			// IMAP, measured, because a reader going DOWN the list never moves
+			// its head and so never asked for anything.
+			this.prefetchAroundOpenMessage()
+		},
+
 		sortedEnvelops(newVal, oldVal) {
 			// Warm the bodies at the head of the list. Triage consumes the
 			// list from the top -- read it, delete it, the next one moves up --
@@ -538,6 +558,55 @@ export default {
 		 *
 		 * @param {object[]} envelopes the sorted list
 		 */
+		prefetchAroundOpenMessage() {
+			const anchorId = this.openThreadId
+			if (anchorId === undefined) {
+				return
+			}
+
+			const envelopes = this.sortedEnvelops
+			const index = envelopes.findIndex((envelope) => envelope.databaseId === anchorId)
+			if (index === -1) {
+				// Another mailbox's message, or the list was trimmed under it.
+				return
+			}
+
+			this.prefetchDirection = updateDirection(this.prefetchDirection, index)
+
+			// "Only unread are being opened" is decided on the last few opens,
+			// not on a running score. Unread density varies from 72% to 5%
+			// across these accounts, so on the quiet ones this is the
+			// difference between warming useful mail and warming mail already
+			// read.
+			this.recentOpensUnread = [
+				envelopes[index]?.flags?.seen !== true,
+				...this.recentOpensUnread,
+			].slice(0, 5)
+			const unreadOnly = this.recentOpensUnread.length >= 3
+				&& this.recentOpensUnread.every(Boolean)
+
+			const ids = selectPrefetchIds({
+				envelopes,
+				anchorId,
+				direction: this.prefetchDirection.direction,
+				unreadOnly,
+				isKnown: (id) => this.mainStore.messages[id] !== undefined,
+			})
+
+			if (ids.length === 0) {
+				return
+			}
+
+			const key = `${anchorId}:${ids.join(',')}`
+			if (key === this.lastPrefetchAnchor) {
+				return
+			}
+			this.lastPrefetchAnchor = key
+
+			reportPrefetchProbe('calling-anchor', `${this.prefetchDirection.direction}/${unreadOnly ? 'unread' : 'any'}/${ids.length}`)
+			this.mainStore.prefetchBodies(ids)
+		},
+
 		prefetchHeadOfList(envelopes) {
 			// TEMPORARY (.98). Every probe below marks a path that returns
 			// without calling the store. .97 instrumented the store and the
@@ -559,7 +628,6 @@ export default {
 
 			const key = head.join(',')
 			if (key === this.lastPrefetchedHead) {
-				reportPrefetchProbe('head-unchanged')
 				return
 			}
 			this.lastPrefetchedHead = key
