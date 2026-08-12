@@ -921,6 +921,19 @@ export default {
 				}, 2000)
 			}
 			if (this.expanded) {
+				// Tidy the copies dedupeFolderCopies() hides behind this one.
+				//
+				// This must live HERE and not on the mark-as-read path, which
+				// .100 tried: that path is guarded on `!seen`, so for a message
+				// whose visible copy is ALREADY read -- precisely the stranded
+				// case -- it never runs at all. The fix was correct and
+				// unreachable, and the blue dot survived the release.
+				//
+				// The store call is a no-op when nothing is shadowed, so this
+				// costs a scan of loaded envelopes per open and no request.
+				if (this.envelope.flags.seen) {
+					this.mainStore.markShadowedCopiesSeen(this.envelope).catch(() => {})
+				}
 				// Body/HTML is now genuinely visible. Only now may secondary
 				// enrichment compete for a network slot.
 				this.scheduleSupplementaryFetches()
