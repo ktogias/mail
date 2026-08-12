@@ -138,6 +138,7 @@ import {
 	threadCarriesFlag,
 	threadIsUnread,
 } from '../../util/priorityInbox.js'
+import { findShadowedUnreadCopies } from '../../util/shadowedCopies.js'
 import { showError, showWarning } from '../../util/toast.js'
 import { wait } from '../../util/wait.js'
 import {
@@ -4615,6 +4616,55 @@ export default function mainStoreActions() {
 				endPrioritySectionMutation()
 			}
 		},
+		/**
+		 * Mark the copies the thread view hides behind this one.
+		 *
+		 * Thread.vue keeps one row per Message-ID, so a mail delivered twice is
+		 * presented as a single message. The dropped copies are never rendered
+		 * and so can never be opened -- but the thread's unread aggregate still
+		 * counts them, which is why a blue dot survived every attempt to clear
+		 * it: the copy being read was not the copy keeping it lit.
+		 *
+		 * Only ever propagates READ, never unread. Marking unread is a
+		 * deliberate act on the row the user chose; pushing it onto invisible
+		 * copies would relight dots they cannot reach to clear again.
+		 *
+		 * Best effort. The visible copy is already read by the time this runs,
+		 * and failing to tidy an invisible duplicate must not surface as an
+		 * error on an action that succeeded.
+		 *
+		 * @param {object} envelope the copy that was just marked read
+		 */
+		async markShadowedCopiesSeen(envelope) {
+			const shadowed = findShadowedUnreadCopies(Object.values(this.envelopes), envelope)
+			if (shadowed.length === 0) {
+				return
+			}
+
+			logger.info('Marking copies hidden behind this message as read', {
+				visible: envelope.databaseId,
+				shadowed,
+			})
+
+			for (const databaseId of shadowed) {
+				const copy = this.envelopes[databaseId]
+				try {
+					if (copy) {
+						this.flagEnvelopeMutation({ envelope: copy, flag: 'seen', value: true })
+					}
+					const response = await setEnvelopeFlags(databaseId, { seen: true })
+					if (copy && response?.hasUnseenInThread !== undefined) {
+						this.setHasUnseenInThreadForThreadMutation(copy, response.hasUnseenInThread)
+					}
+				} catch (error) {
+					if (copy) {
+						this.flagEnvelopeMutation({ envelope: copy, flag: 'seen', value: false })
+					}
+					logger.warn('Could not mark a hidden duplicate as read', { databaseId, error })
+				}
+			}
+		},
+
 		async toggleEnvelopeSeen({
 			envelope,
 			seen,
@@ -4634,6 +4684,14 @@ export default function mainStoreActions() {
 				// live regression that motivated this guard produced a later
 				// seen=false write from an automatic read path under load.
 				if (oldState === newState) {
+					// Self-healing for copies stranded before this existed. The
+					// visible row is already read, so without this the early
+					// return would leave its hidden twin unread forever and the
+					// dot would survive every reopen -- exactly the symptom
+					// that revealed the bug.
+					if (newState) {
+						this.markShadowedCopiesSeen(envelope).catch(() => {})
+					}
 					if (newState && oldHasUnseenInThread !== undefined) {
 						const knownMailboxThread = envelope.threadRootId
 							? this.getEnvelopesByThreadRootId(envelope.accountId, envelope.threadRootId)
@@ -4689,6 +4747,9 @@ export default function mainStoreActions() {
 					// listing fetch.
 					if (response?.hasUnseenInThread !== undefined) {
 						this.setHasUnseenInThreadForThreadMutation(envelope, response.hasUnseenInThread)
+					}
+					if (newState === true) {
+						await this.markShadowedCopiesSeen(envelope)
 					}
 				} catch (error) {
 					logger.error('could not toggle message seen state', { error })
