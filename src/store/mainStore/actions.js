@@ -1695,8 +1695,24 @@ export async function mapWithConcurrencyLimit(items, limit, fn) {
  */
 const PREFETCH_BATCH_SIZE = 10
 
-/** At most one prefetch at a time; the running one is never cancelled. */
-let prefetchInFlight = false
+/**
+ * How many prefetches may be in flight together.
+ *
+ * One was right while the trigger was the head of the list, which changes only
+ * when the reader clears from the top. Anchored on the open message it fires on
+ * every open, and one slot became the bottleneck: measured across two
+ * independent windows, 16 of 33 and then 22 of 41 opportunities were dropped
+ * as skipped-in-flight -- more than half.
+ *
+ * Two, not more. Each prefetch already batches ten bodies over a single IMAP
+ * login, so the second slot doubles throughput while adding one connection;
+ * the whole point of this feature is that Gmail throttles on login rate, and
+ * spending that budget back would undo it.
+ */
+const MAX_CONCURRENT_PREFETCHES = 2
+
+/** Running prefetches. The ones in flight are never cancelled. */
+let prefetchesInFlight = 0
 
 const LOCK_RETRY_BASE_MS = 1500
 const LOCK_RETRY_MAX_MS = 30 * 1000
@@ -5381,16 +5397,16 @@ export default function mainStoreActions() {
 			//
 			// Skipping instead is safe: whatever is in flight finishes, and
 			// the next list change after it completes warms the new head.
-			if (prefetchInFlight) {
+			if (prefetchesInFlight >= MAX_CONCURRENT_PREFETCHES) {
 				reportPrefetchProbe('skipped-in-flight')
 				return
 			}
 
-			prefetchInFlight = true
+			prefetchesInFlight++
 			try {
 				await prefetchMessageBodies(wanted)
 			} finally {
-				prefetchInFlight = false
+				prefetchesInFlight--
 			}
 		},
 
