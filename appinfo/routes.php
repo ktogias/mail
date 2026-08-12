@@ -206,6 +206,13 @@ return [
 			'verb' => 'POST'
 		],
 		[
+			// TEMPORARY (.97): where a prefetch attempt ended up. Remove with
+			// the probe once the counts explain themselves.
+			'name' => 'messages#prefetchProbe',
+			'url' => '/api/messages/prefetch-probe',
+			'verb' => 'POST',
+		],
+		[
 			// Warm several message bodies over one IMAP connection. POST
 			// because the id list is a body, not because it changes anything:
 			// it is a cache warm and is safe to repeat.

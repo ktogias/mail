@@ -94,6 +94,7 @@ import {
 	moveMessage,
 	prefetchMessageBodies,
 	removeEnvelopeTag,
+	reportPrefetchProbe,
 	setEnvelopeFlags,
 	setEnvelopeFlagsBatch,
 	setEnvelopeTag,
@@ -1693,8 +1694,8 @@ export async function mapWithConcurrencyLimit(items, limit, fn) {
  */
 const PREFETCH_BATCH_SIZE = 10
 
-/** The one prefetch allowed to be in flight or queued at a time. */
-let prefetchController
+/** At most one prefetch at a time; the running one is never cancelled. */
+let prefetchInFlight = false
 
 const LOCK_RETRY_BASE_MS = 1500
 const LOCK_RETRY_MAX_MS = 30 * 1000
@@ -5298,23 +5299,37 @@ export default function mainStoreActions() {
 				.slice(0, PREFETCH_BATCH_SIZE)
 
 			if (wanted.length === 0) {
+				reportPrefetchProbe('skipped-nothing-wanted')
 				return
 			}
 
-			// Only the newest head is worth having. A queued prefetch is by
-			// definition not urgent, so while the user works down the list the
-			// earlier ones would still be waiting for a slot with a list
-			// position the user has already passed. Replace rather than pile
-			// up.
-			prefetchController?.abort()
-			const controller = new AbortController()
-			prefetchController = controller
+			// One at a time, and the one that is running WINS. .95 had this
+			// backwards: it aborted the in-flight prefetch so the newest head
+			// could replace it, reasoning that a prefetch for a list position
+			// the user had scrolled past was worthless.
+			//
+			// That reasoning is wrong, and it is why .95 and .96 still made no
+			// calls. A prefetch does not warm a list position, it warms bodies
+			// BY MESSAGE ID, and a body does not go stale because the list
+			// moved -- opening that message a minute later is still free.
+			// Meanwhile, since .95 made prefetch queue for a slot instead of
+			// being dropped, the abort started landing on requests that had
+			// not started yet: every change at the head of the list killed the
+			// prefetch waiting to run, and while triaging the head changes
+			// constantly. The feature cancelled itself.
+			//
+			// Skipping instead is safe: whatever is in flight finishes, and
+			// the next list change after it completes warms the new head.
+			if (prefetchInFlight) {
+				reportPrefetchProbe('skipped-in-flight')
+				return
+			}
+
+			prefetchInFlight = true
 			try {
-				await prefetchMessageBodies(wanted, { signal: controller.signal })
+				await prefetchMessageBodies(wanted)
 			} finally {
-				if (prefetchController === controller) {
-					prefetchController = undefined
-				}
+				prefetchInFlight = false
 			}
 		},
 
