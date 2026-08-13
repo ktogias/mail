@@ -214,36 +214,6 @@ class MessagesController extends Controller {
 	}
 
 	/**
-	 * TEMPORARY (.97). Record where a client-side prefetch attempt ended up.
-	 *
-	 * Prefetching has failed to make a single call across three releases, each
-	 * time refused upstream of the request with no visible trace: a work class
-	 * dropped under foreground pressure, then one skipped while connectivity
-	 * was degraded, then a self-cancelling abort. All three were diagnosed by
-	 * reading code and the first two diagnoses were wrong. Counting is cheaper
-	 * than a fourth guess.
-	 *
-	 * Narrow by construction: two short scalars, truncated again here because
-	 * the client is not to be trusted about its own limits, logged at INFO so
-	 * no debug mode is needed. Remove once the counts explain themselves.
-	 *
-	 * @NoAdminRequired
-	 */
-	#[TrapError]
-	public function prefetchProbe(string $event = '', string $reason = ''): JSONResponse {
-		if ($this->userId === null) {
-			return new JSONResponse([], Http::STATUS_UNAUTHORIZED);
-		}
-
-		$this->logger->info('PREFETCH_PROBE', [
-			'event' => substr($event, 0, 40),
-			'reason' => substr($reason, 0, 80),
-		]);
-
-		return new JSONResponse([]);
-	}
-
-	/**
 	 * Warm the body cache for several messages over ONE IMAP connection.
 	 *
 	 * PHP-FPM shares nothing between requests, so every getBody() opens its

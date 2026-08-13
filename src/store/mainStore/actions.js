@@ -94,7 +94,6 @@ import {
 	moveMessage,
 	prefetchMessageBodies,
 	removeEnvelopeTag,
-	reportPrefetchProbe,
 	setEnvelopeFlags,
 	setEnvelopeFlagsBatch,
 	setEnvelopeTag,
@@ -5376,7 +5375,6 @@ export default function mainStoreActions() {
 				.slice(0, PREFETCH_BATCH_SIZE)
 
 			if (wanted.length === 0) {
-				reportPrefetchProbe('skipped-nothing-wanted')
 				return
 			}
 
@@ -5398,7 +5396,6 @@ export default function mainStoreActions() {
 			// Skipping instead is safe: whatever is in flight finishes, and
 			// the next list change after it completes warms the new head.
 			if (prefetchesInFlight >= MAX_CONCURRENT_PREFETCHES) {
-				reportPrefetchProbe('skipped-in-flight')
 				return
 			}
 

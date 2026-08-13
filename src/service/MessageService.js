@@ -582,40 +582,6 @@ function parseSupplementaryError(error) {
  * @param {AbortSignal} options.signal abort signal
  * @return {Promise<void>}
  */
-/**
- * TEMPORARY (.97). Report where a prefetch attempt ended up.
- *
- * Body prefetching has now failed to make a single call across three releases,
- * each time because something upstream refused the request and the failure was
- * invisible: .94's work class was dropped under foreground pressure, .95's was
- * skipped while connectivity was degraded, and .96 still cancelled its own
- * queued request. Every one of those was diagnosed by reading code, and the
- * first two diagnoses were wrong. This is the measurement that should have
- * come first.
- *
- * `mailPriorityBypass` is the whole point: the probe must not pass through the
- * coordinator, or it would be blocked by exactly the thing it exists to
- * observe, and report nothing while looking healthy.
- *
- * Scalars only, truncated, fire and forget. Remove once the counts explain
- * themselves -- see .93 for the precedent.
- *
- * @param {string} event short outcome label
- * @param {string} [reason] optional detail, truncated
- */
-export function reportPrefetchProbe(event, reason) {
-	try {
-		axios.post(generateUrl('/apps/mail/api/messages/prefetch-probe'), {
-			event: String(event).slice(0, 40),
-			reason: reason === undefined ? '' : String(reason).slice(0, 80),
-		}, {
-			mailPriorityBypass: true,
-		}).catch(() => {})
-	} catch (error) {
-		// A probe may never affect the path it observes.
-	}
-}
-
 export async function prefetchMessageBodies(ids, { signal } = {}) {
 	if (!ids || ids.length === 0) {
 		return
@@ -623,7 +589,6 @@ export async function prefetchMessageBodies(ids, { signal } = {}) {
 
 	const url = generateUrl('/apps/mail/api/messages/prefetch')
 
-	reportPrefetchProbe('attempt', String(ids.length))
 	try {
 		await axios.post(url, { ids }, {
 			signal,
@@ -633,12 +598,8 @@ export async function prefetchMessageBodies(ids, { signal } = {}) {
 			// a single call. Prefetch queues instead and runs in the pauses.
 			mailWorkClass: WorkClass.PREFETCH,
 		})
-		reportPrefetchProbe('sent')
 	} catch (error) {
-		// Deliberately swallowed, including capacity rejections and aborts --
-		// but no longer silently. The probe is what tells us whether the
-		// request was refused before it left the browser, and by what.
-		reportPrefetchProbe('failed', error?.code ?? error?.response?.status ?? error?.message)
+		// Deliberately swallowed, including capacity rejections and aborts.
 		logger.debug('Prefetching message bodies did not complete', { error })
 	}
 }

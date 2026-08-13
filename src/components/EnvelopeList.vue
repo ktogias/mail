@@ -206,7 +206,6 @@ import NoTrashMailboxConfiguredError
 	from '../errors/NoTrashMailboxConfiguredError.js'
 import logger from '../logger.js'
 import UndoableActionMixin from '../mixins/UndoableActionMixin.js'
-import { reportPrefetchProbe } from '../service/MessageService.js'
 import { ENVELOPE_LIST_MAX_ANIMATED_SIZE } from '../store/constants.js'
 import useMainStore from '../store/mainStore.js'
 import { listTransitionDurationMs } from '../util/listTransitionDuration.js'
@@ -525,9 +524,6 @@ export default {
 
 	mounted() {
 		dragEventBus.on('envelopes-dropped', this.unselectAll)
-		// TEMPORARY (.98): does this component mount at all in the view the
-		// user is actually looking at? Never verified, assumed three times.
-		reportPrefetchProbe('list-mounted', String(this.sortedEnvelops?.length ?? -1))
 		// The watcher only fires on change, and a list that is already
 		// populated when this mounts would otherwise never be warmed.
 		this.prefetchHeadOfList(this.sortedEnvelops)
@@ -603,26 +599,16 @@ export default {
 			}
 			this.lastPrefetchAnchor = key
 
-			reportPrefetchProbe('calling-anchor', `${this.prefetchDirection.direction}/${unreadOnly ? 'unread' : 'any'}/${ids.length}`)
 			this.mainStore.prefetchBodies(ids)
 		},
 
 		prefetchHeadOfList(envelopes) {
-			// TEMPORARY (.98). Every probe below marks a path that returns
-			// without calling the store. .97 instrumented the store and the
-			// service and recorded NOTHING AT ALL, which proves the return
-			// happens here -- upstream of everything measured so far. Four
-			// releases have now been diagnosed by reading this file; this is
-			// the file telling us instead.
 			const raw = (envelopes ?? []).slice(0, PREFETCH_HEAD_SIZE)
 			const head = raw
 				.map((envelope) => envelope.databaseId)
 				.filter((id) => Number.isInteger(id))
 
 			if (head.length === 0) {
-				// raw length distinguishes "no envelopes yet" from "ids were
-				// filtered out", which are completely different faults.
-				reportPrefetchProbe('head-empty', `raw=${raw.length} type=${typeof raw[0]?.databaseId}`)
 				return
 			}
 
@@ -632,7 +618,6 @@ export default {
 			}
 			this.lastPrefetchedHead = key
 
-			reportPrefetchProbe('calling', String(head.length))
 			this.mainStore.prefetchBodies(head)
 		},
 
