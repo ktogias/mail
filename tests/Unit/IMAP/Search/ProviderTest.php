@@ -147,14 +147,23 @@ class ProviderTest extends TestCase {
 		self::assertSame($capturedKeys[0], $capturedKeys[1]);
 	}
 
-	public function testDateWindowsHaveDistinctCacheKeys(): void {
+	/**
+	 * The inverse of what this file used to assert, and deliberately so.
+	 *
+	 * A progressive search walks the same mailbox and the same term over N
+	 * date windows. Keying the cache on the window gave each of them its own
+	 * IMAP round trip. Measured against Gmail on 2026-08-14, the round trip
+	 * costs the same (~2.7 s) whether it spans 180 days or all of history, so
+	 * those extra trips bought nothing at all.
+	 */
+	public function testEveryDateWindowSharesOneImapRoundTrip(): void {
 		$account = $this->account(13);
 		$mailbox = $this->mailbox(149, 'INBOX');
 		$imapClient = $this->createMock(Horde_Imap_Client_Socket::class);
 		$this->clientFactory->method('getClient')->willReturn($imapClient);
-		$imapClient->expects(self::exactly(2))
+		$imapClient->expects(self::once())
 			->method('search')
-			->willReturn(['match' => (object)['ids' => []]]);
+			->willReturn(['match' => (object)['ids' => [7, 9]]]);
 
 		$store = [];
 		$this->cache->method('get')->willReturnCallback(function ($key) use (&$store) {
@@ -171,11 +180,51 @@ class ProviderTest extends TestCase {
 		$older->setStart('1690000000');
 		$older->setEnd('1699999999');
 
-		$this->provider->findMatches($account, $mailbox, $recent);
-		$this->provider->findMatches($account, $mailbox, $older);
+		self::assertSame([7, 9], $this->provider->findMatches($account, $mailbox, $recent));
+		self::assertSame([7, 9], $this->provider->findMatches($account, $mailbox, $older));
+		self::assertCount(1, $store);
 	}
 
-	public function testBodySearchCarriesDateWindowToImap(): void {
+	/**
+	 * Freshness moved from the expiry to the key. The cache buster is a hash
+	 * of the mailbox sync tokens, so a mailbox that has received mail cannot
+	 * be served a UID set computed before it arrived -- which is what makes
+	 * a five-minute TTL safe where fifteen seconds used to be necessary.
+	 */
+	public function testASyncedMailboxDoesNotReuseTheOldUidSet(): void {
+		$account = $this->account(13);
+		$imapClient = $this->createMock(Horde_Imap_Client_Socket::class);
+		$this->clientFactory->method('getClient')->willReturn($imapClient);
+		$imapClient->expects(self::exactly(2))
+			->method('search')
+			->willReturn(['match' => (object)['ids' => []]]);
+
+		$store = [];
+		$this->cache->method('get')->willReturnCallback(function ($key) use (&$store) {
+			return $store[$key] ?? null;
+		});
+		$this->cache->method('set')->willReturnCallback(function ($key, $value) use (&$store) {
+			$store[$key] = $value;
+			return true;
+		});
+
+		$before = $this->mailbox(149, 'INBOX');
+		$before->setSyncNewToken('token-1');
+		$after = $this->mailbox(149, 'INBOX');
+		$after->setSyncNewToken('token-2');
+
+		$this->provider->findMatches($account, $before, $this->searchQuery('needle'));
+		$this->provider->findMatches($account, $after, $this->searchQuery('needle'));
+
+		self::assertCount(2, $store);
+	}
+
+	/**
+	 * The database applies the date range with `andWhere`, outside the OR
+	 * group the UID candidates join, so IMAP never needed to apply it too --
+	 * and applying it there is what forced one round trip per window.
+	 */
+	public function testBodySearchDoesNotSendTheDateWindowToImap(): void {
 		$account = $this->account(13);
 		$mailbox = $this->mailbox(149, 'INBOX');
 		$imapClient = $this->createMock(Horde_Imap_Client_Socket::class);
@@ -186,14 +235,14 @@ class ProviderTest extends TestCase {
 			return ['match' => (object)['ids' => []]];
 		});
 		$query = $this->searchQuery('needle');
-		// 14-Nov-2023 22:13 UTC through 15-Nov-2023 22:13 UTC.
 		$query->setStart('1700000000');
 		$query->setEnd('1700086400');
 
 		$this->provider->findMatches($account, $mailbox, $query);
 
-		self::assertStringContainsString('SENTSINCE 14-Nov-2023', $built);
-		self::assertStringContainsString('SENTBEFORE 16-Nov-2023', $built);
+		self::assertStringNotContainsString('SENTSINCE', $built);
+		self::assertStringNotContainsString('SENTBEFORE', $built);
+		self::assertStringContainsString('needle', $built);
 	}
 
 	/**

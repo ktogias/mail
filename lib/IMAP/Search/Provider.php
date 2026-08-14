@@ -9,8 +9,6 @@ declare(strict_types=1);
 
 namespace OCA\Mail\IMAP\Search;
 
-use DateTime;
-use DateTimeZone;
 use Horde_Imap_Client_Data_Format_Exception;
 use Horde_Imap_Client_Exception;
 use Horde_Imap_Client_Search_Query;
@@ -28,7 +26,18 @@ use function md5;
 use function sort;
 
 class Provider {
-	private const CACHE_TTL_SECONDS = 15;
+	/**
+	 * Long enough to serve a whole search session -- the first page, the
+	 * priority fan-out, and scrolling for more some seconds later.
+	 *
+	 * Freshness is governed by the mailbox cache buster in the key, not by
+	 * this number: it is a hash of the three sync tokens, so any new,
+	 * changed or vanished message produces a different key and the stale
+	 * entry is simply never read again. Before that was in the key, 15
+	 * seconds was the only thing standing between the cache and a stale
+	 * result, which is why it was so short.
+	 */
+	private const CACHE_TTL_SECONDS = 300;
 
 	private ICache $cache;
 
@@ -55,10 +64,13 @@ class Provider {
 		// doesn't run against the local, already-indexed database), so
 		// that pair doubled the cost of an already-slow operation for no
 		// reason -- the two sections search identically for the same
-		// account+mailbox+terms. A short TTL is enough to collapse that
-		// pair (and an identical retry a few seconds later) without
-		// serving a search result that's meaningfully stale; it's a
-		// cache of "what matched moments ago", not of mailbox state.
+		// account+mailbox+terms.
+		//
+		// It now also collapses every window of a progressive search into
+		// one round trip, which is the larger win: the SEARCH is issued
+		// unbounded and keyed on the mailbox cache buster rather than on
+		// the date range, so freshness comes from the sync tokens instead
+		// of from a short expiry.
 		$cacheKey = $this->buildCacheKey($account, $mailbox, $searchQuery);
 		$cached = $this->cache->get($cacheKey);
 		if ($cached !== null) {
@@ -90,14 +102,26 @@ class Provider {
 		return $ids;
 	}
 
+	/**
+	 * Deliberately keyed WITHOUT the date range.
+	 *
+	 * The IMAP SEARCH is now issued unbounded (see
+	 * convertMailQueryToHordeQuery()), so one round trip answers every
+	 * window a progressive search will ask about. Keeping the dates in the
+	 * key would have given each window its own entry and its own round trip
+	 * -- exactly the N-round-trip behaviour the measurement rejected.
+	 *
+	 * The mailbox cache buster takes their place. It is a hash of the sync
+	 * tokens, so a new, changed or vanished message changes the key and the
+	 * previous answer is never served again.
+	 */
 	private function buildCacheKey(Account $account, Mailbox $mailbox, SearchQuery $searchQuery): string {
 		$bodies = $searchQuery->getBodies();
 		sort($bodies);
 		return 'imap-body-search-' . md5(implode("\x00", [
 			(string)$account->getId(),
 			(string)$mailbox->getId(),
-			$searchQuery->getStart() ?? '',
-			$searchQuery->getEnd() ?? '',
+			$mailbox->getCacheBuster(),
 			...$bodies,
 		]));
 	}
@@ -138,26 +162,34 @@ class Provider {
 			$query
 		);
 
-		// IMAP's portable date predicates have day granularity. Use a UTC
-		// superset of the exact second-level SQL window: SINCE the day that
-		// contains start, and BEFORE the day after the inclusive end. The
-		// local database query applies the original exact timestamps after
-		// the IMAP UID candidates come back, so boundary-day false positives
-		// cannot leak into the response.
-		$utc = new DateTimeZone('UTC');
-		if ($searchQuery->getStart() !== null) {
-			$start = (new DateTime('@' . $searchQuery->getStart()))
-				->setTimezone($utc)
-				->setTime(0, 0);
-			$query->dateSearch($start, Horde_Imap_Client_Search_Query::DATE_SINCE, true);
-		}
-		if ($searchQuery->getEnd() !== null) {
-			$afterEnd = (new DateTime('@' . $searchQuery->getEnd()))
-				->setTimezone($utc)
-				->setTime(0, 0)
-				->modify('+1 day');
-			$query->dateSearch($afterEnd, Horde_Imap_Client_Search_Query::DATE_BEFORE, true);
-		}
+		// The date range is deliberately NOT sent to IMAP.
+		//
+		// It looked like an obvious optimisation and it is not one. Measured
+		// against Gmail on 2026-08-14, mailbox 149 (27,547 messages), the
+		// same body term:
+		//
+		//   one 180-day window   3,967 ms    48 uids
+		//   two windows (360d)   2,946 ms   100 uids
+		//   five windows (900d)  2,680 ms   160 uids
+		//   unbounded, all time  2,704 ms   160 uids
+		//
+		// The cost is a fixed round trip -- roughly 2.7-4 s, and once 16 s --
+		// and the scope makes no difference to it. A progressive search that
+		// walks N windows therefore paid N times that price to learn what one
+		// unbounded SEARCH tells it, which for a five-window walk was ~13 s of
+		// Gmail time instead of ~2.7 s.
+		//
+		// Correctness does not depend on IMAP applying the range: the dates
+		// are applied by the database, with `andWhere` OUTSIDE the OR group
+		// that the UID candidates join (MessageMapper::findIdsByQuery), so a
+		// UID from outside the window cannot survive into a result. Dropping
+		// them here only widens the candidate set.
+		//
+		// It does widen it, and that is not free for a very common term:
+		// "the" returned 17,694 uids (64% of the mailbox) against 160 for a
+		// real search term, and the database half went from ~20 ms to ~590 ms.
+		// Still far cheaper than a second round trip, and only for terms whose
+		// body search is not discriminating anyway.
 
 		return $query;
 	}
