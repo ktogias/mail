@@ -2755,6 +2755,76 @@ export default function mainStoreActions() {
 				exhausted: jobs.every((job) => job.exhausted === true),
 			}
 		},
+		/**
+		 * Merge a deep-search page into the virtual list that is on screen.
+		 *
+		 * The Priority Inbox is not built from the store: fetchNextEnvelopes()
+		 * assembles it from the RETURN VALUE of fetchDeepSearchPage(), one
+		 * entry per constituent mailbox. addEnvelopesMutation() reaches the
+		 * source mailbox and the Unified inbox, and neither of those is what
+		 * the user is looking at.
+		 *
+		 * That coupling is why older results kept not appearing. It survived
+		 * .108 unchanged and .110 made it visible: returning early so the
+		 * loading placeholders would clear meant the body stream's results
+		 * were no longer in the return value at all, and nothing else ever put
+		 * them on screen. Confirmed live -- the server returned them (632,
+		 * 1775 and 2042 byte responses) while the list stopped at February.
+		 *
+		 * Publishing here breaks the coupling: a page reaches the visible list
+		 * as soon as it arrives, whichever stream produced it and whenever
+		 * that is, so the return value is no longer load-bearing.
+		 *
+		 * @param {object} params targets to publish into, and the page
+		 * @param params.targets
+		 * @param params.sourceMailboxId
+		 * @param params.sourceQuery
+		 * @param params.envelopes
+		 */
+		publishDeepSearchPageToStatusLists({ targets, sourceMailboxId, sourceQuery, envelopes }) {
+			const threaded = this.getPreference('layout-message-view', 'threaded') === 'threaded'
+			targets.forEach((target) => {
+				// The source mailbox's own list is addEnvelopesMutation's job.
+				if (target.mailboxId === sourceMailboxId && target.query === sourceQuery) {
+					return
+				}
+				// A section list (Favourites/Important/Other) only accepts what
+				// belongs to it -- the same predicate fetchNextEnvelopes()
+				// applies to the combined pages, kept in one place so the two
+				// cannot drift.
+				const descriptor = sharedContentSearchDescriptor(target.query)
+				const matching = descriptor
+					? envelopes.filter((envelope) => envelopeMatchesSharedSearchSection(
+							envelope,
+							descriptor.flagTokens,
+							threaded,
+						))
+					: envelopes
+				if (matching.length === 0) {
+					return
+				}
+				// A status target is only a label for a list; it need not be a
+				// mailbox this client has loaded. Throwing here would abort the
+				// whole publish and take the other targets with it -- the same
+				// failure shape as the stale-id crash addEnvelopesMutation
+				// documents, where one bad list silently froze every later
+				// insert into that bucket.
+				if (this.mailboxes[target.mailboxId] === undefined) {
+					return
+				}
+				// replaceKnownEnvelopeListMutation() sorts and de-duplicates,
+				// and drops ids whose envelope is not in the store -- these are,
+				// addEnvelopesMutation() put them there a moment ago.
+				this.replaceKnownEnvelopeListMutation({
+					mailboxId: target.mailboxId,
+					query: target.query,
+					envelopes: [
+						...this.getEnvelopes(target.mailboxId, target.query),
+						...matching,
+					],
+				})
+			})
+		},
 		async fetchDeepSearchPage({
 			mailboxId,
 			query,
@@ -2794,12 +2864,12 @@ export default function mainStoreActions() {
 				return pending.promise
 			}
 
+			// Left over from the job-based design .108 replaced: a `jobId` for
+			// a job that no longer exists, and a `publish` shadowed by the
+			// per-stream one below. Dead code that still reads as live is how
+			// the next person loses an hour.
 			pending = {
-				jobId: undefined,
 				targets: new Map([[targetKey, { mailboxId: statusMailboxId, query: statusQuery }]]),
-			}
-			const publish = (job) => {
-				pending.targets.forEach((target) => this.setDeepSearchJobMutation({ ...target, job }))
 			}
 			pending.promise = (async () => {
 				const collected = []
@@ -2868,6 +2938,12 @@ export default function mainStoreActions() {
 									query,
 									envelopes: fresh,
 									addToUnifiedMailboxes,
+								})
+								this.publishDeepSearchPageToStatusLists({
+									targets: pending.targets,
+									sourceMailboxId: mailboxId,
+									sourceQuery: query,
+									envelopes: fresh,
 								})
 								collected.push(...fresh)
 							}

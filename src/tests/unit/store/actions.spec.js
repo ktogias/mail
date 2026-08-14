@@ -1703,6 +1703,65 @@ describe('Vuex store actions', () => {
 			})
 		})
 
+		/**
+		 * The test that would have caught .108 and .110, and did not exist.
+		 *
+		 * The Priority Inbox is assembled by fetchNextEnvelopes() from the
+		 * RETURN VALUE of fetchDeepSearchPage(), one entry per constituent
+		 * mailbox -- addEnvelopesMutation() reaches the source mailbox and the
+		 * Unified inbox, neither of which is what the user is looking at. So a
+		 * page that arrives after the return value has been taken never
+		 * appeared, which is exactly what .110's early return caused: the
+		 * server returned older results and the list stopped at February.
+		 *
+		 * Every existing test used a single mailbox and never asserted on the
+		 * status list, so both defects sailed through 1,351 of them.
+		 */
+		it('publishes a page into the visible priority list, not only the return value', async () => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			const account = { id: 13 }
+			store.addAccountMutation(account)
+			store.addMailboxMutation({
+				account,
+				mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+			})
+			store.preferences['layout-message-view'] = 'threaded'
+			store.preferences['sort-order'] = 'newest'
+			const sectionQuery = 'subject:needle not:starred is:pi-other'
+			store.mailboxes[PRIORITY_INBOX_ID].envelopeLists[sectionQuery] = []
+
+			const older = {
+				databaseId: 4242,
+				mailboxId: 11,
+				dateInt: 1_700_000_000,
+				flags: { seen: true, flagged: false, important: false },
+				tags: [],
+			}
+			DeepSearchService.deepSearch.mockResolvedValue({
+				accountId: 13,
+				results: [older],
+				searchedThrough: 1_690_000_000,
+				nextEnd: null,
+				exhausted: true,
+				windows: 3,
+				durationMs: 60,
+				mode: 'headers',
+			})
+
+			await store.fetchDeepSearchPage({
+				mailboxId: 11,
+				query: 'subject:needle',
+				cursor: 1_800_000_000,
+				prioritySplit: true,
+				statusMailboxId: PRIORITY_INBOX_ID,
+				statusQuery: sectionQuery,
+			})
+
+			// On screen, not merely returned.
+			expect(store.mailboxes[PRIORITY_INBOX_ID].envelopeLists[sectionQuery])
+				.toContain(older.databaseId)
+		})
+
 		it('follows the continuation token instead of restarting the walk', async () => {
 			const first = { ...mockEnvelope(21, 4), dateInt: 1_900_000_000 }
 			const second = { ...mockEnvelope(21, 5), dateInt: 1_800_000_000 }
