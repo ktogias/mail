@@ -2812,10 +2812,18 @@ export default function mainStoreActions() {
 				// is INCOMPLETE, and the banner must not claim otherwise. That
 				// is the .88 family of bug -- a watermark published past the
 				// slowest source -- and the aggregation is what prevents it.
+				// Keyed by mailbox AND mode. A unified search fans out across
+				// every constituent mailbox but publishes into ONE status key,
+				// so an id of just the mode made each mailbox overwrite the
+				// previous one -- and since most mailboxes (Drafts, Trash,
+				// labels) are empty and report themselves exhausted at once,
+				// the banner ended up showing whichever empty one answered
+				// last: "No older matches were found", while 300 older matches
+				// sat in the two mailboxes that had them. Confirmed live.
 				const publish = (mode, state) => {
 					pending.targets.forEach((target) => this.setDeepSearchJobMutation({
 						...target,
-						job: { id: mode, ...state },
+						job: { id: `${mailboxId}:${mode}`, ...state },
 					}))
 				}
 
@@ -2894,18 +2902,37 @@ export default function mainStoreActions() {
 				// search bodies for -- otherwise it would open an IMAP
 				// connection to answer a question identical to the headers
 				// stream's.
-				const modes = hasBodyTerms(query) ? [MODE_HEADERS, MODE_BODY] : [MODE_HEADERS]
+				// This promise resolves on the HEADERS stream alone. The body
+				// stream keeps running and enriches the list as its results
+				// arrive, through addEnvelopesMutation rather than through this
+				// return value.
+				//
+				// Waiting for both is what put a minute of loading placeholders
+				// in front of results that were ready in ~100 ms: a unified
+				// search opens one body stream per mailbox, each an IMAP round
+				// trip of 2.7-6 s, and the caller holds its loading state until
+				// the slowest of them lands. Measured live: the first useful
+				// response arrived 77 seconds after the first request.
+				const headers = runStream(MODE_HEADERS)
+				const body = hasBodyTerms(query) ? runStream(MODE_BODY) : null
+				// Its outcome is reported through the status entry above; this
+				// catch only stops an unhandled rejection when the headers
+				// stream has already resolved and nobody is left awaiting it.
+				body?.catch(() => {})
 				try {
-					// Settled, not all: the two streams block on different
-					// resources and fail for different reasons. A refused IMAP
-					// login must not discard the header results already on
-					// screen.
-					const outcomes = await Promise.allSettled(modes.map(runStream))
-					const rejected = outcomes.filter((outcome) => outcome.status === 'rejected')
-					if (rejected.length === modes.length) {
-						throw rejected[0].reason
+					try {
+						await headers
+					} catch (error) {
+						// The headers stream failing does not mean the search
+						// failed -- the body stream may still deliver, and a
+						// refused IMAP login must not discard header results
+						// either. Only give up when nothing can arrive.
+						if (body === null) {
+							throw error
+						}
+						await body
 					}
-					return collected
+					return collected.slice()
 				} finally {
 					pendingForStore.delete(key)
 				}

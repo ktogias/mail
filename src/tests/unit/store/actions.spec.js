@@ -1605,6 +1605,104 @@ describe('Vuex store actions', () => {
 			})).resolves.toEqual([headerHit])
 		})
 
+		/**
+		 * A unified search fans out across every constituent mailbox but
+		 * publishes into ONE status key. Keying the status entry on the mode
+		 * alone made each mailbox overwrite the previous one, and since most
+		 * mailboxes are empty and report themselves exhausted immediately, the
+		 * banner showed whichever empty one answered last -- "No older matches
+		 * were found", with 300 older matches sitting in the mailboxes that
+		 * had them. Confirmed live on 2026-08-14.
+		 */
+		it('does not let one mailbox overwrite another mailbox status', async () => {
+			const hit = mockEnvelope(21, 7)
+			DeepSearchService.deepSearch.mockImplementation(async ({ mailboxId }) => ({
+				accountId: 13,
+				// Mailbox 22 is empty and exhausts at once, exactly like a
+				// Drafts folder or an unused label.
+				results: mailboxId === 21 ? [hit] : [],
+				searchedThrough: 1_700_000_000,
+				nextEnd: null,
+				exhausted: true,
+				windows: 1,
+				durationMs: 5,
+				mode: 'headers',
+			}))
+
+			await store.fetchDeepSearchPage({
+				mailboxId: 21,
+				query: 'subject:needle',
+				cursor: 1_900_000_000,
+				statusMailboxId: 99,
+				statusQuery: 'subject:needle',
+			})
+			await store.fetchDeepSearchPage({
+				mailboxId: 22,
+				query: 'subject:needle',
+				cursor: 1_900_000_000,
+				statusMailboxId: 99,
+				statusQuery: 'subject:needle',
+			})
+
+			// The empty mailbox answered last and must not have erased the
+			// result the other one found.
+			expect(store.getDeepSearchState(99, 'subject:needle').resultCount).toBe(1)
+		})
+
+		/**
+		 * Header results are ready in ~100 ms; a unified body search is one
+		 * IMAP round trip per mailbox, measured live at 77 seconds to the first
+		 * useful response. Holding the page open for the second put a minute of
+		 * loading placeholders in front of results that already existed.
+		 */
+		it('resolves on the headers stream and lets the body stream enrich afterwards', async () => {
+			const headerHit = mockEnvelope(21, 8)
+			const bodyHit = mockEnvelope(21, 9)
+			let releaseBody
+			const bodyArrived = new Promise((resolve) => {
+				releaseBody = resolve
+			})
+			DeepSearchService.deepSearch.mockImplementation(async ({ mode }) => {
+				if (mode === 'body') {
+					await bodyArrived
+					return {
+						accountId: 13,
+						results: [bodyHit],
+						searchedThrough: 1_700_000_000,
+						nextEnd: null,
+						exhausted: true,
+						windows: 1,
+						durationMs: 6000,
+						mode: 'body',
+					}
+				}
+				return {
+					accountId: 13,
+					results: [headerHit],
+					searchedThrough: 1_700_000_000,
+					nextEnd: null,
+					exhausted: true,
+					windows: 5,
+					durationMs: 100,
+					mode: 'headers',
+				}
+			})
+
+			// Resolves WITHOUT the body stream having answered.
+			await expect(store.fetchDeepSearchPage({
+				mailboxId: 21,
+				query: 'body:needle',
+				cursor: 1_900_000_000,
+			})).resolves.toEqual([headerHit])
+
+			// ...and the list is then enriched when it does.
+			releaseBody()
+			await vi.waitFor(() => {
+				expect(store.mailboxes[21].envelopeLists['body:needle'])
+					.toEqual(expect.arrayContaining([headerHit.databaseId, bodyHit.databaseId]))
+			})
+		})
+
 		it('follows the continuation token instead of restarting the walk', async () => {
 			const first = { ...mockEnvelope(21, 4), dateInt: 1_900_000_000 }
 			const second = { ...mockEnvelope(21, 5), dateInt: 1_800_000_000 }
