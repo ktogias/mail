@@ -2679,6 +2679,17 @@ export default function mainStoreActions() {
 		setCurrentPriorityInboxSearchQueryMutation(query) {
 			this.currentPriorityInboxSearchQuery = query
 		},
+		/** @param {object} p the mailbox and the raw text typed into its search box */
+		setSearchTermMutation({ mailboxId, term }) {
+			if (term) {
+				Vue.set(this.searchTermsByMailbox, String(mailboxId), term)
+			} else {
+				Vue.delete(this.searchTermsByMailbox, String(mailboxId))
+			}
+		},
+		getSearchTerm(mailboxId) {
+			return this.searchTermsByMailbox[String(mailboxId)] ?? ''
+		},
 		markPriorityInboxViewRefreshedMutation() {
 			this.priorityInboxViewRevision++
 		},

@@ -481,8 +481,31 @@ export default {
 		},
 	},
 
+	/**
+	 * The term must outlive this component.
+	 *
+	 * Opening a message and coming back re-creates it, and until .118 that
+	 * reset the input to its placeholder while the list stayed filtered --
+	 * with no clear button, because that only renders for a non-empty term.
+	 * There was no way back to the full list short of reloading the page.
+	 */
+	mounted() {
+		const remembered = this.mainStore.getSearchTerm(this.mailbox.databaseId)
+		if (remembered && this.query === '') {
+			this.query = remembered
+		}
+	},
+
 	watch: {
 		query() {
+			// Persisted BEFORE the early returns below: clearing the box and
+			// typing one or two characters are exactly the states that must
+			// survive a re-mount, and both return early.
+			this.mainStore.setSearchTermMutation({
+				mailboxId: this.mailbox.databaseId,
+				term: this.query,
+			})
+
 			if (this.query.length === 0) {
 				return
 			}

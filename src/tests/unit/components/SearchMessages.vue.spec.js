@@ -92,3 +92,62 @@ describe('SearchMessages quick filters', () => {
 		}
 	})
 })
+
+describe('SearchMessages: the typed term must survive a re-mount', () => {
+	beforeEach(() => {
+		setActivePinia(createPinia())
+		useMainStore().addAccountMutation({ id: 13, emailAddress: 'me@example.org' })
+	})
+
+	/**
+	 * @param {number} mailboxId which folder's search box this is
+	 * @return {object} a shallow-mounted component
+	 */
+	const mountFor = (mailboxId) => shallowMount(SearchMessages, {
+		propsData: {
+			mailbox: { databaseId: mailboxId, isPriorityInbox: false, isUnified: false },
+			accountId: 13,
+		},
+		mocks: { t: (app, text) => text },
+		stubs: { NcChip: true },
+	})
+
+	/**
+	 * Reported with a screenshot on 2026-08-15: search, open a message, come
+	 * back, and the input shows its placeholder while the list is still
+	 * filtered. The clear button only renders for a non-empty term, so it had
+	 * gone too -- there was no way back to the full list short of reloading.
+	 *
+	 * The term lived only in this component's local data, while the filter it
+	 * produces lives in the parent and the store. Data flows one way, so
+	 * nothing carried it back when the component was created again.
+	 */
+	it('restores what was typed when it is created again', async () => {
+		const first = mountFor(21)
+		first.vm.query = 'macbook'
+		await first.vm.$nextTick()
+		first.destroy()
+
+		expect(mountFor(21).vm.query).toBe('macbook')
+	})
+
+	it('does not hand one mailbox another mailbox term', async () => {
+		const first = mountFor(21)
+		first.vm.query = 'macbook'
+		await first.vm.$nextTick()
+		first.destroy()
+
+		expect(mountFor(22).vm.query).toBe('')
+	})
+
+	it('does not resurrect a term the user has cleared', async () => {
+		const wrapper = mountFor(21)
+		wrapper.vm.query = 'macbook'
+		await wrapper.vm.$nextTick()
+		wrapper.vm.query = ''
+		await wrapper.vm.$nextTick()
+
+		expect(useMainStore().getSearchTerm(21)).toBe('')
+		expect(mountFor(21).vm.query).toBe('')
+	})
+})

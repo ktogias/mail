@@ -91,6 +91,21 @@ export default defineStore('main', {
 			// component ref, so mirror it just like currentViewMailboxId and
 			// refresh the exact compound lists currently rendered.
 			currentPriorityInboxSearchQuery: undefined,
+			// What the user actually TYPED, per mailbox.
+			//
+			// SearchMessages.vue holds the term in local component data, while
+			// the filter it produces lives in MailboxThread and here. Opening
+			// a message and coming back re-creates the component: the input
+			// reset to its placeholder while the list stayed filtered, and
+			// because the clear button only renders for a non-empty term, the
+			// only way out of the search disappeared with it. Reported with a
+			// screenshot on 2026-08-15.
+			//
+			// Kept as the raw text on purpose. Reconstructing it from the
+			// canonical query -- turning `subject:x body:x not:starred
+			// is:pi-other` back into "x" -- is the kind of cleverness that
+			// fails quietly the next time a token is added.
+			searchTermsByMailbox: {},
 			// Incremented after an authoritative refresh replaces the
 			// currently-rendered Priority section heads. The view uses this
 			// to reset query-local pagination exhaustion and re-arm its

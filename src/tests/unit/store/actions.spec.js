@@ -1827,6 +1827,31 @@ describe('Vuex store actions', () => {
 			})
 		})
 
+		/**
+		 * Search, open a message, come back: until .118 the input showed its
+		 * placeholder while the list stayed filtered, and the clear button --
+		 * which only renders for a non-empty term -- had gone with it. There
+		 * was no way back to the full list short of reloading the page.
+		 * Reported with a screenshot on 2026-08-15.
+		 */
+		it('remembers the typed term per mailbox so a re-mount can restore it', () => {
+			store.setSearchTermMutation({ mailboxId: 21, term: 'macbook' })
+			store.setSearchTermMutation({ mailboxId: 22, term: 'invoice' })
+
+			expect(store.getSearchTerm(21)).toBe('macbook')
+			expect(store.getSearchTerm(22)).toBe('invoice')
+			// A mailbox never searched must not inherit a sibling's term.
+			expect(store.getSearchTerm(23)).toBe('')
+		})
+
+		it('forgets the term when the box is cleared', () => {
+			store.setSearchTermMutation({ mailboxId: 21, term: 'macbook' })
+
+			store.setSearchTermMutation({ mailboxId: 21, term: '' })
+
+			expect(store.getSearchTerm(21)).toBe('')
+		})
+
 		it('follows the continuation token instead of restarting the walk', async () => {
 			const first = { ...mockEnvelope(21, 4), dateInt: 1_900_000_000 }
 			const second = { ...mockEnvelope(21, 5), dateInt: 1_800_000_000 }
