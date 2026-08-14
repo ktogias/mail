@@ -15,6 +15,33 @@ export const MODE_BODY = 'body'
 export const hasBodyTerms = (filter) => /(?:^|\s)body:\S/i.test(filter ?? '')
 
 /**
+ * Mirrors DeepSearchService::stripBodyTerms() on the server.
+ *
+ * @param filter
+ */
+export function stripBodyTerms(filter) {
+	return (filter ?? '')
+		.replace(/(?:^|\s)body:\S+/gi, ' ')
+		.replace(/\s+/g, ' ')
+		.trim()
+}
+
+/**
+ * Is it worth searching headers separately from bodies?
+ *
+ * Only when something text-like survives the strip. A filter whose only text
+ * predicate is `body:` would strip down to its structural tokens alone
+ * (`not:starred is:pi-other`), and those match EVERY message rather than none
+ * -- a header pass built from that would flood the list with unrelated mail.
+ *
+ * @param filter
+ */
+export function worthSplittingFromBody(filter) {
+	return hasBodyTerms(filter)
+		&& /(?:^|\s)(?:to|from|cc|bcc|subject):\S/i.test(stripBodyTerms(filter))
+}
+
+/**
  * Advance one search backwards through history by one bounded stretch.
  *
  * There is no job to start, poll or cancel. The response carries a
@@ -23,6 +50,17 @@ export const hasBodyTerms = (filter) => /(?:^|\s)body:\S/i.test(filter ?? '')
  * for free, because nothing was created on the server that could outlive them.
  *
  * @param {object} params the search, plus `nextEnd` to continue a previous one
+ * @param params.mailboxId
+ * @param params.filter
+ * @param params.cursor
+ * @param params.cursorId
+ * @param params.sort
+ * @param params.view
+ * @param params.limit
+ * @param params.prioritySplit
+ * @param params.nextEnd
+ * @param params.mode
+ * @param params.signal
  * @return {Promise<object>} results and the token for the next stretch
  */
 export async function deepSearch({

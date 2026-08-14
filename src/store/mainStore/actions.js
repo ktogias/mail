@@ -64,6 +64,8 @@ import {
 	hasBodyTerms,
 	MODE_BODY,
 	MODE_HEADERS,
+	stripBodyTerms,
+	worthSplittingFromBody,
 } from '../../service/DeepSearchService.js'
 import { moveDraft, updateDraft } from '../../service/DraftService.js'
 import * as FollowUpService from '../../service/FollowUpService.js'
@@ -3060,29 +3062,43 @@ export default function mainStoreActions() {
 					individualMailboxes,
 					TEXT_SEARCH_ENVELOPE_FETCH_CONCURRENCY,
 					async (individualMailbox) => {
-						try {
-							const envelopes = await fetchProgressiveSearchPage({
-								query: descriptor.baseQuery,
+						const runPass = (passQuery) => fetchProgressiveSearchPage({
+							query: passQuery,
+							sortOrder,
+							view,
+							upperBound: searchUpperBound,
+							prioritySplit: true,
+							fetchPage: (networkQuery) => fetchEnvelopes(
+								individualMailbox.accountId,
+								individualMailbox.databaseId,
+								networkQuery,
+								undefined,
+								PAGE_SIZE,
 								sortOrder,
 								view,
-								upperBound: searchUpperBound,
-								prioritySplit: true,
-								fetchPage: (networkQuery) => fetchEnvelopes(
-									individualMailbox.accountId,
-									individualMailbox.databaseId,
-									networkQuery,
-									undefined,
-									PAGE_SIZE,
-									sortOrder,
-									view,
-									undefined,
-									pending.controller.signal,
-									true,
-									...(workClass === WorkClass.ACTIVE_CONTENT
-										? []
-										: [undefined, workClass]),
-								),
-							})
+								undefined,
+								pending.controller.signal,
+								true,
+								...(workClass === WorkClass.ACTIVE_CONTENT
+									? []
+									: [undefined, workClass]),
+							),
+						})
+						// A `body:` term makes this request a live IMAP SEARCH,
+						// and a unified search issues one PER MAILBOX. Measured
+						// live on 2026-08-14: 2.7-6 s each, concurrency 2, and
+						// the first useful response 77 seconds after the first
+						// request -- a minute of loading placeholders in front
+						// of header results the database can answer in ~100 ms.
+						//
+						// So the same split the deep search uses: headers now,
+						// bodies after. Only when a text predicate survives the
+						// strip, because a filter whose only text term is
+						// `body:` would leave structural tokens that match every
+						// message rather than none.
+						const splitFromBody = worthSplittingFromBody(descriptor.baseQuery)
+						try {
+							const envelopes = await runPass(splitFromBody ? stripBodyTerms(descriptor.baseQuery) : descriptor.baseQuery)
 							this.addEnvelopesMutation({
 								query: descriptor.baseQuery,
 								envelopes,
@@ -3090,6 +3106,34 @@ export default function mainStoreActions() {
 								replace: true,
 								replaceMailboxId: individualMailbox.databaseId,
 							})
+							if (splitFromBody) {
+								// Deliberately not awaited: it enriches the list
+								// through the store when it lands, exactly as the
+								// deep search's body stream does. Merged, never
+								// `replace`, so it adds to the header pass
+								// instead of standing in for it.
+								runPass(descriptor.baseQuery).then((bodyEnvelopes) => {
+									this.addEnvelopesMutation({
+										query: descriptor.baseQuery,
+										envelopes: bodyEnvelopes,
+										addToUnifiedMailboxes: false,
+									})
+									this.publishDeepSearchPageToStatusLists({
+										targets: new Map([[mailbox.databaseId + '::' + query, {
+											mailboxId: mailbox.databaseId,
+											query,
+										}]]),
+										sourceMailboxId: individualMailbox.databaseId,
+										sourceQuery: descriptor.baseQuery,
+										envelopes: bodyEnvelopes,
+									})
+								}).catch((error) => {
+									if (axios.isCancel(error) || pending.controller.signal.aborted) {
+										return
+									}
+									logger.error(`Failed body pass for unified constituent mailbox ${individualMailbox.databaseId}: ${error}`, { error })
+								})
+							}
 							return { mailbox: individualMailbox, envelopes, failed: false }
 						} catch (error) {
 							if (axios.isCancel(error) || pending.controller.signal.aborted) {
