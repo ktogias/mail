@@ -10,8 +10,6 @@ declare(strict_types=1);
 namespace OCA\Mail\Migration;
 
 use Closure;
-use OCA\Mail\BackgroundJob\DeepSearchCleanupJob;
-use OCP\BackgroundJob\IJobList;
 use OCP\DB\ISchemaWrapper;
 use OCP\DB\Types;
 use OCP\Migration\IOutput;
@@ -27,13 +25,6 @@ use OCP\Migration\SimpleMigrationStep;
  * @psalm-api
  */
 class Version5010Date20260722120000 extends SimpleMigrationStep {
-	private bool $registerCleanupJob = false;
-
-	public function __construct(
-		private IJobList $jobList,
-	) {
-	}
-
 	/** @param Closure(): ISchemaWrapper $schemaClosure */
 	#[\Override]
 	public function changeSchema(IOutput $output, Closure $schemaClosure, array $options): ?ISchemaWrapper {
@@ -146,16 +137,15 @@ class Version5010Date20260722120000 extends SimpleMigrationStep {
 		$table->addUniqueIndex(['job_key'], 'mail_search_job_key_uidx');
 		$table->addIndex(['user_id', 'id'], 'mail_search_user_id_idx');
 		$table->addIndex(['status', 'expires_at'], 'mail_search_expiry_idx');
-		$this->registerCleanupJob = true;
-
 		return $schema;
 	}
 
 	/** @param Closure(): ISchemaWrapper $schemaClosure */
 	#[\Override]
 	public function postSchemaChange(IOutput $output, Closure $schemaClosure, array $options): void {
-		if ($this->registerCleanupJob && !$this->jobList->has(DeepSearchCleanupJob::class, null)) {
-			$this->jobList->add(DeepSearchCleanupJob::class);
-		}
+		// The cleanup job this used to register no longer exists: deep search
+		// became stateless, so there is no table of jobs to reap. A fresh
+		// install must not register a class it cannot build, and an existing
+		// one has the row removed by Version5011Date20260814030000.
 	}
 }

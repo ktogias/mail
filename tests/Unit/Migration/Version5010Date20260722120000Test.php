@@ -11,7 +11,6 @@ namespace OCA\Mail\Tests\Unit\Migration;
 
 use Doctrine\DBAL\Schema\Schema;
 use OCA\Mail\Migration\Version5010Date20260722120000;
-use OCP\BackgroundJob\IJobList;
 use OCP\DB\ISchemaWrapper;
 use OCP\Migration\IOutput;
 use PHPUnit\Framework\TestCase;
@@ -25,10 +24,9 @@ class Version5010Date20260722120000Test extends TestCase {
 			->method('createTable')
 			->with('mail_search_jobs')
 			->willReturnCallback(static fn () => $dbalSchema->createTable('oc_mail_search_jobs'));
-		$jobs = $this->createMock(IJobList::class);
-		$jobs->method('has')->willReturn(false);
-		$jobs->expects(self::once())->method('add')->with(\OCA\Mail\BackgroundJob\DeepSearchCleanupJob::class);
-		$migration = new Version5010Date20260722120000($jobs);
+		// No job registration any more: deep search became stateless in .108,
+		// so there is no table of jobs to reap and no cleanup job to register.
+		$migration = new Version5010Date20260722120000();
 
 		$result = $migration->changeSchema(
 			$this->createMock(IOutput::class),
@@ -52,9 +50,7 @@ class Version5010Date20260722120000Test extends TestCase {
 		$schema->method('hasTable')->with('mail_search_jobs')->willReturn(true);
 		$schema->expects(self::never())->method('createTable');
 
-		$jobs = $this->createMock(IJobList::class);
-		$jobs->expects(self::never())->method('add');
-		$migration = new Version5010Date20260722120000($jobs);
+		$migration = new Version5010Date20260722120000();
 		$result = $migration->changeSchema(
 			$this->createMock(IOutput::class),
 			static fn () => $schema,

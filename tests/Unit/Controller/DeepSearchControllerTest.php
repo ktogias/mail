@@ -15,7 +15,6 @@ use OCA\Mail\Contracts\IMailManager;
 use OCA\Mail\Contracts\IMailSearch;
 use OCA\Mail\Controller\DeepSearchController;
 use OCA\Mail\Db\Mailbox;
-use OCA\Mail\Db\SearchJob;
 use OCA\Mail\Service\AccountService;
 use OCA\Mail\Service\DelegationService;
 use OCA\Mail\Service\Search\DeepSearchService;
@@ -38,7 +37,7 @@ class DeepSearchControllerTest extends TestCase {
 		$this->controller = $this->controllerFor('alice');
 	}
 
-	public function testCreateAuthorizesScopeAndQueuesOnlyBoundedTextSearch(): void {
+	public function testSearchAuthorizesScopeAndDelegatesTheWholeRequest(): void {
 		$mailbox = new Mailbox();
 		$mailbox->setId(23);
 		$mailbox->setAccountId(7);
@@ -49,39 +48,28 @@ class DeepSearchControllerTest extends TestCase {
 			->willReturn('owner');
 		$this->mailManager->method('getMailbox')->with('owner', 23)->willReturn($mailbox);
 		$this->accountService->method('find')->with('owner', 7)->willReturn($account);
-		$job = new SearchJob();
-		$job->setId(41);
-		$job->setStatus(SearchJob::STATUS_QUEUED);
 		$this->deepSearch->expects(self::once())
-			->method('start')
+			->method('search')
 			->with(
-				'alice', 'owner', $account, $mailbox, 'subject:needle',
+				$account, $mailbox, 'owner', 'subject:needle',
 				IMailSearch::ORDER_NEWEST_FIRST, IMailSearch::VIEW_THREADED,
-				1_700_000_000, 991, 20, true,
+				1_700_000_000, 991, 20, true, null, DeepSearchService::MODE_HEADERS,
 			)
-			->willReturn($job);
-		$this->deepSearch->method('serialize')->with($job)->willReturn(['id' => 41, 'status' => 'queued']);
+			->willReturn(['results' => [], 'exhausted' => true, 'nextEnd' => null]);
 
-		$response = $this->controller->create(
-			23,
-			'subject:needle',
-			1_700_000_000,
-			991,
-			IMailSearch::ORDER_NEWEST_FIRST,
-			IMailSearch::VIEW_THREADED,
-			20,
-			true,
+		$response = $this->controller->search(
+			23, 'subject:needle', 1_700_000_000, 991,
+			IMailSearch::ORDER_NEWEST_FIRST, IMailSearch::VIEW_THREADED, 20, true,
 		);
 
-		self::assertSame(Http::STATUS_ACCEPTED, $response->getStatus());
-		self::assertSame(['id' => 41, 'status' => 'queued'], $response->getData());
+		self::assertSame(Http::STATUS_OK, $response->getStatus());
 	}
 
 	/** @dataProvider unsupportedSearchProvider */
-	public function testCreateRejectsUnboundedOrNonTextWork(string $filter, int $cursor, string $sort): void {
-		$this->deepSearch->expects(self::never())->method('start');
+	public function testSearchRejectsUnboundedOrNonTextWork(string $filter, int $cursor, string $sort): void {
+		$this->deepSearch->expects(self::never())->method('search');
 
-		$response = $this->controller->create(23, $filter, $cursor, null, $sort);
+		$response = $this->controller->search(23, $filter, $cursor, null, $sort);
 
 		self::assertSame(Http::STATUS_BAD_REQUEST, $response->getStatus());
 	}
@@ -95,23 +83,67 @@ class DeepSearchControllerTest extends TestCase {
 		];
 	}
 
-	public function testShowAndCancelCannotCrossUserBoundary(): void {
-		$this->deepSearch->expects(self::exactly(2))
-			->method('getForUser')
-			->with(41, 'alice')
-			->willThrowException(new \OCP\AppFramework\Db\DoesNotExistException('missing'));
-		$this->deepSearch->expects(self::never())->method('cancel');
+	/**
+	 * A body-mode request with nothing to search bodies for would open an IMAP
+	 * connection -- ~2.7 s against Gmail -- to answer a question identical to
+	 * the headers stream's.
+	 */
+	public function testBodyModeWithoutBodyTermsIsRefused(): void {
+		$this->deepSearch->expects(self::never())->method('search');
 
-		self::assertSame(Http::STATUS_NOT_FOUND, $this->controller->show(41)->getStatus());
-		self::assertSame(Http::STATUS_NOT_FOUND, $this->controller->destroy(41)->getStatus());
+		$response = $this->controller->search(
+			23, 'subject:needle', 1_700_000_000, null,
+			IMailSearch::ORDER_NEWEST_FIRST, IMailSearch::VIEW_THREADED, 20, false,
+			null, DeepSearchService::MODE_BODY,
+		);
+
+		self::assertSame(Http::STATUS_BAD_REQUEST, $response->getStatus());
+	}
+
+	public function testAnUnknownModeIsRefused(): void {
+		$this->deepSearch->expects(self::never())->method('search');
+
+		$response = $this->controller->search(
+			23, 'subject:needle', 1_700_000_000, null,
+			IMailSearch::ORDER_NEWEST_FIRST, IMailSearch::VIEW_THREADED, 20, false,
+			null, 'everything',
+		);
+
+		self::assertSame(Http::STATUS_BAD_REQUEST, $response->getStatus());
+	}
+
+	/**
+	 * The continuation token is client-supplied. It cannot widen access -- the
+	 * mailbox is authorised on every request -- but a token at or above the
+	 * cursor would walk forwards or stand still, and a non-positive one would
+	 * run off the end of time.
+	 * @dataProvider badContinuationProvider
+	 */
+	public function testAnImpossibleContinuationIsRefused(int $nextEnd): void {
+		$this->deepSearch->expects(self::never())->method('search');
+
+		$response = $this->controller->search(
+			23, 'subject:needle', 1_700_000_000, null,
+			IMailSearch::ORDER_NEWEST_FIRST, IMailSearch::VIEW_THREADED, 20, false,
+			$nextEnd,
+		);
+
+		self::assertSame(Http::STATUS_BAD_REQUEST, $response->getStatus());
+	}
+
+	public function badContinuationProvider(): array {
+		return [
+			'at the cursor' => [1_700_000_000],
+			'above the cursor' => [1_800_000_000],
+			'zero' => [0],
+			'negative' => [-1],
+		];
 	}
 
 	public function testAnonymousRequestsAreRejected(): void {
 		$controller = $this->controllerFor(null);
 
-		self::assertSame(Http::STATUS_UNAUTHORIZED, $controller->create(23, 'subject:x', 1)->getStatus());
-		self::assertSame(Http::STATUS_UNAUTHORIZED, $controller->show(41)->getStatus());
-		self::assertSame(Http::STATUS_UNAUTHORIZED, $controller->destroy(41)->getStatus());
+		self::assertSame(Http::STATUS_UNAUTHORIZED, $controller->search(23, 'subject:x', 1)->getStatus());
 	}
 
 	private function controllerFor(?string $userId): DeepSearchController {

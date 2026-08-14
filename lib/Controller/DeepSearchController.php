@@ -40,13 +40,17 @@ class DeepSearchController extends Controller {
 	}
 
 	/**
-	 * Queue or coalesce one background page below the supplied composite
-	 * cursor.  Explicit date-bounded and structural-only searches stay on the
-	 * ordinary synchronous path; this endpoint is only for free-text deep work.
+	 * Advance one search backwards through history and return what it found.
+	 *
+	 * Stateless: the response carries a continuation token and the server
+	 * keeps nothing. A client that stops asking ends the search, which is why
+	 * there is no cancel endpoint and nothing to reap. Explicit date-bounded
+	 * and structural-only searches stay on the ordinary synchronous path;
+	 * this is only for free-text work.
 	 *
 	 * @NoAdminRequired
 	 */
-	public function create(
+	public function search(
 		int $mailboxId,
 		string $filter,
 		int $cursor,
@@ -55,6 +59,8 @@ class DeepSearchController extends Controller {
 		string $view = IMailSearch::VIEW_THREADED,
 		int $limit = 20,
 		bool $prioritySplit = false,
+		?int $nextEnd = null,
+		string $mode = DeepSearchService::MODE_HEADERS,
 	): JSONResponse {
 		if ($this->userId === null) {
 			return new JSONResponse([], Http::STATUS_UNAUTHORIZED);
@@ -67,6 +73,22 @@ class DeepSearchController extends Controller {
 			return new JSONResponse([
 				'error' => 'unsupported_search',
 			], Http::STATUS_BAD_REQUEST);
+		}
+		if ($mode !== DeepSearchService::MODE_HEADERS && $mode !== DeepSearchService::MODE_BODY) {
+			return new JSONResponse(['error' => 'unsupported_mode'], Http::STATUS_BAD_REQUEST);
+		}
+		// A body-mode request with nothing to search bodies for would open an
+		// IMAP connection to answer a question identical to the headers
+		// stream's. Refuse it rather than pay for it.
+		if ($mode === DeepSearchService::MODE_BODY && !DeepSearchService::hasBodyTerms($filter)) {
+			return new JSONResponse(['error' => 'no_body_terms'], Http::STATUS_BAD_REQUEST);
+		}
+		// The continuation token is a plain timestamp from a previous
+		// response. It cannot widen access -- the mailbox is authorised
+		// below on every request, exactly as on the first one -- but it must
+		// not walk forwards or off the end of time.
+		if ($nextEnd !== null && ($nextEnd <= 0 || $nextEnd >= $cursor)) {
+			return new JSONResponse(['error' => 'invalid_continuation'], Http::STATUS_BAD_REQUEST);
 		}
 
 		$view = $view === IMailSearch::VIEW_SINGLETON
@@ -82,11 +104,10 @@ class DeepSearchController extends Controller {
 			return new JSONResponse([], Http::STATUS_FORBIDDEN);
 		}
 
-		$job = $this->deepSearch->start(
-			$this->userId,
-			$effectiveUserId,
+		return new JSONResponse($this->deepSearch->search(
 			$account,
 			$mailbox,
+			$effectiveUserId,
 			$filter,
 			$sort,
 			$view,
@@ -94,37 +115,8 @@ class DeepSearchController extends Controller {
 			$cursorId,
 			$limit,
 			$prioritySplit,
-		);
-		$status = $job->getStatus() === \OCA\Mail\Db\SearchJob::STATUS_COMPLETE
-			? Http::STATUS_OK
-			: Http::STATUS_ACCEPTED;
-		return new JSONResponse($this->deepSearch->serialize($job), $status);
-	}
-
-	/** @NoAdminRequired */
-	public function show(int $id): JSONResponse {
-		if ($this->userId === null) {
-			return new JSONResponse([], Http::STATUS_UNAUTHORIZED);
-		}
-		try {
-			$job = $this->deepSearch->getForUser($id, $this->userId);
-		} catch (DoesNotExistException) {
-			return new JSONResponse([], Http::STATUS_NOT_FOUND);
-		}
-		return new JSONResponse($this->deepSearch->serialize($job));
-	}
-
-	/** @NoAdminRequired */
-	public function destroy(int $id): JSONResponse {
-		if ($this->userId === null) {
-			return new JSONResponse([], Http::STATUS_UNAUTHORIZED);
-		}
-		try {
-			$this->deepSearch->getForUser($id, $this->userId);
-		} catch (DoesNotExistException) {
-			return new JSONResponse([], Http::STATUS_NOT_FOUND);
-		}
-		$this->deepSearch->cancel($id, $this->userId);
-		return new JSONResponse([], Http::STATUS_NO_CONTENT);
+			$nextEnd,
+			$mode,
+		));
 	}
 }

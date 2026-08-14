@@ -26,7 +26,13 @@ import { wait } from '../../../util/wait.js'
 const { WorkClass } = RequestCoordinatorService
 
 vi.mock('../../../service/AccountService.js')
-vi.mock('../../../service/DeepSearchService.js')
+// Only the network call is mocked. MODE_HEADERS/MODE_BODY and hasBodyTerms
+// are the real ones, so a test that types `body:` exercises the same
+// two-stream decision production does.
+vi.mock('../../../service/DeepSearchService.js', async (importOriginal) => ({
+	...(await importOriginal()),
+	deepSearch: vi.fn(),
+}))
 vi.mock('../../../service/MailboxService.js')
 vi.mock('../../../service/MessageService.js')
 vi.mock('../../../service/NotificationService.js')
@@ -62,16 +68,15 @@ describe('Vuex store actions', () => {
 		resetSharedNetworkLimiterForTests()
 		resetRecentLocalChangesForTests()
 		resetPendingDeleteRefillsForTests()
-		DeepSearchService.startDeepSearch.mockResolvedValue({
-			id: 1,
+		DeepSearchService.deepSearch.mockResolvedValue({
 			accountId: 13,
-			mailboxId: 21,
-			status: 'complete',
 			results: [],
-			resultCount: 0,
-			chunksCompleted: 1,
 			searchedThrough: 1,
+			nextEnd: null,
 			exhausted: true,
+			windows: 1,
+			durationMs: 1,
+			mode: 'headers',
 		})
 	})
 
@@ -1457,98 +1462,201 @@ describe('Vuex store actions', () => {
 		it('continues into full history through a durable background page when both foreground windows are empty', async () => {
 			const deepMatch = mockEnvelope(21, 1)
 			MessageService.fetchEnvelopes.mockResolvedValue([])
-			DeepSearchService.startDeepSearch.mockResolvedValueOnce({
-				id: 91,
+			DeepSearchService.deepSearch.mockResolvedValueOnce({
 				accountId: 13,
-				mailboxId: 21,
-				status: 'complete',
 				results: [deepMatch],
-				resultCount: 1,
-				chunksCompleted: 2,
 				searchedThrough: 1_800_000_000,
-				exhausted: false,
+				nextEnd: null,
+				exhausted: true,
+				windows: 2,
+				durationMs: 40,
+				mode: 'headers',
 			})
 
 			await expect(store.fetchEnvelopes({ mailboxId: 21, query: 'body:needle' })).resolves.toEqual([])
 			await vi.waitFor(() => expect(store.mailboxes[21].envelopeLists['body:needle']).toEqual([deepMatch.databaseId]))
 
 			expect(MessageService.fetchEnvelopes).toHaveBeenCalledTimes(2)
-			expect(DeepSearchService.startDeepSearch).toHaveBeenCalledWith(expect.objectContaining({
+			expect(DeepSearchService.deepSearch).toHaveBeenCalledWith(expect.objectContaining({
 				mailboxId: 21,
 				filter: 'body:needle',
 				cursor: 1_984_448_000,
 			}))
 		})
 
-		it('cancels the server job when it gives up polling, instead of abandoning it', async () => {
-			// A client that walks away silently leaves the job advancing on
-			// the server. Thirteen were found on 2026-08-14 still walking
-			// nine hours after the tab that started them had given up: the
-			// abandon path only cancelled on abort, never on timeout.
-			vi.useFakeTimers()
-			try {
-				DeepSearchService.startDeepSearch.mockResolvedValueOnce({
-					id: 93,
+		// The polling/cancel test that used to live here is gone with the
+		// thing it guarded: there is no job to poll and no job to cancel.
+		// What replaces it is the contract of the two streams.
+
+		it('only opens a body stream when the filter has body terms', async () => {
+			MessageService.fetchEnvelopes.mockResolvedValue([])
+
+			await store.fetchEnvelopes({ mailboxId: 21, query: 'subject:needle' })
+			await vi.waitFor(() => expect(DeepSearchService.deepSearch).toHaveBeenCalled())
+
+			const modes = DeepSearchService.deepSearch.mock.calls.map(([args]) => args.mode)
+			expect(modes).toContain('headers')
+			expect(modes).not.toContain('body')
+		})
+
+		it('runs headers and body concurrently when the filter has body terms', async () => {
+			MessageService.fetchEnvelopes.mockResolvedValue([])
+
+			await store.fetchEnvelopes({ mailboxId: 21, query: 'body:needle' })
+			await vi.waitFor(() => {
+				const modes = DeepSearchService.deepSearch.mock.calls.map(([args]) => args.mode)
+				expect(modes).toContain('headers')
+				expect(modes).toContain('body')
+			})
+		})
+
+		/**
+		 * The .88 trap, in its new shape. The headers stream lands in ~100 ms
+		 * and the body stream ~25x later, so for that whole gap the list holds
+		 * results and is incomplete. Modelled by ARRIVAL ORDER, not by the
+		 * final state -- averaging the two would hide exactly the bug.
+		 */
+		it('does not report the search complete while the body stream is still out', async () => {
+			const headerHit = mockEnvelope(21, 1)
+			const bodyHit = mockEnvelope(21, 2)
+			MessageService.fetchEnvelopes.mockResolvedValue([])
+
+			let releaseBody
+			const bodyArrived = new Promise((resolve) => {
+				releaseBody = resolve
+			})
+			DeepSearchService.deepSearch.mockImplementation(async ({ mode }) => {
+				if (mode === 'body') {
+					await bodyArrived
+					return {
+						accountId: 13,
+						results: [bodyHit],
+						searchedThrough: 1_700_000_000,
+						nextEnd: null,
+						exhausted: true,
+						windows: 1,
+						durationMs: 2700,
+						mode: 'body',
+					}
+				}
+				return {
 					accountId: 13,
-					mailboxId: 21,
-					status: 'queued',
-					results: [],
-					resultCount: 0,
-					chunksCompleted: 0,
-					searchedThrough: 1_900_000_000,
-					exhausted: false,
-				})
-				DeepSearchService.cancelDeepSearch.mockResolvedValue(undefined)
-				DeepSearchService.getDeepSearch.mockResolvedValue({
-					id: 93,
+					results: [headerHit],
+					searchedThrough: 1_700_000_000,
+					nextEnd: null,
+					exhausted: true,
+					windows: 5,
+					durationMs: 100,
+					mode: 'headers',
+				}
+			})
+
+			const pending = store.fetchDeepSearchPage({
+				mailboxId: 21,
+				query: 'body:needle',
+				cursor: 1_900_000_000,
+			})
+
+			// The header result is on screen...
+			await vi.waitFor(() => {
+				expect(store.getDeepSearchState(21, 'body:needle')?.resultCount).toBeGreaterThan(0)
+			})
+			// ...and the search must still describe itself as running, and must
+			// NOT claim the history is exhausted, because the body stream has
+			// not come back.
+			expect(store.getDeepSearchState(21, 'body:needle').status).toBe('running')
+			expect(store.getDeepSearchState(21, 'body:needle').exhausted).toBe(false)
+
+			releaseBody()
+			await pending
+			await vi.waitFor(() => {
+				expect(store.getDeepSearchState(21, 'body:needle').status).toBe('complete')
+				expect(store.getDeepSearchState(21, 'body:needle').exhausted).toBe(true)
+			})
+		})
+
+		it('keeps header results when the body stream fails', async () => {
+			const headerHit = mockEnvelope(21, 3)
+			MessageService.fetchEnvelopes.mockResolvedValue([])
+			DeepSearchService.deepSearch.mockImplementation(async ({ mode }) => {
+				if (mode === 'body') {
+					throw new Error('IMAP login refused')
+				}
+				return {
 					accountId: 13,
-					mailboxId: 21,
-					status: 'queued',
-					results: [],
-					resultCount: 0,
-					chunksCompleted: 0,
-					searchedThrough: 1_900_000_000,
+					results: [headerHit],
+					searchedThrough: 1_700_000_000,
+					nextEnd: null,
+					exhausted: true,
+					windows: 5,
+					durationMs: 100,
+					mode: 'headers',
+				}
+			})
+
+			// Directly, so the assertion is about THIS promise resolving. Going
+			// through fetchEnvelopes swallowed the rejection and the test
+			// passed with Promise.all in place -- vacuous, and caught by
+			// breaking it on purpose.
+			await expect(store.fetchDeepSearchPage({
+				mailboxId: 21,
+				query: 'body:needle',
+				cursor: 1_900_000_000,
+			})).resolves.toEqual([headerHit])
+		})
+
+		it('follows the continuation token instead of restarting the walk', async () => {
+			const first = { ...mockEnvelope(21, 4), dateInt: 1_900_000_000 }
+			const second = { ...mockEnvelope(21, 5), dateInt: 1_800_000_000 }
+			MessageService.fetchEnvelopes.mockResolvedValue([])
+			DeepSearchService.deepSearch
+				.mockResolvedValueOnce({
+					accountId: 13,
+					results: [first],
+					searchedThrough: 1_884_448_001,
+					nextEnd: 1_884_448_000,
 					exhausted: false,
+					windows: 1,
+					durationMs: 2000,
+					mode: 'headers',
+				})
+				.mockResolvedValueOnce({
+					accountId: 13,
+					results: [second],
+					searchedThrough: 1_700_000_000,
+					nextEnd: null,
+					exhausted: true,
+					windows: 3,
+					durationMs: 60,
+					mode: 'headers',
 				})
 
-				const pending = store.fetchDeepSearchPage({
-					mailboxId: 21,
-					query: 'body:needle',
-					cursor: 1_900_000_000,
-				})
-				const settled = pending.catch((error) => error)
+			await store.fetchEnvelopes({ mailboxId: 21, query: 'subject:needle' })
+			await vi.waitFor(() => expect(DeepSearchService.deepSearch).toHaveBeenCalledTimes(2))
 
-				// 600 polls at 1.5s each.
-				await vi.advanceTimersByTimeAsync(600 * 1500 + 1500)
-
-				const error = await settled
-				expect(error.message).toBe('Deep search polling timed out')
-				expect(DeepSearchService.cancelDeepSearch).toHaveBeenCalledWith(93)
-			} finally {
-				vi.useRealTimers()
-			}
+			expect(DeepSearchService.deepSearch.mock.calls[0][0].nextEnd).toBeNull()
+			expect(DeepSearchService.deepSearch.mock.calls[1][0].nextEnd).toBe(1_884_448_000)
 		})
 
 		it('uses the composite list tail for every later deep page', async () => {
 			const tail = { ...mockEnvelope(21, 9), dateInt: 1_800_000_000 }
 			const older = { ...mockEnvelope(21, 8), dateInt: 1_700_000_000 }
 			store.addEnvelopesMutation({ query: 'subject:needle', envelopes: [tail] })
-			DeepSearchService.startDeepSearch.mockResolvedValueOnce({
-				id: 92,
+			DeepSearchService.deepSearch.mockResolvedValueOnce({
 				accountId: 13,
-				mailboxId: 21,
-				status: 'complete',
 				results: [older],
-				resultCount: 1,
-				chunksCompleted: 1,
 				searchedThrough: 1_700_000_000,
-				exhausted: false,
+				nextEnd: null,
+				exhausted: true,
+				windows: 1,
+				durationMs: 30,
+				mode: 'headers',
 			})
 
 			await expect(store.fetchNextEnvelopes({ mailboxId: 21, query: 'subject:needle', quantity: PAGE_SIZE })).resolves.toEqual([older])
 
 			expect(MessageService.fetchEnvelopes).not.toHaveBeenCalled()
-			expect(DeepSearchService.startDeepSearch).toHaveBeenCalledWith(expect.objectContaining({
+			expect(DeepSearchService.deepSearch).toHaveBeenCalledWith(expect.objectContaining({
 				cursor: tail.dateInt,
 				cursorId: tail.databaseId,
 			}))

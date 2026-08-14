@@ -9,368 +9,195 @@ declare(strict_types=1);
 
 namespace OCA\Mail\Service\Search;
 
-use JsonException;
 use OCA\Mail\Account;
-use OCA\Mail\BackgroundJob\DeepSearchJob as DeepSearchBackgroundJob;
 use OCA\Mail\Contracts\IMailSearch;
 use OCA\Mail\Db\Mailbox;
-use OCA\Mail\Db\MailboxMapper;
 use OCA\Mail\Db\MessageMapper;
-use OCA\Mail\Db\SearchJob;
-use OCA\Mail\Db\SearchJobMapper;
-use OCA\Mail\Service\AccountService;
-use OCP\AppFramework\Db\DoesNotExistException;
-use OCP\AppFramework\Utility\ITimeFactory;
-use OCP\BackgroundJob\IJobList;
-use OCP\DB\Exception;
+use function array_filter;
+use function array_slice;
 use function array_values;
 use function count;
-use function hash;
-use function json_decode;
-use function json_encode;
+use function hrtime;
+use function is_array;
 use function max;
+use function min;
+use function preg_match;
 use function preg_replace;
 use function trim;
 
 /**
- * Creates and advances one-page, cursor-keyed deep searches.
+ * Searches backwards through a mailbox's history in bounded windows.
  *
- * The foreground request has already searched the newest 180 days.  A job
- * advances towards the past in bounded 180-day windows and stops as soon as
- * one UI page is full.  This is intentionally not a persistent search index:
- * storage is O(active jobs * one page), and every row has a short TTL.
+ * There is no job, no row, no TTL and no reaper. One request advances the
+ * search by as much as it can afford and hands back a continuation token; the
+ * client decides whether to ask again. If it stops asking -- the user cancels,
+ * the tab closes, the laptop shuts -- the search stops, because nothing was
+ * ever created that could outlive it.
+ *
+ * This replaces a queued background job that walked one window per five-minute
+ * cron tick. On 2026-08-14 thirteen of those, from one afternoon's typing, were
+ * found still walking after nine and a half hours, having reached 1975 on a
+ * mailbox whose oldest message is 2024-04-21.
+ *
+ * The measurements the shape comes from, all on that mailbox:
+ *
+ *   header-only window          21 ms   -- the whole depth is ~100 ms
+ *   body window              3,500 ms   -- 99.8% of it the IMAP round trip
+ *   IMAP SEARCH, 180 days    2,700 ms   -- and 2,704 ms for ALL of history
+ *
+ * So depth is nearly free and breadth is not, and breadth has no depth to
+ * walk: one unbounded SEARCH answers the whole mailbox (see the Provider,
+ * .107). The client therefore runs two of these searches concurrently, one
+ * per mode -- they block on different resources, disk and network, and overlap
+ * almost perfectly.
  */
 class DeepSearchService {
 	public const WINDOW_SECONDS = 180 * 24 * 60 * 60;
-	public const ACTIVE_TTL_SECONDS = 60 * 60;
-	public const COMPLETE_TTL_SECONDS = 30 * 60;
+
+	/** Header terms only: local database, no IMAP. */
+	public const MODE_HEADERS = 'headers';
+	/** The filter as typed, body terms included: one IMAP round trip. */
+	public const MODE_BODY = 'body';
+
+	/**
+	 * How long one request may spend walking windows.
+	 *
+	 * Checked BETWEEN windows, never inside one, so a window is always
+	 * completed and a result is never half a window's worth. The first
+	 * window therefore always runs however long it takes -- which for a
+	 * body search is one IMAP round trip, and that is the point: the
+	 * budget decides how much comes back in this response, not whether the
+	 * expensive part happens.
+	 */
+	public const REQUEST_BUDGET_MS = 2000;
 
 	public function __construct(
-		private SearchJobMapper $jobMapper,
-		private MailboxMapper $mailboxMapper,
 		private MessageMapper $messageMapper,
-		private AccountService $accountService,
 		private IMailSearch $mailSearch,
-		private IJobList $jobList,
-		private ITimeFactory $time,
 	) {
 	}
 
 	/**
-	 * Return an existing equivalent job or create/reset a durable one.
+	 * Advance one search by as many windows as the budget allows.
 	 *
-	 * The key includes the mailbox cache generation and the composite cursor,
-	 * so identical consumers coalesce while a changed mailbox or next page does
-	 * not accidentally reuse stale work.
+	 * @return array{results: array, searchedThrough: int, nextEnd: int|null, exhausted: bool, windows: int, durationMs: int, mode: string}
 	 */
-	public function start(
-		string $userId,
-		string $effectiveUserId,
+	public function search(
 		Account $account,
 		Mailbox $mailbox,
+		string $effectiveUserId,
 		string $filter,
 		string $sortOrder,
 		string $view,
-		int $cursorAt,
-		?int $cursorId,
-		int $limit,
-		bool $prioritySplit = false,
-	): SearchJob {
-		$filter = trim((string)preg_replace('/\s+/', ' ', $filter));
-		$generation = $mailbox->getCacheBuster();
-		$jobKey = hash('sha256', implode("\0", [
-			$userId,
-			$effectiveUserId,
-			(string)$account->getId(),
-			(string)$mailbox->getId(),
-			$generation,
-			$filter,
-			$sortOrder,
-			$view,
-			(string)$cursorAt,
-			(string)($cursorId ?? ''),
-			(string)$limit,
-			$prioritySplit ? 'split' : 'single',
-		]));
-		$now = $this->time->getTime();
-		// Opportunistic cleanup keeps storage bounded even on an instance
-		// whose hourly background runner is delayed or temporarily disabled.
-		$this->jobMapper->deleteExpired($now);
-
-		try {
-			$job = $this->jobMapper->findByJobKey($jobKey);
-			if ($job->getExpiresAt() >= $now
-				&& !in_array($job->getStatus(), [SearchJob::STATUS_FAILED, SearchJob::STATUS_CANCELLED], true)) {
-				return $job;
-			}
-			$this->initialize($job, $userId, $effectiveUserId, $account, $mailbox, $generation, $filter, $sortOrder, $view, $cursorAt, $cursorId, $limit, $prioritySplit, $now);
-			$this->jobMapper->update($job);
-		} catch (DoesNotExistException) {
-			$job = new SearchJob();
-			$job->setJobKey($jobKey);
-			$this->initialize($job, $userId, $effectiveUserId, $account, $mailbox, $generation, $filter, $sortOrder, $view, $cursorAt, $cursorId, $limit, $prioritySplit, $now);
-			try {
-				/** @var SearchJob $job */
-				$job = $this->jobMapper->insert($job);
-			} catch (Exception $e) {
-				// A concurrent identical POST may have won the unique job_key
-				// insert.  Coalesce only if that exact row now exists; otherwise
-				// preserve the original database failure.
-				try {
-					$job = $this->jobMapper->findByJobKey($jobKey);
-				} catch (DoesNotExistException) {
-					throw $e;
-				}
-				return $job;
-			}
-		}
-
-		$this->jobList->add(DeepSearchBackgroundJob::class, [
-			'jobId' => $job->getId(),
-			'iteration' => 0,
-			'failures' => 0,
-		]);
-		return $job;
-	}
-
-	private function initialize(
-		SearchJob $job,
-		string $userId,
-		string $effectiveUserId,
-		Account $account,
-		Mailbox $mailbox,
-		string $generation,
-		string $filter,
-		string $sortOrder,
-		string $view,
-		int $cursorAt,
+		?int $cursorAt,
 		?int $cursorId,
 		int $limit,
 		bool $prioritySplit,
-		int $now,
-	): void {
-		$job->setUserId($userId);
-		$job->setEffectiveUserId($effectiveUserId);
-		$job->setAccountId($account->getId());
-		$job->setMailboxId($mailbox->getId());
-		$job->setMailboxGeneration($generation);
-		$job->setFilter($filter);
-		$job->setSortOrder($sortOrder);
-		$job->setView($view);
-		$job->setStatus(SearchJob::STATUS_QUEUED);
-		$job->setCursorAt($cursorAt);
-		$job->setCursorId($cursorId);
-		$job->setNextEnd($cursorAt);
-		$job->setSearchedThrough($cursorAt);
-		$job->setPageLimit($limit);
-		$job->setPrioritySplit($prioritySplit);
-		$job->setResultCount(0);
-		$job->setChunksDone(0);
-		$job->setResultPayload('[]');
-		$job->setCancelRequested(false);
-		$job->setExhausted(false);
-		$job->setErrorCode(null);
-		$job->setCreatedAt($now);
-		$job->setUpdatedAt($now);
-		$job->setExpiresAt($now + self::ACTIVE_TTL_SECONDS);
-	}
-
-	public function getForUser(int $id, string $userId): SearchJob {
-		return $this->jobMapper->findForUser($id, $userId);
-	}
-
-	public function getInternal(int $id): SearchJob {
-		return $this->jobMapper->findById($id);
-	}
-
-	public function cancel(int $id, string $userId): bool {
-		return $this->jobMapper->requestCancel($id, $userId, $this->time->getTime());
-	}
-
-	/**
-	 * Process exactly one bounded time window.
-	 *
-	 * @return bool true when another queued chunk is required
-	 * @throws JsonException
-	 */
-	public function processChunk(int $id): bool {
-		$job = $this->jobMapper->findById($id);
-		if ($job->getCancelRequested() || $this->isTerminal($job)) {
-			return false;
-		}
-
-		$now = $this->time->getTime();
-		$job->setStatus(SearchJob::STATUS_RUNNING);
-		$job->setUpdatedAt($now);
-		$job->setExpiresAt($now + self::ACTIVE_TTL_SECONDS);
-		if (!$this->jobMapper->storeWorkerState($job)) {
-			return false;
-		}
-
-		$account = $this->accountService->findById($job->getAccountId());
-		$mailbox = $this->mailboxMapper->findById($job->getMailboxId());
-		if ($account->getUserId() !== $job->getEffectiveUserId()
-			|| $mailbox->getAccountId() !== $account->getId()) {
-			$this->fail($id, 'scope_changed');
-			return false;
+		?int $nextEnd,
+		string $mode,
+	): array {
+		$startedAt = hrtime(true);
+		$filter = trim((string)preg_replace('/\s+/', ' ', $filter));
+		if ($mode === self::MODE_HEADERS) {
+			$filter = self::stripBodyTerms($filter);
 		}
 
 		// The floor of the walk: no message in this mailbox is older than
-		// this, so every window below it is provably empty.
-		//
-		// Without it the walk stepped towards the Unix epoch one 180-day
-		// window per cron tick. Measured live on 2026-08-14, mailbox 149
-		// (Gmail INBOX, 27,547 messages, oldest 2024-04-21): thirteen jobs
-		// from one afternoon's typing had each done 102-103 chunks and stood
-		// at 1975, with eleven more windows to go. Five of those windows held
-		// mail. The other ~110 could not: 1,430 searches of nothing against
-		// the single most expensive mailbox on this install.
-		//
-		// It is an exact bound, not a heuristic: deep search reads only the
-		// local cache (MailSearch::findMessages -> getIdsLocally), so a row
-		// below the oldest cached `sent_at` cannot exist. An empty mailbox
-		// yields PHP_INT_MAX, which terminates on the first chunk -- there is
-		// nothing further back for the same reason.
+		// this, so every window below it is provably empty. Deep search
+		// returns only locally cached rows -- IMAP contributes candidate
+		// UIDs, the database performs the join -- so this is an exact
+		// bound rather than an estimate. An empty mailbox yields
+		// PHP_INT_MAX and terminates on the first window, for the same
+		// reason.
 		$floor = $this->messageMapper->findOldestSentAt($mailbox) ?? PHP_INT_MAX;
 
-		$windowEnd = max(1, $job->getNextEnd());
-		$windowStart = max(1, $windowEnd - self::WINDOW_SECONDS + 1);
-		$remaining = $job->getPrioritySplit()
-			? $job->getPageLimit()
-			: max(1, $job->getPageLimit() - $job->getResultCount());
-		$windowFilter = $job->getFilter() . " start:$windowStart end:$windowEnd";
-		$messages = $this->mailSearch->findMessages(
-			$account,
-			$mailbox,
-			$job->getSortOrder(),
-			$windowFilter,
-			$job->getCursorAt(),
-			$remaining,
-			$job->getEffectiveUserId(),
-			$job->getView(),
-			$job->getPrioritySplit(),
-			$job->getCursorId(),
-		);
+		$windowEnd = $nextEnd ?? $cursorAt ?? throw new \InvalidArgumentException('no cursor');
+		$results = [];
+		$windows = 0;
+		$searchedThrough = $windowEnd;
+		$exhausted = false;
+		// Only the first window of a request may consume the composite
+		// cursor; afterwards the walk is bounded by the window itself and
+		// reusing the cursor would re-exclude rows it has already passed.
+		$useCursor = $nextEnd === null;
 
-		/** @var array<int, array<string, mixed>> $existing */
-		$existing = json_decode($job->getResultPayload() ?? '[]', true, 512, JSON_THROW_ON_ERROR);
-		$byId = [];
-		foreach ([...$existing, ...$messages] as $message) {
-			$serialized = is_array($message) ? $message : $message->jsonSerialize();
-			$databaseId = (int)($serialized['databaseId'] ?? 0);
-			if ($databaseId > 0 && !isset($byId[$databaseId])) {
-				$byId[$databaseId] = $serialized;
+		while (true) {
+			$windowStart = max(1, $windowEnd - self::WINDOW_SECONDS + 1);
+			$remaining = $prioritySplit ? $limit : max(1, $limit - count($results));
+
+			$messages = $this->mailSearch->findMessages(
+				$account,
+				$mailbox,
+				$sortOrder,
+				$filter . " start:$windowStart end:$windowEnd",
+				$useCursor ? $cursorAt : null,
+				$remaining,
+				$effectiveUserId,
+				$view,
+				$prioritySplit,
+				$useCursor ? $cursorId : null,
+			);
+			$useCursor = false;
+			$windows++;
+
+			foreach ($messages as $message) {
+				$serialized = is_array($message) ? $message : $message->jsonSerialize();
+				$databaseId = (int)($serialized['databaseId'] ?? 0);
+				if ($databaseId > 0 && !isset($results[$databaseId])) {
+					$results[$databaseId] = $serialized;
+				}
+			}
+
+			$searchedThrough = $windowStart;
+			$windowEnd = $windowStart - 1;
+
+			// The window CONTAINING the floor is searched before the walk
+			// stops, so flooring can never skip a message; it only refuses
+			// to search below the oldest one that exists.
+			if ($windowStart <= max(1, $floor)) {
+				$exhausted = true;
+				break;
+			}
+			if ($this->pageIsFull($results, $limit, $prioritySplit, $view)) {
+				break;
+			}
+			if ((hrtime(true) - $startedAt) / 1e6 >= self::REQUEST_BUDGET_MS) {
+				break;
 			}
 		}
-		$results = $this->capResults(array_values($byId), $job->getPageLimit(), $job->getPrioritySplit(), $job->getView());
 
-		$job->setResultPayload(json_encode($results, JSON_THROW_ON_ERROR));
-		$job->setResultCount(count($results));
-		$job->setChunksDone($job->getChunksDone() + 1);
-		$job->setSearchedThrough($windowStart);
-		$job->setCursorAt(null);
-		$job->setCursorId(null);
-		$job->setNextEnd(max(0, $windowStart - 1));
-		$job->setUpdatedAt($now);
-		$job->setErrorCode(null);
-
-		$pageFull = $this->pageIsFull($results, $job->getPageLimit(), $job->getPrioritySplit(), $job->getView());
-		// The window that contains the floor is searched before the walk
-		// stops, so flooring can never skip a message -- it only refuses to
-		// search below the oldest one that exists.
-		$historyExhausted = $windowStart <= max(1, $floor);
-		if ($pageFull || $historyExhausted) {
-			$job->setStatus(SearchJob::STATUS_COMPLETE);
-			$job->setExhausted($historyExhausted && !$pageFull);
-			$job->setExpiresAt($now + self::COMPLETE_TTL_SECONDS);
-		} else {
-			$job->setStatus(SearchJob::STATUS_QUEUED);
-			$job->setExpiresAt($now + self::ACTIVE_TTL_SECONDS);
-		}
-
-		if (!$this->jobMapper->storeWorkerState($job)) {
-			return false;
-		}
-		return !$pageFull && !$historyExhausted;
-	}
-
-	public function defer(int $id): void {
-		$job = $this->jobMapper->findById($id);
-		if ($job->getCancelRequested() || $this->isTerminal($job)) {
-			return;
-		}
-		$now = $this->time->getTime();
-		$job->setStatus(SearchJob::STATUS_QUEUED);
-		$job->setUpdatedAt($now);
-		// Deliberately NOT renewing expires_at. A deferral is the opposite of
-		// progress: the job was handed back untouched because the server or
-		// the account was busy. Renewing the hour here made a job that could
-		// never run also never expire, so DeepSearchCleanupJob -- which works,
-		// and cleared 52 rows the moment it was run by hand -- could not reach
-		// it. The TTL now measures time since real work, which is what a TTL
-		// on a worker's state is supposed to mean.
-		$this->jobMapper->storeWorkerState($job);
-	}
-
-	public function fail(int $id, string $errorCode): void {
-		$job = $this->jobMapper->findById($id);
-		if ($job->getCancelRequested() || $this->isTerminal($job)) {
-			return;
-		}
-		$now = $this->time->getTime();
-		$job->setStatus(SearchJob::STATUS_FAILED);
-		$job->setErrorCode($errorCode);
-		$job->setUpdatedAt($now);
-		$job->setExpiresAt($now + self::COMPLETE_TTL_SECONDS);
-		$this->jobMapper->storeWorkerState($job);
-	}
-
-	public function retry(int $id, string $errorCode): void {
-		$job = $this->jobMapper->findById($id);
-		if ($job->getCancelRequested() || $this->isTerminal($job)) {
-			return;
-		}
-		$now = $this->time->getTime();
-		$job->setStatus(SearchJob::STATUS_QUEUED);
-		$job->setErrorCode($errorCode);
-		$job->setUpdatedAt($now);
-		$job->setExpiresAt($now + self::ACTIVE_TTL_SECONDS);
-		$this->jobMapper->storeWorkerState($job);
-	}
-
-	public function deleteExpired(): int {
-		return $this->jobMapper->deleteExpired($this->time->getTime());
-	}
-
-	/** @return array<string, mixed> */
-	public function serialize(SearchJob $job): array {
-		try {
-			$results = json_decode($job->getResultPayload() ?? '[]', true, 512, JSON_THROW_ON_ERROR);
-		} catch (JsonException) {
-			$results = [];
-		}
 		return [
-			'id' => $job->getId(),
-			'accountId' => $job->getAccountId(),
-			'mailboxId' => $job->getMailboxId(),
-			'status' => $job->getStatus(),
-			'results' => $results,
-			'resultCount' => $job->getResultCount(),
-			'prioritySplit' => $job->getPrioritySplit(),
-			'chunksCompleted' => $job->getChunksDone(),
-			'searchedThrough' => $job->getSearchedThrough(),
-			'exhausted' => $job->getExhausted(),
-			'errorCode' => $job->getErrorCode(),
-			'expiresAt' => $job->getExpiresAt(),
+			// The client stamps every envelope with this: the list is
+			// unified across accounts and an envelope without it cannot be
+			// routed back to its own.
+			'accountId' => $account->getId(),
+			'results' => array_values($this->capResults(array_values($results), $limit, $prioritySplit, $view)),
+			'searchedThrough' => $searchedThrough,
+			'nextEnd' => $exhausted ? null : $windowEnd,
+			'exhausted' => $exhausted,
+			'windows' => $windows,
+			'durationMs' => (int)round((hrtime(true) - $startedAt) / 1e6),
+			'mode' => $mode,
 		];
 	}
 
-	private function isTerminal(SearchJob $job): bool {
-		return in_array($job->getStatus(), [
-			SearchJob::STATUS_COMPLETE,
-			SearchJob::STATUS_CANCELLED,
-			SearchJob::STATUS_FAILED,
-		], true);
+	/**
+	 * Drop `body:` terms so the headers stream never reaches IMAP.
+	 *
+	 * The body stream keeps the filter as typed, so it returns a superset of
+	 * what the headers stream returns. That redundancy is deliberate: the
+	 * database combines body UIDs and subject matches in one OR
+	 * (MessageMapper::findIdsByQuery), and splitting a disjunction across two
+	 * requests is exactly the kind of clever that goes subtly wrong. The
+	 * duplicate rows cost one header search (~21 ms) and the client
+	 * deduplicates by databaseId anyway.
+	 */
+	public static function stripBodyTerms(string $filter): string {
+		return trim((string)preg_replace('/\s+/', ' ', (string)preg_replace('/(?:^|\s)body:\S+/i', ' ', $filter)));
+	}
+
+	public static function hasBodyTerms(string $filter): bool {
+		return preg_match('/(?:^|\s)body:\S/i', $filter) === 1;
 	}
 
 	/** @param array<int, array<string, mixed>> $results */

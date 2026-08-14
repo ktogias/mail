@@ -60,9 +60,10 @@ import {
 	initializeClientForUserView,
 } from '../../service/caldavService.js'
 import {
-	cancelDeepSearch,
-	getDeepSearch,
-	startDeepSearch,
+	deepSearch,
+	hasBodyTerms,
+	MODE_BODY,
+	MODE_HEADERS,
 } from '../../service/DeepSearchService.js'
 import { moveDraft, updateDraft } from '../../service/DraftService.js'
 import * as FollowUpService from '../../service/FollowUpService.js'
@@ -651,8 +652,6 @@ let pendingUnifiedContentSearches = new WeakMap()
 // poll loop per physical mailbox/query/cursor even when several Priority or
 // Unified Inbox sections request the same deep page simultaneously.
 let pendingDeepSearches = new WeakMap()
-const DEEP_SEARCH_POLL_INTERVAL_MS = 1500
-const DEEP_SEARCH_MAX_POLLS = 600
 
 // Upper bound for a single message/thread fetch -- see fetchMessage()
 // for the reasoning. Well above the slowest legitimate fetch observed
@@ -2803,61 +2802,110 @@ export default function mainStoreActions() {
 				pending.targets.forEach((target) => this.setDeepSearchJobMutation({ ...target, job }))
 			}
 			pending.promise = (async () => {
-				let job
-				try {
-					job = await startDeepSearch({
-						mailboxId,
-						filter: query,
-						cursor,
-						cursorId,
-						sort: sort === 'oldest' ? 'ASC' : 'DESC',
-						view,
-						limit: PAGE_SIZE,
-						prioritySplit,
-						signal,
+				const collected = []
+				const seen = new Set()
+
+				// One entry per stream. getDeepSearchState() aggregates them
+				// with min(searchedThrough) and every(exhausted), which is
+				// exactly the rule this design needs: while the body stream is
+				// still out on its IMAP round trip, the list holds results and
+				// is INCOMPLETE, and the banner must not claim otherwise. That
+				// is the .88 family of bug -- a watermark published past the
+				// slowest source -- and the aggregation is what prevents it.
+				const publish = (mode, state) => {
+					pending.targets.forEach((target) => this.setDeepSearchJobMutation({
+						...target,
+						job: { id: mode, ...state },
+					}))
+				}
+
+				const runStream = async (mode) => {
+					let nextEnd = null
+					let resultCount = 0
+					let windows = 0
+					let searchedThrough = cursor
+					publish(mode, {
+						status: 'running',
+						resultCount,
+						chunksCompleted: windows,
+						searchedThrough,
+						exhausted: false,
 					})
-					pending.jobId = job.id
-					publish(job)
-					for (let poll = 0; poll < DEEP_SEARCH_MAX_POLLS; poll++) {
-						if (job.status === 'complete') {
-							this.addEnvelopesMutation({
-								query,
-								envelopes: job.results,
-								addToUnifiedMailboxes,
+					try {
+						for (;;) {
+							const page = await deepSearch({
+								mailboxId,
+								filter: query,
+								cursor,
+								cursorId,
+								sort: sort === 'oldest' ? 'ASC' : 'DESC',
+								view,
+								limit: PAGE_SIZE,
+								prioritySplit,
+								nextEnd,
+								mode,
+								signal,
 							})
-							return job.results
+							windows += page.windows ?? 0
+							searchedThrough = page.searchedThrough ?? searchedThrough
+
+							const fresh = page.results.filter((envelope) => !seen.has(envelope.databaseId))
+							fresh.forEach((envelope) => seen.add(envelope.databaseId))
+							if (fresh.length > 0) {
+								// Published as they arrive, not at the end: the
+								// headers stream lands in ~100 ms and there is
+								// no reason to make it wait on a round trip to
+								// Gmail that takes twenty-five times longer.
+								this.addEnvelopesMutation({
+									query,
+									envelopes: fresh,
+									addToUnifiedMailboxes,
+								})
+								collected.push(...fresh)
+							}
+							resultCount += page.results.length
+
+							const done = page.exhausted || page.nextEnd === null || page.results.length >= PAGE_SIZE
+							publish(mode, {
+								status: done ? 'complete' : 'running',
+								resultCount,
+								chunksCompleted: windows,
+								searchedThrough,
+								exhausted: page.exhausted === true,
+							})
+							if (done) {
+								return
+							}
+							nextEnd = page.nextEnd
 						}
-						if (job.status === 'failed') {
-							throw new Error(`Deep search failed: ${job.errorCode ?? 'search_failed'}`)
-						}
-						if (job.status === 'cancelled' || signal?.aborted) {
-							const error = new Error('Deep search was superseded')
-							error.name = 'AbortError'
-							throw error
-						}
-						await wait(DEEP_SEARCH_POLL_INTERVAL_MS)
-						job = await getDeepSearch(job.id, { signal })
-						publish(job)
+					} catch (error) {
+						publish(mode, {
+							status: 'failed',
+							resultCount,
+							chunksCompleted: windows,
+							searchedThrough,
+							exhausted: false,
+						})
+						throw error
 					}
-					const timedOut = new Error('Deep search polling timed out')
-					timedOut.name = 'DeepSearchTimeoutError'
-					throw timedOut
-				} catch (error) {
-					// Whenever this client walks away from a job that has not
-					// reached a terminal state of its own, it has to say so.
-					// Cancelling only on abort left the timeout path -- 600
-					// polls, fifteen minutes -- silently abandoning a job the
-					// server then kept advancing for hours. That is how
-					// thirteen orphans were found on 2026-08-14, still walking
-					// nine hours after the tab that started them gave up.
-					const abandoned = signal?.aborted
-						|| error.name === 'AbortError'
-						|| error.name === 'DeepSearchTimeoutError'
-						|| axios.isCancel(error)
-					if (pending.jobId !== undefined && abandoned) {
-						cancelDeepSearch(pending.jobId).catch(() => {})
+				}
+
+				// The body stream is skipped entirely when there is nothing to
+				// search bodies for -- otherwise it would open an IMAP
+				// connection to answer a question identical to the headers
+				// stream's.
+				const modes = hasBodyTerms(query) ? [MODE_HEADERS, MODE_BODY] : [MODE_HEADERS]
+				try {
+					// Settled, not all: the two streams block on different
+					// resources and fail for different reasons. A refused IMAP
+					// login must not discard the header results already on
+					// screen.
+					const outcomes = await Promise.allSettled(modes.map(runStream))
+					const rejected = outcomes.filter((outcome) => outcome.status === 'rejected')
+					if (rejected.length === modes.length) {
+						throw rejected[0].reason
 					}
-					throw error
+					return collected
 				} finally {
 					pendingForStore.delete(key)
 				}

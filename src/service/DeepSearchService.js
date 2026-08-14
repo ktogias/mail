@@ -7,18 +7,38 @@ import axios from '@nextcloud/axios'
 import { generateUrl } from '@nextcloud/router'
 import { WorkClass } from './RequestCoordinator.js'
 
-function amendResults(job) {
-	return {
-		...job,
-		results: (job.results ?? []).map((envelope) => ({
-			accountId: job.accountId,
-			...envelope,
-		})),
-	}
-}
+/** Header terms only: local database, no IMAP. */
+export const MODE_HEADERS = 'headers'
+/** The filter as typed, body terms included: one IMAP round trip. */
+export const MODE_BODY = 'body'
 
-export async function startDeepSearch({ mailboxId, filter, cursor, cursorId, sort, view, limit, prioritySplit = false, signal }) {
-	const response = await axios.post(generateUrl('/apps/mail/api/search-jobs'), {
+export const hasBodyTerms = (filter) => /(?:^|\s)body:\S/i.test(filter ?? '')
+
+/**
+ * Advance one search backwards through history by one bounded stretch.
+ *
+ * There is no job to start, poll or cancel. The response carries a
+ * continuation token; asking again continues, and not asking ends the search.
+ * That is the whole lifecycle -- a closed tab, a reload or a crash all stop it
+ * for free, because nothing was created on the server that could outlive them.
+ *
+ * @param {object} params the search, plus `nextEnd` to continue a previous one
+ * @return {Promise<object>} results and the token for the next stretch
+ */
+export async function deepSearch({
+	mailboxId,
+	filter,
+	cursor,
+	cursorId,
+	sort,
+	view,
+	limit,
+	prioritySplit = false,
+	nextEnd = null,
+	mode = MODE_HEADERS,
+	signal,
+}) {
+	const response = await axios.post(generateUrl('/apps/mail/api/deep-search'), {
 		mailboxId,
 		filter,
 		cursor,
@@ -27,23 +47,17 @@ export async function startDeepSearch({ mailboxId, filter, cursor, cursorId, sor
 		view,
 		limit,
 		prioritySplit,
+		nextEnd,
+		mode,
 	}, {
 		signal,
 		mailWorkClass: WorkClass.MAINTENANCE,
 	})
-	return amendResults(response.data)
-}
-
-export async function getDeepSearch(id, { signal } = {}) {
-	const response = await axios.get(generateUrl('/apps/mail/api/search-jobs/{id}', { id }), {
-		signal,
-		mailWorkClass: WorkClass.MAINTENANCE,
-	})
-	return amendResults(response.data)
-}
-
-export async function cancelDeepSearch(id) {
-	await axios.delete(generateUrl('/apps/mail/api/search-jobs/{id}', { id }), {
-		mailWorkClass: WorkClass.MAINTENANCE,
-	})
+	return {
+		...response.data,
+		results: (response.data.results ?? []).map((envelope) => ({
+			accountId: response.data.accountId,
+			...envelope,
+		})),
+	}
 }

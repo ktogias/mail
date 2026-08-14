@@ -11,297 +11,214 @@ namespace OCA\Mail\Tests\Unit\Service\Search;
 
 use ChristophWurst\Nextcloud\Testing\TestCase;
 use OCA\Mail\Account;
-use OCA\Mail\BackgroundJob\DeepSearchJob as DeepSearchBackgroundJob;
 use OCA\Mail\Contracts\IMailSearch;
 use OCA\Mail\Db\Mailbox;
-use OCA\Mail\Db\MailboxMapper;
 use OCA\Mail\Db\Message;
 use OCA\Mail\Db\MessageMapper;
-use OCA\Mail\Db\SearchJob;
-use OCA\Mail\Db\SearchJobMapper;
-use OCA\Mail\Service\AccountService;
 use OCA\Mail\Service\Search\DeepSearchService;
-use OCP\AppFramework\Db\DoesNotExistException;
-use OCP\AppFramework\Utility\ITimeFactory;
-use OCP\BackgroundJob\IJobList;
 
 class DeepSearchServiceTest extends TestCase {
-	private SearchJobMapper $jobMapper;
-	private MailboxMapper $mailboxMapper;
 	private MessageMapper $messageMapper;
-	private AccountService $accountService;
 	private IMailSearch $mailSearch;
-	private IJobList $jobList;
-	private ITimeFactory $time;
 	private DeepSearchService $service;
 
 	protected function setUp(): void {
 		parent::setUp();
-		$this->jobMapper = $this->createMock(SearchJobMapper::class);
-		$this->mailboxMapper = $this->createMock(MailboxMapper::class);
 		$this->messageMapper = $this->createMock(MessageMapper::class);
-		$this->accountService = $this->createMock(AccountService::class);
 		$this->mailSearch = $this->createMock(IMailSearch::class);
-		$this->jobList = $this->createMock(IJobList::class);
-		$this->time = $this->createMock(ITimeFactory::class);
-		$this->time->method('getTime')->willReturn(2_000_000_000);
-		$this->service = new DeepSearchService(
-			$this->jobMapper,
-			$this->mailboxMapper,
-			$this->messageMapper,
-			$this->accountService,
-			$this->mailSearch,
-			$this->jobList,
-			$this->time,
-		);
+		$this->service = new DeepSearchService($this->messageMapper, $this->mailSearch);
 	}
 
-	public function testStartPersistsAndSchedulesOneCursorKeyedPage(): void {
-		$account = $this->account(7, 'alice');
-		$mailbox = $this->mailbox(23, 7);
-		$this->jobMapper->method('findByJobKey')->willThrowException(new DoesNotExistException('missing'));
-		$this->jobMapper->expects(self::once())
-			->method('insert')
-			->willReturnCallback(static function (SearchJob $job): SearchJob {
-				$job->setId(41);
-				return $job;
-			});
-		$this->jobList->expects(self::once())
-			->method('add')
-			->with(DeepSearchBackgroundJob::class, [
-				'jobId' => 41,
-				'iteration' => 0,
-				'failures' => 0,
-			]);
-
-		$job = $this->service->start(
-			'alice',
-			'alice',
-			$account,
-			$mailbox,
-			'  subject:needle   is:unread ',
-			IMailSearch::ORDER_NEWEST_FIRST,
-			IMailSearch::VIEW_THREADED,
-			1_900_000_000,
-			888,
-			20,
-		);
-
-		self::assertSame(SearchJob::STATUS_QUEUED, $job->getStatus());
-		self::assertSame('subject:needle is:unread', $job->getFilter());
-		self::assertSame(1_900_000_000, $job->getNextEnd());
-		self::assertSame(888, $job->getCursorId());
-		self::assertSame('[]', $job->getResultPayload());
-		self::assertSame(2_000_003_600, $job->getExpiresAt());
-	}
-
-	public function testEquivalentLiveJobIsCoalescedWithoutAnotherQueueEntry(): void {
-		$account = $this->account(7, 'alice');
-		$mailbox = $this->mailbox(23, 7);
-		$existing = $this->baseJob();
-		$existing->setExpiresAt(2_000_000_100);
-		$this->jobMapper->method('findByJobKey')->willReturn($existing);
-		$this->jobMapper->expects(self::never())->method('insert');
-		$this->jobMapper->expects(self::never())->method('update');
-		$this->jobList->expects(self::never())->method('add');
-
-		$result = $this->service->start(
-			'alice', 'alice', $account, $mailbox, 'subject:needle',
-			IMailSearch::ORDER_NEWEST_FIRST, IMailSearch::VIEW_THREADED,
-			1_900_000_000, null, 20,
-		);
-
-		self::assertSame($existing, $result);
-	}
-
-	public function testChunkUsesBoundedWindowAndCompletesWhenPageIsFull(): void {
-		$job = $this->baseJob();
-		$job->setPageLimit(1);
-		$job->setCursorAt(1_900_000_000);
-		$job->setCursorId(888);
-		$this->jobMapper->method('findById')->with(41)->willReturn($job);
-		$this->jobMapper->expects(self::exactly(2))->method('storeWorkerState')->willReturn(true);
-		$account = $this->account(7, 'alice');
-		$mailbox = $this->mailbox(23, 7);
-		$this->accountService->method('findById')->with(7)->willReturn($account);
-		$this->mailboxMapper->method('findById')->with(23)->willReturn($mailbox);
-		$message = $this->createMock(Message::class);
-		$message->method('jsonSerialize')->willReturn([
-			'databaseId' => 991,
-			'dateInt' => 1_899_000_000,
-		]);
+	/**
+	 * The window containing the oldest message is still searched; the walk
+	 * only refuses to go below it. Without a floor this walked towards the
+	 * Unix epoch -- measured live at 102 windows and the year 1975 on a
+	 * mailbox whose oldest message is 2024-04-21.
+	 */
+	public function testTheWalkStopsAtTheOldestMessageInsteadOfTheEpoch(): void {
+		$this->messageMapper->method('findOldestSentAt')->willReturn(1_890_000_000);
 		$this->mailSearch->expects(self::once())
 			->method('findMessages')
 			->with(
-				$account,
-				$mailbox,
+				self::anything(),
+				self::anything(),
 				IMailSearch::ORDER_NEWEST_FIRST,
 				'subject:needle start:1884448001 end:1900000000',
 				1_900_000_000,
-				1,
+				20,
 				'alice',
 				IMailSearch::VIEW_THREADED,
 				false,
 				888,
 			)
-			->willReturn([$message]);
-
-		self::assertFalse($this->service->processChunk(41));
-		self::assertSame(SearchJob::STATUS_COMPLETE, $job->getStatus());
-		self::assertSame(1, $job->getResultCount());
-		self::assertFalse($job->getExhausted());
-		self::assertSame(1, $job->getChunksDone());
-		self::assertSame([['databaseId' => 991, 'dateInt' => 1_899_000_000]], json_decode($job->getResultPayload(), true));
-	}
-
-	public function testCancelledBetweenRunningAndCommitCannotBeResurrected(): void {
-		$job = $this->baseJob();
-		$this->jobMapper->method('findById')->with(41)->willReturn($job);
-		$this->jobMapper->expects(self::once())->method('storeWorkerState')->willReturn(false);
-		$this->mailSearch->expects(self::never())->method('findMessages');
-
-		self::assertFalse($this->service->processChunk(41));
-	}
-
-	/**
-	 * The window that contains the oldest message is still searched; the walk
-	 * only refuses to go below it.
-	 */
-	public function testChunkStopsAtTheOldestMessageInsteadOfTheEpoch(): void {
-		$job = $this->baseJob();
-		$this->jobMapper->method('findById')->with(41)->willReturn($job);
-		$this->jobMapper->expects(self::exactly(2))->method('storeWorkerState')->willReturn(true);
-		$account = $this->account(7, 'alice');
-		$mailbox = $this->mailbox(23, 7);
-		$this->accountService->method('findById')->with(7)->willReturn($account);
-		$this->mailboxMapper->method('findById')->with(23)->willReturn($mailbox);
-		// Inside the window 1884448001..1900000000, so this chunk is the last.
-		$this->messageMapper->expects(self::once())
-			->method('findOldestSentAt')
-			->with($mailbox)
-			->willReturn(1_890_000_000);
-		$this->mailSearch->expects(self::once())
-			->method('findMessages')
-			->with(
-				$account,
-				$mailbox,
-				IMailSearch::ORDER_NEWEST_FIRST,
-				'subject:needle start:1884448001 end:1900000000',
-				null,
-				20,
-				'alice',
-				IMailSearch::VIEW_THREADED,
-				false,
-				null,
-			)
 			->willReturn([]);
 
-		self::assertFalse($this->service->processChunk(41));
-		self::assertSame(SearchJob::STATUS_COMPLETE, $job->getStatus());
-		self::assertTrue($job->getExhausted());
+		$result = $this->search(cursorAt: 1_900_000_000, cursorId: 888);
+
+		self::assertTrue($result['exhausted']);
+		self::assertNull($result['nextEnd']);
+		self::assertSame(1, $result['windows']);
 	}
 
 	/**
 	 * The other half of the guard: with mail below the window the walk must
-	 * still continue, or flooring would silently truncate a search.
+	 * continue, or flooring would silently truncate a search.
 	 */
-	public function testChunkContinuesWhileOlderMailExists(): void {
-		$job = $this->baseJob();
-		$this->jobMapper->method('findById')->with(41)->willReturn($job);
-		$this->jobMapper->expects(self::exactly(2))->method('storeWorkerState')->willReturn(true);
-		$account = $this->account(7, 'alice');
-		$mailbox = $this->mailbox(23, 7);
-		$this->accountService->method('findById')->with(7)->willReturn($account);
-		$this->mailboxMapper->method('findById')->with(23)->willReturn($mailbox);
-		// Well below the window, so there is more history to walk.
-		$this->messageMapper->method('findOldestSentAt')->willReturn(1_800_000_000);
+	public function testTheWalkContinuesWhileOlderMailExists(): void {
+		// A floor far below the first window: the walk must keep going past it
+		// rather than stop after one. It does run all the way to the floor
+		// here, because a mocked search returns instantly and the time budget
+		// never bites -- what is being guarded is that flooring does not
+		// TRUNCATE, not that it stops early.
+		$this->messageMapper->method('findOldestSentAt')->willReturn(1_000_000_000);
 		$this->mailSearch->method('findMessages')->willReturn([]);
 
-		self::assertTrue($this->service->processChunk(41));
-		self::assertSame(SearchJob::STATUS_QUEUED, $job->getStatus());
-		self::assertFalse($job->getExhausted());
-		self::assertSame(1_884_448_000, $job->getNextEnd());
+		$result = $this->search(cursorAt: 1_900_000_000);
+
+		self::assertGreaterThan(1, $result['windows']);
+		self::assertLessThanOrEqual(1_000_000_000, $result['searchedThrough']);
+		self::assertTrue($result['exhausted']);
 	}
 
-	public function testChunkOnAnEmptyMailboxCompletesImmediately(): void {
-		$job = $this->baseJob();
-		$this->jobMapper->method('findById')->with(41)->willReturn($job);
-		$this->jobMapper->expects(self::exactly(2))->method('storeWorkerState')->willReturn(true);
-		$account = $this->account(7, 'alice');
-		$mailbox = $this->mailbox(23, 7);
-		$this->accountService->method('findById')->with(7)->willReturn($account);
-		$this->mailboxMapper->method('findById')->with(23)->willReturn($mailbox);
+	public function testAnEmptyMailboxIsExhaustedOnTheFirstWindow(): void {
 		$this->messageMapper->method('findOldestSentAt')->willReturn(null);
 		$this->mailSearch->method('findMessages')->willReturn([]);
 
-		self::assertFalse($this->service->processChunk(41));
-		self::assertSame(SearchJob::STATUS_COMPLETE, $job->getStatus());
-		self::assertTrue($job->getExhausted());
+		$result = $this->search(cursorAt: 1_900_000_000);
+
+		self::assertTrue($result['exhausted']);
+		self::assertSame(1, $result['windows']);
 	}
 
 	/**
-	 * A deferral is not progress, so it must not buy the job another hour.
-	 * Renewing here is what made an unrunnable job immortal and unreachable
-	 * by DeepSearchCleanupJob.
+	 * The continuation token resumes where the last response stopped. It is
+	 * the only state in the design, and it lives in the client's hands.
 	 */
-	public function testDeferDoesNotRenewTheExpiry(): void {
-		$job = $this->baseJob();
-		$job->setExpiresAt(2_000_000_050);
-		$this->jobMapper->method('findById')->with(41)->willReturn($job);
-		$this->jobMapper->expects(self::once())->method('storeWorkerState')->willReturn(true);
+	public function testAContinuationResumesFromTheTokenAndDropsTheCursor(): void {
+		$this->messageMapper->method('findOldestSentAt')->willReturn(1_000_000_000);
+		$captured = [];
+		$this->mailSearch->method('findMessages')
+			->willReturnCallback(function (...$args) use (&$captured) {
+				$captured[] = ['filter' => $args[3], 'cursor' => $args[4], 'cursorId' => $args[9]];
+				return [];
+			});
 
-		$this->service->defer(41);
+		$this->service->search(
+			$this->account(), $this->mailbox(), 'alice', 'subject:needle',
+			IMailSearch::ORDER_NEWEST_FIRST, IMailSearch::VIEW_THREADED,
+			1_900_000_000, 888, 20, false, 1_884_448_000, DeepSearchService::MODE_HEADERS,
+		);
 
-		self::assertSame(2_000_000_050, $job->getExpiresAt());
-		self::assertSame(SearchJob::STATUS_QUEUED, $job->getStatus());
-		self::assertSame(2_000_000_000, $job->getUpdatedAt());
+		self::assertStringContainsString('end:1884448000', $captured[0]['filter']);
+		// The cursor already excluded everything above the token; applying it
+		// again to a window entirely below it would exclude rows twice.
+		self::assertNull($captured[0]['cursor']);
+		self::assertNull($captured[0]['cursorId']);
 	}
 
-	private function baseJob(): SearchJob {
-		$job = new SearchJob();
-		$job->setId(41);
-		$job->setUserId('alice');
-		$job->setEffectiveUserId('alice');
-		$job->setAccountId(7);
-		$job->setMailboxId(23);
-		$job->setJobKey(str_repeat('a', 64));
-		$job->setMailboxGeneration(str_repeat('b', 32));
-		$job->setFilter('subject:needle');
-		$job->setSortOrder(IMailSearch::ORDER_NEWEST_FIRST);
-		$job->setView(IMailSearch::VIEW_THREADED);
-		$job->setStatus(SearchJob::STATUS_QUEUED);
-		$job->setCursorAt(null);
-		$job->setCursorId(null);
-		$job->setNextEnd(1_900_000_000);
-		$job->setSearchedThrough(1_900_000_000);
-		$job->setPageLimit(20);
-		$job->setPrioritySplit(false);
-		$job->setResultCount(0);
-		$job->setChunksDone(0);
-		$job->setResultPayload('[]');
-		$job->setCancelRequested(false);
-		$job->setExhausted(false);
-		$job->setErrorCode(null);
-		$job->setCreatedAt(2_000_000_000);
-		$job->setUpdatedAt(2_000_000_000);
-		$job->setExpiresAt(2_000_003_600);
-		return $job;
+	/**
+	 * The headers stream must never reach IMAP -- that is the whole reason it
+	 * can cover the entire history in ~100 ms while the body stream spends
+	 * ~2.7 s on one round trip.
+	 */
+	public function testHeadersModeStripsBodyTermsSoItNeverReachesImap(): void {
+		$this->messageMapper->method('findOldestSentAt')->willReturn(1_890_000_000);
+		$captured = null;
+		$this->mailSearch->method('findMessages')
+			->willReturnCallback(function (...$args) use (&$captured) {
+				$captured = $args[3];
+				return [];
+			});
+
+		$this->service->search(
+			$this->account(), $this->mailbox(), 'alice', 'subject:needle body:secret',
+			IMailSearch::ORDER_NEWEST_FIRST, IMailSearch::VIEW_THREADED,
+			1_900_000_000, null, 20, false, null, DeepSearchService::MODE_HEADERS,
+		);
+
+		self::assertStringNotContainsString('body:', $captured);
+		self::assertStringContainsString('subject:needle', $captured);
 	}
 
-	private function account(int $id, string $userId): Account {
+	/** Body mode keeps the filter as typed, so the two streams overlap by design. */
+	public function testBodyModeKeepsTheFilterAsTyped(): void {
+		$this->messageMapper->method('findOldestSentAt')->willReturn(1_890_000_000);
+		$captured = null;
+		$this->mailSearch->method('findMessages')
+			->willReturnCallback(function (...$args) use (&$captured) {
+				$captured = $args[3];
+				return [];
+			});
+
+		$this->service->search(
+			$this->account(), $this->mailbox(), 'alice', 'subject:needle body:secret',
+			IMailSearch::ORDER_NEWEST_FIRST, IMailSearch::VIEW_THREADED,
+			1_900_000_000, null, 20, false, null, DeepSearchService::MODE_BODY,
+		);
+
+		self::assertStringContainsString('body:secret', $captured);
+		self::assertStringContainsString('subject:needle', $captured);
+	}
+
+	public function testAFullPageStopsTheWalkWithoutExhaustingHistory(): void {
+		$this->messageMapper->method('findOldestSentAt')->willReturn(1_000_000_000);
+		$this->mailSearch->expects(self::once())
+			->method('findMessages')
+			->willReturn([$this->message(991), $this->message(992)]);
+
+		$result = $this->search(cursorAt: 1_900_000_000, limit: 2);
+
+		self::assertCount(2, $result['results']);
+		self::assertFalse($result['exhausted']);
+		self::assertNotNull($result['nextEnd']);
+	}
+
+	public function testResultsAreDeduplicatedAcrossWindows(): void {
+		$this->messageMapper->method('findOldestSentAt')->willReturn(1_820_000_000);
+		$this->mailSearch->method('findMessages')->willReturn([$this->message(991)]);
+
+		$result = $this->search(cursorAt: 1_900_000_000);
+
+		self::assertGreaterThan(1, $result['windows']);
+		self::assertCount(1, $result['results']);
+	}
+
+	public function testStripBodyTermsLeavesAnOtherwiseEmptyFilterEmpty(): void {
+		self::assertSame('', DeepSearchService::stripBodyTerms('body:one body:two'));
+		self::assertSame('subject:x', DeepSearchService::stripBodyTerms('body:one subject:x'));
+		self::assertTrue(DeepSearchService::hasBodyTerms('subject:x body:y'));
+		self::assertFalse(DeepSearchService::hasBodyTerms('subject:body'));
+	}
+
+	/** @return array<string, mixed> */
+	private function search(int $cursorAt, ?int $cursorId = null, int $limit = 20): array {
+		return $this->service->search(
+			$this->account(), $this->mailbox(), 'alice', 'subject:needle',
+			IMailSearch::ORDER_NEWEST_FIRST, IMailSearch::VIEW_THREADED,
+			$cursorAt, $cursorId, $limit, false, null, DeepSearchService::MODE_HEADERS,
+		);
+	}
+
+	private function account(): Account {
 		$account = $this->createMock(Account::class);
-		$account->method('getId')->willReturn($id);
-		$account->method('getUserId')->willReturn($userId);
+		$account->method('getId')->willReturn(7);
+		$account->method('getUserId')->willReturn('alice');
 		return $account;
 	}
 
-	private function mailbox(int $id, int $accountId): Mailbox {
+	private function mailbox(): Mailbox {
 		$mailbox = new Mailbox();
-		$mailbox->setId($id);
-		$mailbox->setAccountId($accountId);
-		$mailbox->setSyncNewToken('new');
-		$mailbox->setSyncChangedToken('changed');
-		$mailbox->setSyncVanishedToken('vanished');
+		$mailbox->setId(23);
+		$mailbox->setAccountId(7);
 		return $mailbox;
+	}
+
+	private function message(int $databaseId): Message {
+		$message = $this->createMock(Message::class);
+		$message->method('jsonSerialize')->willReturn([
+			'databaseId' => $databaseId,
+			'dateInt' => 1_899_000_000,
+		]);
+		return $message;
 	}
 }

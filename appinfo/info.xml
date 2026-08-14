@@ -34,7 +34,7 @@ The rating depends on the installed text processing backend. See [the rating ove
 
 Learn more about the Nextcloud Ethical AI Rating [in our blog](https://nextcloud.com/blog/nextcloud-ethical-ai-rating/).
 	]]></description>
-	<version>5.11.0-dev.0.ktogias.107</version>
+	<version>5.11.0-dev.0.ktogias.108</version>
 	<licence>agpl</licence>
 	<author homepage="https://github.com/ChristophWurst">Christoph Wurst</author>
 	<author homepage="https://github.com/GretaD">GretaD</author>
@@ -61,7 +61,6 @@ Learn more about the Nextcloud Ethical AI Rating [in our blog](https://nextcloud
 		<job>OCA\Mail\BackgroundJob\OutboxWorkerJob</job>
 		<job>OCA\Mail\BackgroundJob\IMipMessageJob</job>
 		<job>OCA\Mail\BackgroundJob\DraftsJob</job>
-		<job>OCA\Mail\BackgroundJob\DeepSearchCleanupJob</job>
 		<job>OCA\Mail\BackgroundJob\TrashRetentionJob</job>
 		<job>OCA\Mail\BackgroundJob\WakeJob</job>
 	</background-jobs>
