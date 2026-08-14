@@ -49,11 +49,27 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 	private int $connectionSlotWaitMilliseconds = 0;
 	private ?string $connectionWorkClass = null;
 
+	/**
+	 * Injectable so the delayed retry can be tested without a real pause.
+	 *
+	 * @var callable(int): void
+	 */
+	private $sleep = 'usleep';
+
 	public function __construct(
 		array $params,
 		private IMAPClientFactory $factory,
 	) {
 		parent::__construct($params);
+	}
+
+	/** @param callable(int): void $sleep */
+	public function setSleepForTesting(callable $sleep): void {
+		$this->sleep = $sleep;
+	}
+
+	public function setWorkClassForTesting(string $workClass): void {
+		$this->connectionWorkClass = $workClass;
 	}
 
 	public function enableRateLimiter(
@@ -202,6 +218,15 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 	// clears the whole streak immediately, instead of making an already
 	// -recovered account wait out a fixed clock that has no way to know
 	// the underlying problem is already gone.
+	/**
+	 * How long to wait before the one delayed retry for interactive work.
+	 *
+	 * Long enough for a provider's short-term refusal to clear, short enough
+	 * that a user waiting on a delete does not notice a stall. Deliberately
+	 * not backoff-shaped: this is one pause, once, not a streak.
+	 */
+	private const THROTTLED_RETRY_MILLISECONDS = 2500;
+
 	private const BACKOFF_BASE_SECONDS = 30;
 	private const BACKOFF_CAP_SECONDS = 30 * 60;
 
@@ -315,9 +340,35 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 				// the same try block); a retry that also fails falls
 				// through to the failure bookkeeping below exactly once,
 				// not twice, since allowAuthRetry is false this time.
-				$result = $this->attemptLoginWithRateLimiting(false);
-				$this->logAuthRetryRecovered();
-				return $result;
+				try {
+					$result = $this->attemptLoginWithRateLimiting(false);
+					$this->logAuthRetryRecovered();
+					return $result;
+				} catch (Horde_Imap_Client_Exception $afterRefresh) {
+					// A refused login with a token that is not expiring is
+					// the provider saying "not now", not "I don't know you".
+					// Measured on 2026-08-14: a delete failed with
+					// tokenTtlBucket 30m+, retryPhase initial AND then
+					// post_refresh, both "Mail server denied authentication",
+					// while several mailbox syncs and a body prefetch were in
+					// flight against the same Google account. The user saw a
+					// 503 on an action they had taken deliberately.
+					//
+					// Refreshing the token again cannot help -- that is what
+					// just failed. Waiting can: this kind of refusal clears in
+					// seconds. So one more attempt, after a pause, and only
+					// for work the user is waiting on. Background work must
+					// not hold a worker to sit out someone else's throttling;
+					// it will come round again by itself.
+					if (!$this->isRetryableAuthFailure($afterRefresh)
+						|| $this->connectionWorkClass !== ImapWorkClass::QUICK_MUTATION) {
+						throw $afterRefresh;
+					}
+					($this->sleep)(self::THROTTLED_RETRY_MILLISECONDS * 1000);
+					$result = $this->attemptLoginWithRateLimiting(false);
+					$this->logAuthRetryRecovered();
+					return $result;
+				}
 			}
 
 			$failures = ((int)$this->rateLimiterCache->get($failureCountKey)) + 1;

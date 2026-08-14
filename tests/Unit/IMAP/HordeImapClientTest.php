@@ -493,6 +493,86 @@ class HordeImapClientTest extends TestCase {
 		self::assertNull($this->cache->get('testhash_blocked_until'));
 	}
 
+	/**
+	 * A refused login carrying a token that is not expiring is the provider
+	 * saying "not now", not "I don't know you".
+	 *
+	 * Measured 2026-08-14: a delete failed with tokenTtlBucket 30m+ and BOTH
+	 * retryPhase initial and post_refresh reporting "Mail server denied
+	 * authentication", while mailbox syncs and a body prefetch were in flight
+	 * against the same Google account. The user got a 503 on something they
+	 * had deliberately asked for.
+	 *
+	 * Refreshing the token again cannot help -- that is exactly what just
+	 * failed. Waiting can, because this kind of refusal clears in seconds.
+	 */
+	public function testAThrottledInteractiveLoginGetsOneMoreAttemptAfterAPause(): void {
+		$account = $this->googleAccount();
+		$googleIntegration = $this->createMock(GoogleIntegration::class);
+		$this->client->enableAuthRetry($account, $googleIntegration, $this->createMock(MicrosoftIntegration::class), $this->createMock(MailAccountMapper::class), $this->createMock(ICrypto::class));
+		$this->client->setWorkClassForTesting(ImapWorkClass::QUICK_MUTATION);
+		$slept = [];
+		$this->client->setSleepForTesting(static function (int $microseconds) use (&$slept): void {
+			$slept[] = $microseconds;
+		});
+
+		// Denied, denied again after the refresh, then accepted.
+		$this->client->imapLoginOverride = function (int $callNumber) {
+			if ($callNumber <= 2) {
+				throw new Horde_Imap_Client_Exception('Mail server denied authentication.', Horde_Imap_Client_Exception::LOGIN_AUTHENTICATIONFAILED);
+			}
+			return 'ok';
+		};
+		$googleIntegration->method('isGoogleOauthAccount')->with($account)->willReturn(true);
+		$refreshed = new MailAccount();
+		$refreshed->setId(13);
+		$refreshed->setEmail('ktogias@gmail.com');
+		$refreshed->setOauthAccessToken('encrypted-new-access-token');
+		$googleIntegration->method('refresh')->willReturn(new Account($refreshed));
+
+		$this->client->attemptLogin();
+
+		self::assertSame(3, $this->client->imapLoginCalls, 'the throttled attempt must be retried once more');
+		self::assertCount(1, $slept, 'exactly one pause, not a backoff streak');
+		self::assertGreaterThan(0, $slept[0]);
+		// A recovery is a plain success: the account must not carry any part
+		// of a backoff window for a refusal it recovered from.
+		self::assertNull($this->cache->get('testhash_failures'));
+	}
+
+	/**
+	 * Background work must not hold a worker sitting out someone else's
+	 * throttling -- it comes round again by itself. Only work a user is
+	 * waiting on earns the pause.
+	 */
+	public function testBackgroundWorkDoesNotWaitOutThrottling(): void {
+		$account = $this->googleAccount();
+		$googleIntegration = $this->createMock(GoogleIntegration::class);
+		$this->client->enableAuthRetry($account, $googleIntegration, $this->createMock(MicrosoftIntegration::class), $this->createMock(MailAccountMapper::class), $this->createMock(ICrypto::class));
+		$this->client->setWorkClassForTesting(ImapWorkClass::MAINTENANCE);
+		$slept = [];
+		$this->client->setSleepForTesting(static function (int $microseconds) use (&$slept): void {
+			$slept[] = $microseconds;
+		});
+		$this->client->succeeds = false;
+		$googleIntegration->method('isGoogleOauthAccount')->with($account)->willReturn(true);
+		$refreshed = new MailAccount();
+		$refreshed->setId(13);
+		$refreshed->setEmail('ktogias@gmail.com');
+		$refreshed->setOauthAccessToken('encrypted-new-access-token');
+		$googleIntegration->method('refresh')->willReturn(new Account($refreshed));
+
+		try {
+			$this->client->attemptLogin();
+			self::fail('expected the rejection to propagate');
+		} catch (Horde_Imap_Client_Exception) {
+			// expected
+		}
+
+		self::assertSame(2, $this->client->imapLoginCalls, 'initial plus the post-refresh retry, and no more');
+		self::assertSame([], $slept);
+	}
+
 	public function testLoginGivesUpAfterASecondAuthRejectionEvenAfterARefreshButOnlyCountsOneFailure(): void {
 		$account = $this->googleAccount();
 		$googleIntegration = $this->createMock(GoogleIntegration::class);
