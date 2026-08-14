@@ -1480,6 +1480,55 @@ describe('Vuex store actions', () => {
 			}))
 		})
 
+		it('cancels the server job when it gives up polling, instead of abandoning it', async () => {
+			// A client that walks away silently leaves the job advancing on
+			// the server. Thirteen were found on 2026-08-14 still walking
+			// nine hours after the tab that started them had given up: the
+			// abandon path only cancelled on abort, never on timeout.
+			vi.useFakeTimers()
+			try {
+				DeepSearchService.startDeepSearch.mockResolvedValueOnce({
+					id: 93,
+					accountId: 13,
+					mailboxId: 21,
+					status: 'queued',
+					results: [],
+					resultCount: 0,
+					chunksCompleted: 0,
+					searchedThrough: 1_900_000_000,
+					exhausted: false,
+				})
+				DeepSearchService.cancelDeepSearch.mockResolvedValue(undefined)
+				DeepSearchService.getDeepSearch.mockResolvedValue({
+					id: 93,
+					accountId: 13,
+					mailboxId: 21,
+					status: 'queued',
+					results: [],
+					resultCount: 0,
+					chunksCompleted: 0,
+					searchedThrough: 1_900_000_000,
+					exhausted: false,
+				})
+
+				const pending = store.fetchDeepSearchPage({
+					mailboxId: 21,
+					query: 'body:needle',
+					cursor: 1_900_000_000,
+				})
+				const settled = pending.catch((error) => error)
+
+				// 600 polls at 1.5s each.
+				await vi.advanceTimersByTimeAsync(600 * 1500 + 1500)
+
+				const error = await settled
+				expect(error.message).toBe('Deep search polling timed out')
+				expect(DeepSearchService.cancelDeepSearch).toHaveBeenCalledWith(93)
+			} finally {
+				vi.useRealTimers()
+			}
+		})
+
 		it('uses the composite list tail for every later deep page', async () => {
 			const tail = { ...mockEnvelope(21, 9), dateInt: 1_800_000_000 }
 			const older = { ...mockEnvelope(21, 8), dateInt: 1_700_000_000 }

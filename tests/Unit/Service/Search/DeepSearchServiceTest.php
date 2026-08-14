@@ -16,6 +16,7 @@ use OCA\Mail\Contracts\IMailSearch;
 use OCA\Mail\Db\Mailbox;
 use OCA\Mail\Db\MailboxMapper;
 use OCA\Mail\Db\Message;
+use OCA\Mail\Db\MessageMapper;
 use OCA\Mail\Db\SearchJob;
 use OCA\Mail\Db\SearchJobMapper;
 use OCA\Mail\Service\AccountService;
@@ -27,6 +28,7 @@ use OCP\BackgroundJob\IJobList;
 class DeepSearchServiceTest extends TestCase {
 	private SearchJobMapper $jobMapper;
 	private MailboxMapper $mailboxMapper;
+	private MessageMapper $messageMapper;
 	private AccountService $accountService;
 	private IMailSearch $mailSearch;
 	private IJobList $jobList;
@@ -37,6 +39,7 @@ class DeepSearchServiceTest extends TestCase {
 		parent::setUp();
 		$this->jobMapper = $this->createMock(SearchJobMapper::class);
 		$this->mailboxMapper = $this->createMock(MailboxMapper::class);
+		$this->messageMapper = $this->createMock(MessageMapper::class);
 		$this->accountService = $this->createMock(AccountService::class);
 		$this->mailSearch = $this->createMock(IMailSearch::class);
 		$this->jobList = $this->createMock(IJobList::class);
@@ -45,6 +48,7 @@ class DeepSearchServiceTest extends TestCase {
 		$this->service = new DeepSearchService(
 			$this->jobMapper,
 			$this->mailboxMapper,
+			$this->messageMapper,
 			$this->accountService,
 			$this->mailSearch,
 			$this->jobList,
@@ -157,6 +161,100 @@ class DeepSearchServiceTest extends TestCase {
 		$this->mailSearch->expects(self::never())->method('findMessages');
 
 		self::assertFalse($this->service->processChunk(41));
+	}
+
+	/**
+	 * The window that contains the oldest message is still searched; the walk
+	 * only refuses to go below it.
+	 */
+	public function testChunkStopsAtTheOldestMessageInsteadOfTheEpoch(): void {
+		$job = $this->baseJob();
+		$this->jobMapper->method('findById')->with(41)->willReturn($job);
+		$this->jobMapper->expects(self::exactly(2))->method('storeWorkerState')->willReturn(true);
+		$account = $this->account(7, 'alice');
+		$mailbox = $this->mailbox(23, 7);
+		$this->accountService->method('findById')->with(7)->willReturn($account);
+		$this->mailboxMapper->method('findById')->with(23)->willReturn($mailbox);
+		// Inside the window 1884448001..1900000000, so this chunk is the last.
+		$this->messageMapper->expects(self::once())
+			->method('findOldestSentAt')
+			->with($mailbox)
+			->willReturn(1_890_000_000);
+		$this->mailSearch->expects(self::once())
+			->method('findMessages')
+			->with(
+				$account,
+				$mailbox,
+				IMailSearch::ORDER_NEWEST_FIRST,
+				'subject:needle start:1884448001 end:1900000000',
+				null,
+				20,
+				'alice',
+				IMailSearch::VIEW_THREADED,
+				false,
+				null,
+			)
+			->willReturn([]);
+
+		self::assertFalse($this->service->processChunk(41));
+		self::assertSame(SearchJob::STATUS_COMPLETE, $job->getStatus());
+		self::assertTrue($job->getExhausted());
+	}
+
+	/**
+	 * The other half of the guard: with mail below the window the walk must
+	 * still continue, or flooring would silently truncate a search.
+	 */
+	public function testChunkContinuesWhileOlderMailExists(): void {
+		$job = $this->baseJob();
+		$this->jobMapper->method('findById')->with(41)->willReturn($job);
+		$this->jobMapper->expects(self::exactly(2))->method('storeWorkerState')->willReturn(true);
+		$account = $this->account(7, 'alice');
+		$mailbox = $this->mailbox(23, 7);
+		$this->accountService->method('findById')->with(7)->willReturn($account);
+		$this->mailboxMapper->method('findById')->with(23)->willReturn($mailbox);
+		// Well below the window, so there is more history to walk.
+		$this->messageMapper->method('findOldestSentAt')->willReturn(1_800_000_000);
+		$this->mailSearch->method('findMessages')->willReturn([]);
+
+		self::assertTrue($this->service->processChunk(41));
+		self::assertSame(SearchJob::STATUS_QUEUED, $job->getStatus());
+		self::assertFalse($job->getExhausted());
+		self::assertSame(1_884_448_000, $job->getNextEnd());
+	}
+
+	public function testChunkOnAnEmptyMailboxCompletesImmediately(): void {
+		$job = $this->baseJob();
+		$this->jobMapper->method('findById')->with(41)->willReturn($job);
+		$this->jobMapper->expects(self::exactly(2))->method('storeWorkerState')->willReturn(true);
+		$account = $this->account(7, 'alice');
+		$mailbox = $this->mailbox(23, 7);
+		$this->accountService->method('findById')->with(7)->willReturn($account);
+		$this->mailboxMapper->method('findById')->with(23)->willReturn($mailbox);
+		$this->messageMapper->method('findOldestSentAt')->willReturn(null);
+		$this->mailSearch->method('findMessages')->willReturn([]);
+
+		self::assertFalse($this->service->processChunk(41));
+		self::assertSame(SearchJob::STATUS_COMPLETE, $job->getStatus());
+		self::assertTrue($job->getExhausted());
+	}
+
+	/**
+	 * A deferral is not progress, so it must not buy the job another hour.
+	 * Renewing here is what made an unrunnable job immortal and unreachable
+	 * by DeepSearchCleanupJob.
+	 */
+	public function testDeferDoesNotRenewTheExpiry(): void {
+		$job = $this->baseJob();
+		$job->setExpiresAt(2_000_000_050);
+		$this->jobMapper->method('findById')->with(41)->willReturn($job);
+		$this->jobMapper->expects(self::once())->method('storeWorkerState')->willReturn(true);
+
+		$this->service->defer(41);
+
+		self::assertSame(2_000_000_050, $job->getExpiresAt());
+		self::assertSame(SearchJob::STATUS_QUEUED, $job->getStatus());
+		self::assertSame(2_000_000_000, $job->getUpdatedAt());
 	}
 
 	private function baseJob(): SearchJob {

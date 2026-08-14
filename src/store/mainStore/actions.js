@@ -2839,9 +2839,22 @@ export default function mainStoreActions() {
 						job = await getDeepSearch(job.id, { signal })
 						publish(job)
 					}
-					throw new Error('Deep search polling timed out')
+					const timedOut = new Error('Deep search polling timed out')
+					timedOut.name = 'DeepSearchTimeoutError'
+					throw timedOut
 				} catch (error) {
-					if (pending.jobId !== undefined && (signal?.aborted || error.name === 'AbortError' || axios.isCancel(error))) {
+					// Whenever this client walks away from a job that has not
+					// reached a terminal state of its own, it has to say so.
+					// Cancelling only on abort left the timeout path -- 600
+					// polls, fifteen minutes -- silently abandoning a job the
+					// server then kept advancing for hours. That is how
+					// thirteen orphans were found on 2026-08-14, still walking
+					// nine hours after the tab that started them gave up.
+					const abandoned = signal?.aborted
+						|| error.name === 'AbortError'
+						|| error.name === 'DeepSearchTimeoutError'
+						|| axios.isCancel(error)
+					if (pending.jobId !== undefined && abandoned) {
 						cancelDeepSearch(pending.jobId).catch(() => {})
 					}
 					throw error

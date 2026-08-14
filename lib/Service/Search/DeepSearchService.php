@@ -15,6 +15,7 @@ use OCA\Mail\BackgroundJob\DeepSearchJob as DeepSearchBackgroundJob;
 use OCA\Mail\Contracts\IMailSearch;
 use OCA\Mail\Db\Mailbox;
 use OCA\Mail\Db\MailboxMapper;
+use OCA\Mail\Db\MessageMapper;
 use OCA\Mail\Db\SearchJob;
 use OCA\Mail\Db\SearchJobMapper;
 use OCA\Mail\Service\AccountService;
@@ -47,6 +48,7 @@ class DeepSearchService {
 	public function __construct(
 		private SearchJobMapper $jobMapper,
 		private MailboxMapper $mailboxMapper,
+		private MessageMapper $messageMapper,
 		private AccountService $accountService,
 		private IMailSearch $mailSearch,
 		private IJobList $jobList,
@@ -213,6 +215,24 @@ class DeepSearchService {
 			return false;
 		}
 
+		// The floor of the walk: no message in this mailbox is older than
+		// this, so every window below it is provably empty.
+		//
+		// Without it the walk stepped towards the Unix epoch one 180-day
+		// window per cron tick. Measured live on 2026-08-14, mailbox 149
+		// (Gmail INBOX, 27,547 messages, oldest 2024-04-21): thirteen jobs
+		// from one afternoon's typing had each done 102-103 chunks and stood
+		// at 1975, with eleven more windows to go. Five of those windows held
+		// mail. The other ~110 could not: 1,430 searches of nothing against
+		// the single most expensive mailbox on this install.
+		//
+		// It is an exact bound, not a heuristic: deep search reads only the
+		// local cache (MailSearch::findMessages -> getIdsLocally), so a row
+		// below the oldest cached `sent_at` cannot exist. An empty mailbox
+		// yields PHP_INT_MAX, which terminates on the first chunk -- there is
+		// nothing further back for the same reason.
+		$floor = $this->messageMapper->findOldestSentAt($mailbox) ?? PHP_INT_MAX;
+
 		$windowEnd = max(1, $job->getNextEnd());
 		$windowStart = max(1, $windowEnd - self::WINDOW_SECONDS + 1);
 		$remaining = $job->getPrioritySplit()
@@ -255,7 +275,10 @@ class DeepSearchService {
 		$job->setErrorCode(null);
 
 		$pageFull = $this->pageIsFull($results, $job->getPageLimit(), $job->getPrioritySplit(), $job->getView());
-		$historyExhausted = $windowStart <= 1;
+		// The window that contains the floor is searched before the walk
+		// stops, so flooring can never skip a message -- it only refuses to
+		// search below the oldest one that exists.
+		$historyExhausted = $windowStart <= max(1, $floor);
 		if ($pageFull || $historyExhausted) {
 			$job->setStatus(SearchJob::STATUS_COMPLETE);
 			$job->setExhausted($historyExhausted && !$pageFull);
@@ -279,7 +302,13 @@ class DeepSearchService {
 		$now = $this->time->getTime();
 		$job->setStatus(SearchJob::STATUS_QUEUED);
 		$job->setUpdatedAt($now);
-		$job->setExpiresAt($now + self::ACTIVE_TTL_SECONDS);
+		// Deliberately NOT renewing expires_at. A deferral is the opposite of
+		// progress: the job was handed back untouched because the server or
+		// the account was busy. Renewing the hour here made a job that could
+		// never run also never expire, so DeepSearchCleanupJob -- which works,
+		// and cleared 52 rows the moment it was run by hand -- could not reach
+		// it. The TTL now measures time since real work, which is what a TTL
+		// on a worker's state is supposed to mean.
 		$this->jobMapper->storeWorkerState($job);
 	}
 

@@ -170,6 +170,39 @@ class MessageMapper extends QBMapper {
 		return $min;
 	}
 
+	/**
+	 * The `sent_at` of the oldest message cached for this mailbox, or null if
+	 * it holds none.
+	 *
+	 * Deep search walks backwards in fixed windows and needs a floor. Without
+	 * one it keeps stepping towards the Unix epoch through years the mailbox
+	 * provably cannot contain: measured on a Gmail INBOX whose oldest message
+	 * is 2024-04-21, a search had walked back to 1975 -- 5 windows over real
+	 * mail followed by 110 over nothing.
+	 *
+	 * Deep search reads only the local cache (MailSearch::findMessages uses
+	 * getIdsLocally), so this is an exact bound rather than an estimate: no
+	 * row it could return exists below this value.
+	 *
+	 * Index-only on `mail_msg_mailbox_sent_id_idx` (mailbox_id, sent_at, id).
+	 */
+	public function findOldestSentAt(Mailbox $mailbox): ?int {
+		$query = $this->db->getQueryBuilder();
+
+		$query->select($query->func()->min('sent_at'))
+			->from($this->getTableName())
+			->where($query->expr()->eq('mailbox_id', $query->createNamedParameter($mailbox->getId(), IQueryBuilder::PARAM_INT), IQueryBuilder::PARAM_INT));
+
+		$result = $query->executeQuery();
+		$min = $result->fetchColumn();
+		$result->closeCursor();
+
+		if ($min === null || $min === false) {
+			return null;
+		}
+		return (int)$min;
+	}
+
 	public function findByUserId(string $userId, int $id): Message {
 		$query = $this->db->getQueryBuilder();
 
