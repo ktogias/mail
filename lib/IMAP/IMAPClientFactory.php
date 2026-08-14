@@ -35,6 +35,16 @@ class IMAPClientFactory {
 	private const DEFAULT_ACCOUNT_CONCURRENCY = 3;
 	private const MAX_ACCOUNT_CONCURRENCY = 10;
 	private const RESERVED_INTERACTIVE_CONNECTIONS = 1;
+	/**
+	 * Idle timeout for work no user is waiting on.
+	 *
+	 * Two seconds is enough for a healthy server to answer and short enough
+	 * that a sequence of stalled steps cannot add up to the 41.9s that was
+	 * measured. A provider this slow is not going to produce a useful body
+	 * search anyway.
+	 */
+	private const DEFAULT_BACKGROUND_TIMEOUT_SECONDS = 2;
+
 	private const DEFAULT_USER_FETCH_WAIT_MILLISECONDS = 8_000;
 	private const MAX_USER_FETCH_WAIT_MILLISECONDS = 15_000;
 
@@ -115,13 +125,36 @@ class IMAPClientFactory {
 			$sslMode = false;
 		}
 
+		// One idle timeout does not suit every caller.
+		//
+		// This value reaches stream_set_timeout(), so it bounds how long ANY
+		// single read may sit with no data -- and Horde's literal-data loop
+		// checks it explicitly too. What it cannot bound is the SUM: a request
+		// that connects, is refused, refreshes its token, logs in again,
+		// SELECTs and SEARCHes spends up to this long at each step, and none of
+		// them misbehaves. Measured 2026-08-15: one deep-search took 41.9s that
+		// way and the client abandoned it at about 40s, so the last stretch was
+		// work whose result nobody could still read.
+		//
+		// Interactive work keeps the full patience: a user waiting on a delete
+		// would rather wait than retry. Background and search work does not
+		// earn it -- for a body search the header results are already on screen
+		// in ~100ms, so giving up early costs the user nothing and giving up
+		// late costs them the whole page.
+		$timeout = self::isInteractiveCaller($allowReservedSlot, $workClass)
+			? (int)$this->config->getSystemValue('app.mail.imap.timeout', 5)
+			: max(1, (int)$this->config->getSystemValue(
+				'app.mail.imap.background-timeout',
+				self::DEFAULT_BACKGROUND_TIMEOUT_SECONDS,
+			));
+
 		$params = [
 			'username' => $user,
 			'password' => $decryptedPassword,
 			'hostspec' => $host,
 			'port' => $port,
 			'secure' => $sslMode,
-			'timeout' => (int)$this->config->getSystemValue('app.mail.imap.timeout', 5),
+			'timeout' => $timeout,
 			'context' => [
 				'ssl' => [
 					'verify_peer' => $this->config->getSystemValueBool('app.mail.verify-tls-peer', true),
@@ -216,6 +249,19 @@ class IMAPClientFactory {
 	 * login clears the stable streak, while repeated failures must accumulate
 	 * across token rotations.
 	 */
+	/**
+	 * Is a user waiting on this client, right now?
+	 *
+	 * Extracted so the decision can be tested on its own: getClient() builds a
+	 * real Horde socket client, which makes the branch around it awkward to
+	 * reach from a unit test and therefore easy to get wrong unnoticed.
+	 */
+	public static function isInteractiveCaller(bool $allowReservedSlot, ?string $workClass): bool {
+		return $allowReservedSlot
+			|| $workClass === ImapWorkClass::QUICK_MUTATION
+			|| ($workClass !== null && ImapWorkClass::isForeground($workClass));
+	}
+
 	private function buildRateLimiterHash(Account $account): string {
 		$mailAccount = $account->getMailAccount();
 		return hash(

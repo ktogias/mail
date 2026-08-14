@@ -13,6 +13,7 @@ use ChristophWurst\Nextcloud\Testing\TestCase;
 use OCA\Mail\Account;
 use OCA\Mail\Db\MailAccount;
 use OCA\Mail\IMAP\IMAPClientFactory;
+use OCA\Mail\IMAP\ImapWorkClass;
 use OCP\IConfig;
 use ReflectionClass;
 
@@ -51,6 +52,35 @@ class IMAPClientFactoryTest extends TestCase {
 		$method = $reflection->getMethod('buildRateLimiterHash');
 
 		return $method->invoke($factory, $account);
+	}
+
+	/**
+	 * The idle timeout reaches stream_set_timeout(), so it bounds any single
+	 * read -- but not the sum. A request that connects, is refused, refreshes
+	 * its token, logs in again, SELECTs and SEARCHes spends up to that long at
+	 * each step: measured 2026-08-15, one deep-search reached 41.9s that way
+	 * and the client abandoned it around 40s.
+	 *
+	 * So the patience is spent where someone is waiting for it. A body search
+	 * is not: its header results are already on screen in ~100ms.
+	 *
+	 * @dataProvider interactiveCallerProvider
+	 */
+	public function testOnlyWorkAUserWaitsOnKeepsTheFullIdleTimeout(bool $allowReservedSlot, ?string $workClass, bool $expected): void {
+		self::assertSame(
+			$expected,
+			IMAPClientFactory::isInteractiveCaller($allowReservedSlot, $workClass),
+		);
+	}
+
+	public function interactiveCallerProvider(): array {
+		return [
+			'a mutation the user triggered' => [false, ImapWorkClass::QUICK_MUTATION, true],
+			'an explicitly reserved slot' => [true, null, true],
+			'active content' => [false, ImapWorkClass::ACTIVE_CONTENT, true],
+			'background maintenance' => [false, ImapWorkClass::MAINTENANCE, false],
+			'unclassified' => [false, null, false],
+		];
 	}
 
 	public function testRateLimiterHashIsStableAcrossCredentialRotation(): void {
