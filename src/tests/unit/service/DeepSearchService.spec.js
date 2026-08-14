@@ -14,19 +14,27 @@ vi.mock('@nextcloud/router')
 describe('service/DeepSearchService', () => {
 	afterEach(() => vi.clearAllMocks())
 
-	it('starts a bounded composite-cursor background page', async () => {
-		generateUrl.mockReturnValue('/search-jobs')
+	// The poll-and-cancel test that used to live here went with the endpoints
+	// it exercised. There is no job to poll and none to cancel: a client that
+	// stops asking ends the search.
+
+	it('sends one bounded stretch with its mode and continuation token', async () => {
+		generateUrl.mockReturnValue('/apps/mail/api/deep-search')
 		const signal = new AbortController().signal
 		axios.post.mockResolvedValue({
 			data: {
-				id: 9,
 				accountId: 4,
-				status: 'queued',
 				results: [{ databaseId: 91, mailboxId: 23 }],
+				searchedThrough: 1_690_000_000,
+				nextEnd: 1_689_999_999,
+				exhausted: false,
+				windows: 2,
+				durationMs: 120,
+				mode: 'headers',
 			},
 		})
 
-		const job = await DeepSearchService.startDeepSearch({
+		const page = await DeepSearchService.deepSearch({
 			mailboxId: 23,
 			filter: 'subject:needle',
 			cursor: 1_700_000_000,
@@ -35,10 +43,12 @@ describe('service/DeepSearchService', () => {
 			view: 'threaded',
 			limit: 20,
 			prioritySplit: true,
+			nextEnd: 1_695_000_000,
+			mode: DeepSearchService.MODE_HEADERS,
 			signal,
 		})
 
-		expect(axios.post).toHaveBeenCalledWith('/search-jobs', {
+		expect(axios.post).toHaveBeenCalledWith('/apps/mail/api/deep-search', {
 			mailboxId: 23,
 			filter: 'subject:needle',
 			cursor: 1_700_000_000,
@@ -47,27 +57,43 @@ describe('service/DeepSearchService', () => {
 			view: 'threaded',
 			limit: 20,
 			prioritySplit: true,
+			nextEnd: 1_695_000_000,
+			mode: 'headers',
 		}, {
 			signal,
 			mailWorkClass: WorkClass.MAINTENANCE,
 		})
-		expect(job.results[0]).toEqual(expect.objectContaining({ accountId: 4, databaseId: 91 }))
+		expect(page.results[0]).toEqual(expect.objectContaining({ accountId: 4, databaseId: 91 }))
+		expect(page.nextEnd).toBe(1_689_999_999)
 	})
 
-	it('polls and cancels an owner-scoped job URL', async () => {
-		generateUrl.mockImplementation((url) => url.replace('{id}', '9'))
-		axios.get.mockResolvedValue({ data: { id: 9, accountId: 4, results: [] } })
-		axios.delete.mockResolvedValue({})
+	it('starts a fresh walk with a null continuation and the headers mode', async () => {
+		generateUrl.mockReturnValue('/apps/mail/api/deep-search')
+		axios.post.mockResolvedValue({ data: { accountId: 4, results: [], nextEnd: null, exhausted: true } })
 
-		await DeepSearchService.getDeepSearch(9)
-		await DeepSearchService.cancelDeepSearch(9)
+		await DeepSearchService.deepSearch({
+			mailboxId: 23,
+			filter: 'subject:needle',
+			cursor: 1_700_000_000,
+		})
 
-		expect(axios.get).toHaveBeenCalledWith('/apps/mail/api/search-jobs/9', {
-			signal: undefined,
-			mailWorkClass: WorkClass.MAINTENANCE,
-		})
-		expect(axios.delete).toHaveBeenCalledWith('/apps/mail/api/search-jobs/9', {
-			mailWorkClass: WorkClass.MAINTENANCE,
-		})
+		expect(axios.post.mock.calls[0][1]).toEqual(expect.objectContaining({
+			nextEnd: null,
+			mode: 'headers',
+			prioritySplit: false,
+		}))
+	})
+
+	/**
+	 * The client decides whether to open a body stream at all, and it must not
+	 * be fooled by a header term that merely contains the word.
+	 */
+	it('recognises body terms without being fooled by lookalikes', () => {
+		expect(DeepSearchService.hasBodyTerms('body:needle')).toBe(true)
+		expect(DeepSearchService.hasBodyTerms('subject:x body:needle')).toBe(true)
+		expect(DeepSearchService.hasBodyTerms('subject:body')).toBe(false)
+		expect(DeepSearchService.hasBodyTerms('subject:somebody:x')).toBe(false)
+		expect(DeepSearchService.hasBodyTerms('')).toBe(false)
+		expect(DeepSearchService.hasBodyTerms(undefined)).toBe(false)
 	})
 })
