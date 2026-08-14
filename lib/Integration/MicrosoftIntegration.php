@@ -195,6 +195,11 @@ class MicrosoftIntegration {
 					'grant_type' => 'refresh_token',
 					'refresh_token' => $refreshToken,
 				],
+				// Same reasoning as GoogleIntegration::refresh(): this sits
+				// inside an IMAP login, no IMAP timeout covers it, and
+				// IClient::DEFAULT_REQUEST_TIMEOUT is 30 seconds.
+				'timeout' => $this->config->getSystemValueInt('app.mail.oauth.refresh-timeout', 5),
+				'connect_timeout' => 3,
 			]);
 		} catch (Exception $e) {
 			$this->logger->warning('Could not refresh Microsoft OAuth token for account {accountId}: ' . $e->getMessage(), [

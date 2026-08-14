@@ -109,6 +109,52 @@ class GoogleIntegrationTest extends TestCase {
 		self::assertSame(1000 + 3600, $result->getMailAccount()->getOauthTokenTtl());
 	}
 
+	/**
+	 * This request runs INSIDE an IMAP login: HordeImapClient forces a refresh
+	 * when a login is denied, then retries. No IMAP timeout covers it -- it is
+	 * an outbound HTTPS call, and IClient::DEFAULT_REQUEST_TIMEOUT is 30
+	 * seconds.
+	 *
+	 * Measured 2026-08-15: a deep-search reached 41.9s as a stack of
+	 * individually-bounded steps, and this was the only one that could
+	 * contribute thirty of them by itself.
+	 */
+	public function testTheTokenRefreshCannotOutlastTheLoginItIsRescuing(): void {
+		$this->timeFactory->method('getTime')->willReturn(1000);
+		$this->crypto->method('decrypt')->willReturnArgument(0);
+		$this->crypto->method('encrypt')->willReturnArgument(0);
+		$this->config->method('getAppValue')->willReturnMap([
+			['mail', 'google_oauth_client_id', '', 'client-id'],
+			['mail', 'google_oauth_client_secret', '', 'encrypted-client-secret'],
+		]);
+		$this->config->method('getSystemValueInt')->willReturnCallback(
+			static fn (string $key, int $default = 0): int => $default,
+		);
+		$this->lockCache->method('add')->willReturn(true);
+
+		$response = $this->createMock(IResponse::class);
+		$response->method('getBody')->willReturn(json_encode([
+			'access_token' => 'new-access-token',
+			'refresh_token' => 'new-refresh-token',
+			'expires_in' => 3600,
+		]));
+		$options = null;
+		$httpClient = $this->createMock(\OCP\Http\Client\IClient::class);
+		$httpClient->method('post')->willReturnCallback(
+			function (string $url, array $opts) use (&$options, $response) {
+				$options = $opts;
+				return $response;
+			},
+		);
+		$this->clientService->method('newClient')->willReturn($httpClient);
+
+		$this->integration->refresh($this->accountAboutToExpire());
+
+		self::assertArrayHasKey('timeout', $options, 'an unbounded refresh can add 30s to an IMAP login');
+		self::assertLessThanOrEqual(10, $options['timeout']);
+		self::assertArrayHasKey('connect_timeout', $options);
+	}
+
 	public function testSkipsTheRefreshWhenAnotherRequestAlreadyHoldsTheLock(): void {
 		$this->timeFactory->method('getTime')->willReturn(1000);
 		$this->lockCache->expects(self::once())

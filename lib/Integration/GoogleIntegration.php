@@ -213,7 +213,23 @@ class GoogleIntegration {
 					'client_secret' => $clientSecret,
 					'grant_type' => 'refresh_token',
 					'refresh_token' => $refreshToken,
-				], JSON_THROW_ON_ERROR)
+				], JSON_THROW_ON_ERROR),
+				// This request sits INSIDE an IMAP login: HordeImapClient
+				// forces a refresh when a login is denied, then retries. None
+				// of the IMAP timeouts cover it -- it is an outbound HTTPS
+				// call, and IClient::DEFAULT_REQUEST_TIMEOUT is 30 seconds.
+				//
+				// Measured 2026-08-15: a deep-search took 41.9s as a stack of
+				// individually-bounded steps, and this was the only one that
+				// could contribute thirty of them on its own.
+				//
+				// A token refresh is a small request to a provider's own
+				// endpoint. If it cannot answer in five seconds it is not
+				// going to, and the IMAP login it was meant to rescue has
+				// already failed -- so waiting longer only makes the failure
+				// slower.
+				'timeout' => $this->config->getSystemValueInt('app.mail.oauth.refresh-timeout', 5),
+				'connect_timeout' => 3,
 			]);
 		} catch (Exception $e) {
 			$this->logger->warning('Could not refresh Google OAuth token for account {accountId}: ' . $e->getMessage(), [
