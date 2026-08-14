@@ -180,9 +180,11 @@ class MessageMapper extends QBMapper {
 	 * is 2024-04-21, a search had walked back to 1975 -- 5 windows over real
 	 * mail followed by 110 over nothing.
 	 *
-	 * Deep search reads only the local cache (MailSearch::findMessages uses
-	 * getIdsLocally), so this is an exact bound rather than an estimate: no
-	 * row it could return exists below this value.
+	 * Deep search always RETURNS local rows, so this is an exact bound rather
+	 * than an estimate: no row it could return exists below this value. Note a
+	 * `body:` filter does reach IMAP -- getIdsLocally() calls the search
+	 * provider -- but only for candidate UIDs; the rows themselves come from
+	 * findIdsByQuery() against this table, which is what makes the bound hold.
 	 *
 	 * Index-only on `mail_msg_mailbox_sent_id_idx` (mailbox_id, sent_at, id).
 	 */
