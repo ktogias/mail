@@ -1593,7 +1593,7 @@ class MessageMapper extends QBMapper {
 		// Deliberately its own AND rather than a member of $textOrs below:
 		// those are alternatives to each other, and these are requirements.
 		foreach ($query->getTexts() as $text) {
-			$select->andWhere($qb->expr()->orX(
+			$alternatives = [
 				$qb->expr()->iLike(
 					'm.subject',
 					$qb->createNamedParameter('%' . $this->db->escapeLikeParameter($text) . '%', IQueryBuilder::PARAM_STR),
@@ -1601,7 +1601,25 @@ class MessageMapper extends QBMapper {
 				),
 				$this->recipientTermsMatchExists($qb, Recipient::TYPE_FROM, [$text]),
 				$this->recipientTermsMatchExists($qb, Recipient::TYPE_TO, [$text]),
-			));
+			];
+			// The body is one of the places a word may appear, so the UID set
+			// belongs INSIDE this word's alternatives -- not as a separate
+			// requirement of its own.
+			//
+			// Left outside, it turned the search into "in the headers AND in
+			// the body". Measured on the one account with body search enabled:
+			// `text:invoice` 8 results, `body:invoice` 64, and the two
+			// together 4 -- exactly their intersection, where the union of 68
+			// was wanted. That is what .120 shipped, and this is the fix.
+			//
+			// The set still means "every body word present", so for a
+			// multi-word search this admits a message on all-words-in-body
+			// rather than per word. That is a superset of the truth, never a
+			// subset, and step two replaces it with one set per word.
+			if ($uids !== null && !$uidsRestrict) {
+				$alternatives[] = $qb->expr()->in('m.uid', $qb->createParameter('uids'));
+			}
+			$select->andWhere($qb->expr()->orX(...$alternatives));
 		}
 
 		$textOrs = [];
@@ -1644,7 +1662,9 @@ class MessageMapper extends QBMapper {
 			// thus the orWhere in every other case andWhere should do the job.
 			// Restriction UIDs (the sync-diff path) always AND -- see the
 			// $uidsRestrict doc block above.
-			if (!$uidsRestrict && !empty($query->getSubjects())) {
+			if (!$uidsRestrict && !empty($query->getTexts())) {
+				// Already folded into each word's alternatives above.
+			} elseif (!$uidsRestrict && !empty($query->getSubjects())) {
 				$textOrs[] = $qb->expr()->in('m.uid', $qb->createParameter('uids'));
 			} else {
 				$select->andWhere(
