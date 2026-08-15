@@ -75,6 +75,9 @@ class SearchQuery {
 	/** @var bool */
 	private $mentionsMe = false;
 
+	/** @var string[] */
+	private array $texts = [];
+
 	private string $match = 'allof';
 
 	/**
@@ -206,6 +209,25 @@ class SearchQuery {
 	public function addSubject(string $subject): void {
 		$this->subjects[] = $subject;
 	}
+	/**
+	 * Free-text words, each of which must appear SOMEWHERE.
+	 *
+	 * Distinct from subjects/bodies, which name a field. A word here matches
+	 * if it is in the subject or a sender or a recipient (and, once the body
+	 * half lands, the body) -- and every word must match somewhere, though not
+	 * necessarily the same somewhere. "sunrise wp4 deadline" should find a
+	 * message with `sunrise` in its subject and `wp4 deadline` in its body.
+	 *
+	 * @return string[]
+	 */
+	public function getTexts(): array {
+		return $this->texts;
+	}
+
+	public function addText(string $text): void {
+		$this->texts[] = $text;
+	}
+
 	public function getBodies(): array {
 		return $this->bodies;
 	}

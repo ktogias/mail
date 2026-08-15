@@ -101,6 +101,9 @@ class FilterStringParser {
 			case 'subject':
 				$query->addSubject($param);
 				return true;
+			case 'text':
+				$query->addText($param);
+				return true;
 			case 'body':
 				$query->addBody($param);
 				return true;

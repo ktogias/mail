@@ -368,6 +368,7 @@ export default {
 			searchInTo: [],
 			searchInCc: [],
 			searchInBcc: [],
+			freeText: null,
 			searchInSubject: null,
 			searchInMessageBody: null,
 			searchFlags: [],
@@ -447,6 +448,7 @@ export default {
 				from: this.searchInFrom.length > 0 ? this.searchInFrom.map((address) => address.email) : null,
 				cc: this.searchInCc.length > 0 ? this.searchInCc.map((address) => address.email) : null,
 				bcc: this.searchInBcc.length > 0 ? this.searchInBcc.map((address) => address.email) : null,
+				text: this.freeText !== null && this.freeText.length > 1 ? this.freeText : '',
 				subject: this.searchInSubject !== null && this.searchInSubject.length > 1 ? this.searchInSubject : '',
 				body: this.searchInMessageBody !== null && this.searchInMessageBody.length > 1 ? this.searchInMessageBody : '',
 				tags: this.selectedTags.length > 0 ? this.selectedTags.map((item) => item.id) : '',
@@ -464,7 +466,7 @@ export default {
 					val?.forEach((address) => {
 						_search += `${key}:${encodeURI(address)} `
 					})
-				} else if (key === 'body') {
+				} else if (key === 'text' || key === 'body') {
 					val.split(' ').forEach((word) => {
 						if (word !== '' && val !== null) {
 							_search += `${key}:${encodeURI(word)} `
@@ -522,11 +524,20 @@ export default {
 				return
 			}
 
+			// One `text:` token per word, rather than the whole phrase into
+			// subject AND from AND to. Those fields take the phrase literally,
+			// so "sunrise wp4 deadline" asked for those three words
+			// contiguously in a subject, or as an email address -- and
+			// returned nothing, which is what a real search did on 2026-08-15.
+			//
+			// `text:` names no field: the server requires each word to appear
+			// somewhere, not every word in the same somewhere.
 			this.match = 'anyof'
+			this.freeText = this.query
 			this.searchInMessageBody = this.searchBody ? this.query : null
-			this.searchInSubject = this.query
-			this.searchInFrom = [{ email: this.query, label: this.query }]
-			this.searchInTo = [{ email: this.query, label: this.query }]
+			this.searchInSubject = null
+			this.searchInFrom = []
+			this.searchInTo = []
 			this.debouncedSearchQuery()
 		},
 
@@ -638,6 +649,7 @@ export default {
 			this.searchInTo = []
 			this.searchInCc = []
 			this.searchInBcc = []
+			this.freeText = null
 			this.searchInSubject = null
 			this.searchInMessageBody = null
 			this.searchFlags = []

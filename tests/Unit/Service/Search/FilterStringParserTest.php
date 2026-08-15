@@ -96,4 +96,26 @@ class FilterStringParserTest extends TestCase {
 		self::assertEquals(Flag::FLAGGED, $query->getThreadExcludedFlags()[0]->getFlag());
 		self::assertEmpty($query->getFlags());
 	}
+
+	/**
+	 * "sunrise wp4 deadline" used to arrive as ONE subject term, so it asked
+	 * for those three words contiguously in a subject -- and a real search on
+	 * 2026-08-15 returned nothing. Each word is now its own field-agnostic
+	 * requirement.
+	 */
+	public function testFreeTextWordsAreSeparateRequirements(): void {
+		$query = $this->parser->parse('text:sunrise text:wp4 text:deadline');
+
+		self::assertSame(['sunrise', 'wp4', 'deadline'], $query->getTexts());
+		// They name no field, so they must not be mistaken for subject terms.
+		self::assertSame([], $query->getSubjects());
+	}
+
+	public function testAnExplicitSubjectTermIsStillASubjectTerm(): void {
+		$query = $this->parser->parse('subject:invoice text:acme');
+
+		self::assertSame(['invoice'], $query->getSubjects());
+		self::assertSame(['acme'], $query->getTexts());
+	}
+
 }

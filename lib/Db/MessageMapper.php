@@ -1581,6 +1581,29 @@ class MessageMapper extends QBMapper {
 			);
 		}
 
+		// Free-text words: every word must appear SOMEWHERE, but not
+		// necessarily in the same place.
+		//
+		// "sunrise wp4 deadline" used to be sent as ONE subject term, so it
+		// matched only a subject containing those three words contiguously --
+		// which is why a real search returned nothing. The words are now
+		// separate, each satisfiable by the subject or a sender or a
+		// recipient, and ANDed with each other.
+		//
+		// Deliberately its own AND rather than a member of $textOrs below:
+		// those are alternatives to each other, and these are requirements.
+		foreach ($query->getTexts() as $text) {
+			$select->andWhere($qb->expr()->orX(
+				$qb->expr()->iLike(
+					'm.subject',
+					$qb->createNamedParameter('%' . $this->db->escapeLikeParameter($text) . '%', IQueryBuilder::PARAM_STR),
+					IQueryBuilder::PARAM_STR,
+				),
+				$this->recipientTermsMatchExists($qb, Recipient::TYPE_FROM, [$text]),
+				$this->recipientTermsMatchExists($qb, Recipient::TYPE_TO, [$text]),
+			));
+		}
+
 		$textOrs = [];
 
 		if (!empty($query->getFrom())) {
