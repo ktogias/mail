@@ -1559,7 +1559,13 @@ class MessageMapper extends QBMapper {
 	/** Page size assumed when a priority-split caller passes no limit. */
 	private const PRIORITY_SPLIT_DEFAULT_LIMIT = 20;
 
-	public function findIdsByQuery(Mailbox $mailbox, SearchQuery $query, string $sortOrder, ?int $limit, ?array $uids = null, bool $uidsRestrict = false, bool $prioritySplit = false): array {
+	/**
+	 * @param array<string, int[]>|null $uidsByText one UID set PER free-text
+	 *        word, so a word may be satisfied by the body independently of the
+	 *        others. $uids is a single set meaning "every body term present"
+	 *        and cannot express that.
+	 */
+	public function findIdsByQuery(Mailbox $mailbox, SearchQuery $query, string $sortOrder, ?int $limit, ?array $uids = null, bool $uidsRestrict = false, bool $prioritySplit = false, ?array $uidsByText = null): array {
 		$qb = $this->db->getQueryBuilder();
 
 		// No DISTINCT needed: recipient matches are EXISTS probes (see
@@ -1616,7 +1622,19 @@ class MessageMapper extends QBMapper {
 			// multi-word search this admits a message on all-words-in-body
 			// rather than per word. That is a superset of the truth, never a
 			// subset, and step two replaces it with one set per word.
-			if ($uids !== null && !$uidsRestrict) {
+			if ($uidsByText !== null) {
+				// This word's own body matches. Bounded by the candidate
+				// ceiling above, so a plain IN list is fine; the 1,000-row
+				// chunking $uids goes through exists for the sync-diff path,
+				// whose sets have no such bound.
+				if (!empty($uidsByText[$text])) {
+					$alternatives[] = $qb->expr()->in(
+						'm.uid',
+						$qb->createNamedParameter($uidsByText[$text], IQueryBuilder::PARAM_INT_ARRAY),
+						IQueryBuilder::PARAM_INT_ARRAY,
+					);
+				}
+			} elseif ($uids !== null && !$uidsRestrict) {
 				$alternatives[] = $qb->expr()->in('m.uid', $qb->createParameter('uids'));
 			}
 			$select->andWhere($qb->expr()->orX(...$alternatives));

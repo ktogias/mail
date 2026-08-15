@@ -11,6 +11,7 @@ namespace OCA\Mail\IMAP\Search;
 
 use Horde_Imap_Client_Data_Format_Exception;
 use Horde_Imap_Client_Exception;
+use Horde_Imap_Client_Ids;
 use Horde_Imap_Client_Search_Query;
 use OCA\Mail\Account;
 use OCA\Mail\Db\Mailbox;
@@ -20,6 +21,7 @@ use OCA\Mail\Service\Search\SearchQuery;
 use OCP\ICache;
 use OCP\ICacheFactory;
 use function array_reduce;
+use function array_unique;
 use function json_decode;
 use function json_encode;
 use function md5;
@@ -98,6 +100,109 @@ class Provider {
 		}
 
 		$ids = $fetchResult['match']->ids;
+		$this->cache->set($cacheKey, json_encode($ids), self::CACHE_TTL_SECONDS);
+		return $ids;
+	}
+
+	/**
+	 * Every message carrying AT LEAST ONE of the words, in one round trip.
+	 *
+	 * The first half of covering "one word in the headers, another in the
+	 * body". This narrows the mailbox to candidates; it deliberately cannot
+	 * say WHICH word matched which message, which is what
+	 * findMatchesWithinCandidates() then supplies per word.
+	 *
+	 * @param string[] $terms
+	 * @return int[]
+	 * @throws ServiceException
+	 */
+	public function findAnyMatch(Account $account, Mailbox $mailbox, array $terms): array {
+		$terms = array_values(array_unique($terms));
+		if ($terms === []) {
+			return [];
+		}
+		$cacheKey = 'imap-body-any-' . md5(implode("\x00", [
+			(string)$account->getId(),
+			(string)$mailbox->getId(),
+			$mailbox->getCacheBuster(),
+			...$terms,
+		]));
+		$cached = $this->cache->get($cacheKey);
+		if ($cached !== null) {
+			return json_decode($cached, true);
+		}
+
+		$query = new Horde_Imap_Client_Search_Query();
+		$query->charset('UTF-8', false);
+		$alternatives = [];
+		foreach ($terms as $term) {
+			$one = new Horde_Imap_Client_Search_Query();
+			$one->text($term, true);
+			$alternatives[] = $one;
+		}
+		$query->orSearch($alternatives);
+
+		$client = $this->clientFactory->getClient($account);
+		try {
+			$result = $client->search($mailbox->getName(), $query);
+		} catch (Horde_Imap_Client_Exception|Horde_Imap_Client_Data_Format_Exception $e) {
+			throw new ServiceException('Could not get candidate message IDs: ' . $e->getMessage(), 0, $e);
+		} finally {
+			$client->logout();
+		}
+		$ids = $result['match']->ids;
+		$this->cache->set($cacheKey, json_encode($ids), self::CACHE_TTL_SECONDS);
+		return $ids;
+	}
+
+	/**
+	 * Which of these candidates have this one word in their body.
+	 *
+	 * Restricting a SEARCH to a UID set is the cheap axis. Measured on a
+	 * 6,020-message mailbox: a full-mailbox TEXT search cost 6,507 ms, the
+	 * same search over 200 candidates 163 ms, over 2,234 candidates 2,798 ms
+	 * -- roughly 1.25 ms per candidate rather than a fixed round trip.
+	 *
+	 * That is the opposite of the DATE range, which changes nothing (see
+	 * convertMailQueryToHordeQuery). Assuming one generalised to the other is
+	 * how this approach was dismissed once before.
+	 *
+	 * @param int[] $candidates
+	 * @return int[]
+	 * @throws ServiceException
+	 */
+	public function findMatchesWithinCandidates(Account $account, Mailbox $mailbox, string $term, array $candidates): array {
+		if ($candidates === []) {
+			return [];
+		}
+		sort($candidates);
+		// The candidate set is part of the question, so it is part of the key.
+		$cacheKey = 'imap-body-within-' . md5(implode("\x00", [
+			(string)$account->getId(),
+			(string)$mailbox->getId(),
+			$mailbox->getCacheBuster(),
+			$term,
+			md5(implode(',', $candidates)),
+		]));
+		$cached = $this->cache->get($cacheKey);
+		if ($cached !== null) {
+			return json_decode($cached, true);
+		}
+
+		$query = new Horde_Imap_Client_Search_Query();
+		$query->charset('UTF-8', false);
+		$query->text($term, true);
+		$query->ids(new Horde_Imap_Client_Ids($candidates));
+
+		$client = $this->clientFactory->getClient($account);
+		try {
+			$result = $client->search($mailbox->getName(), $query);
+		} catch (Horde_Imap_Client_Exception|Horde_Imap_Client_Data_Format_Exception $e) {
+			throw new ServiceException('Could not narrow candidates: ' . $e->getMessage(), 0, $e);
+		} finally {
+			$client->logout();
+		}
+		$ids = $result['match']->ids;
 		$this->cache->set($cacheKey, json_encode($ids), self::CACHE_TTL_SECONDS);
 		return $ids;
 	}

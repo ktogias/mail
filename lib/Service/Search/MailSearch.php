@@ -27,6 +27,22 @@ use function count;
 use function hrtime;
 
 class MailSearch implements IMailSearch {
+	/**
+	 * Past this many candidates the OR search has not narrowed enough for the
+	 * per-word restricted searches to be worth their round trips.
+	 *
+	 * Generous on purpose. Falling back is the expensive outcome, not the
+	 * cheap one: the OR round trip has already been paid and is then thrown
+	 * away, so the combined search runs on top of it. Measured at a ceiling of
+	 * 2,000 with 2,234 candidates -- 22.5 s, against 3.5 s for doing none of
+	 * this. At 5,000 the same search took 6.5 s cold and 2.0 s warm.
+	 *
+	 * So the ceiling exists only to stop a pathological mailbox, not to tune
+	 * the common case. Gmail's own variance -- the same search measured at
+	 * 6.5 s and at 47 s minutes apart -- makes finer tuning meaningless.
+	 */
+	private const CANDIDATE_CEILING = 5000;
+
 	/** @var ITimeFactory */
 	private $timeFactory;
 
@@ -188,6 +204,36 @@ class MailSearch implements IMailSearch {
 	private function getIdsLocally(Account $account, Mailbox $mailbox, SearchQuery $query, string $sortOrder, ?int $limit, bool $prioritySplit): array {
 		if (empty($query->getBodies())) {
 			return $this->messageMapper->findIdsByQuery($mailbox, $query, $sortOrder, $limit, null, false, $prioritySplit);
+		}
+
+		// A free-text search wants the body per WORD, so that a message with
+		// `review` in its subject and `report` in its body matches
+		// "review report". One combined SEARCH cannot express that: it means
+		// "every word is in the body".
+		//
+		// Asking per word costs one full round trip each. Instead: one OR
+		// search for the candidates, then one UID-RESTRICTED search per word
+		// over them. Restricting by UID is the cheap axis -- measured at
+		// ~1.25 ms per candidate against 6,507 ms for a full-mailbox search,
+		// where restricting by DATE changes nothing at all.
+		//
+		// The candidate count is only known after the OR, so the decision is
+		// made here rather than guessed: past the threshold the narrowing has
+		// not paid for itself and the combined set is used as before.
+		$texts = $query->getTexts();
+		if ($texts !== []) {
+			$candidates = $this->imapSearchProvider->findAnyMatch($account, $mailbox, $texts);
+			if ($candidates !== [] && count($candidates) <= self::CANDIDATE_CEILING) {
+				$uidsByText = [];
+				foreach ($texts as $text) {
+					$uidsByText[$text] = $this->imapSearchProvider->findMatchesWithinCandidates(
+						$account, $mailbox, $text, $candidates,
+					);
+				}
+				return $this->messageMapper->findIdsByQuery(
+					$mailbox, $query, $sortOrder, $limit, null, false, $prioritySplit, $uidsByText,
+				);
+			}
 		}
 
 		$fromImap = $this->imapSearchProvider->findMatches(
