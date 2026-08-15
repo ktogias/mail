@@ -4,7 +4,21 @@
  */
 
 /** How far (px) the list must be pulled down before releasing triggers a refresh. */
-export const PULL_REFRESH_THRESHOLD_PX = 70
+/**
+ * Finger travel needed to arm a refresh.
+ *
+ * Raised from 70 on 2026-08-15: syncs were firing by accident during ordinary
+ * scrolling. 70 px is a flick, well under the 100-150 px that iOS and Android
+ * pull-to-refresh conventionally ask for.
+ *
+ * It reads worse than it is, too. The trigger compares RAW finger travel while
+ * the indicator moves at RESISTANCE (0.5), so at the moment the gesture is
+ * fully armed the indicator has moved half the distance and sits at half
+ * opacity -- it looks half-armed when it is not. Comparing the scaled distance
+ * instead was tried and reverted (see onEnd), because it doubled the gesture
+ * without saying so; raising the number does the same thing honestly.
+ */
+export const PULL_REFRESH_THRESHOLD_PX = 110
 /** Visual drag distance caps out here regardless of how far the finger travels. */
 const MAX_PULL_PX = 120
 /** Rubber-band feel: the indicator moves slower than the finger. */

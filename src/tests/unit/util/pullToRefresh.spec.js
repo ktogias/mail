@@ -101,4 +101,18 @@ describe('enablePullToRefresh', () => {
 
 		expect(onRefresh).not.toHaveBeenCalled()
 	})
+
+	/**
+	 * The other cases use the constant, so they pass at any value and cannot
+	 * see a sensitivity regression. This pins the decision itself: 70 px was
+	 * a flick, and syncs fired by accident during ordinary scrolling.
+	 *
+	 * The trigger compares raw finger travel while the indicator moves at
+	 * RESISTANCE, so the gesture is fully armed while the indicator still
+	 * looks half-armed -- which is why the number has to be generous.
+	 */
+	it('asks for a deliberate gesture, not a flick', () => {
+		expect(PULL_REFRESH_THRESHOLD_PX).toBeGreaterThanOrEqual(100)
+	})
+
 })
