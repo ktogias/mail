@@ -365,7 +365,29 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 						throw $afterRefresh;
 					}
 					($this->sleep)(self::THROTTLED_RETRY_MILLISECONDS * 1000);
-					$result = $this->attemptLoginWithRateLimiting(false);
+					// Deliberately NOT through attemptLoginWithRateLimiting():
+					// that method records a failure of its own, and this is a
+					// second chance at the SAME refusal, not a new one.
+					//
+					// .115 did route it back through there and so counted one
+					// refusal twice. The streak is the input to an exponential
+					// backoff (30s base, 30min cap), so double-counting drove
+					// the breaker up roughly twice as fast -- and once it
+					// trips, EVERYTHING for that account fails instantly:
+					// bodies, syncs, flag writes. Measured the next morning as
+					// 76 "Too many auth attempts" against 17 real refusals,
+					// with the account 503ing on work that had nothing to do
+					// with the mutation that started it.
+					//
+					// The comment on the branch above already stated the
+					// invariant -- "exactly once, not twice" -- and .115 broke
+					// it while quoting it.
+					$result = $this->imapLoginWithConnectionSlot();
+					// A recovery is a plain success: clear the streak the
+					// first attempt just started, exactly as the happy path
+					// above does.
+					$this->rateLimiterCache->remove($failureCountKey);
+					$this->rateLimiterCache->remove($blockedUntilKey);
 					$this->logAuthRetryRecovered();
 					return $result;
 				}

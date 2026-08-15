@@ -545,6 +545,42 @@ class HordeImapClientTest extends TestCase {
 	 * throttling -- it comes round again by itself. Only work a user is
 	 * waiting on earns the pause.
 	 */
+	/**
+	 * The streak feeds an exponential backoff, and once it trips EVERYTHING
+	 * for that account fails instantly -- bodies, syncs, flag writes, not just
+	 * the mutation that started it.
+	 *
+	 * .115 routed its delayed retry back through attemptLoginWithRateLimiting(),
+	 * which records a failure of its own, so one refusal counted twice and the
+	 * breaker rose about twice as fast. Measured the next morning as 76 "Too
+	 * many auth attempts" against 17 real refusals.
+	 */
+	public function testARefusalThatIsRetriedStillCountsAsOneFailure(): void {
+		$account = $this->googleAccount();
+		$googleIntegration = $this->createMock(GoogleIntegration::class);
+		$this->client->enableAuthRetry($account, $googleIntegration, $this->createMock(MicrosoftIntegration::class), $this->createMock(MailAccountMapper::class), $this->createMock(ICrypto::class));
+		$this->client->setWorkClassForTesting(ImapWorkClass::QUICK_MUTATION);
+		$this->client->setSleepForTesting(static function (int $microseconds): void {
+		});
+		$this->client->succeeds = false;
+		$googleIntegration->method('isGoogleOauthAccount')->with($account)->willReturn(true);
+		$refreshed = new MailAccount();
+		$refreshed->setId(13);
+		$refreshed->setEmail('ktogias@gmail.com');
+		$refreshed->setOauthAccessToken('encrypted-new-access-token');
+		$googleIntegration->method('refresh')->willReturn(new Account($refreshed));
+
+		try {
+			$this->client->attemptLogin();
+			self::fail('expected the rejection to propagate');
+		} catch (Horde_Imap_Client_Exception) {
+			// expected
+		}
+
+		self::assertSame(3, $this->client->imapLoginCalls, 'initial, post-refresh, and the delayed retry');
+		self::assertSame(1, (int)$this->cache->get('testhash_failures'), 'one refusal is one failure, however many times it was retried');
+	}
+
 	public function testBackgroundWorkDoesNotWaitOutThrottling(): void {
 		$account = $this->googleAccount();
 		$googleIntegration = $this->createMock(GoogleIntegration::class);
