@@ -1521,6 +1521,73 @@ export function resetPendingDeleteRefillsForTests() {
 	pendingDeleteRefills = new Map()
 }
 
+// A fanned-out source that just answered "nothing below this tail" will answer
+// the same for as long as its tail has not moved. Remembering that briefly
+// collapses a burst of deletes -- each one re-probing EVERY exhausted source --
+// into a single probe. Measured live on 2026-08-24: 139 identical
+// `mailboxId=10&filter=is:starred&limit=1` requests in three hours, every one
+// of them a 22-byte empty array, 38.7s of server time on a NAS where each one
+// holds an FPM worker for ~250ms.
+//
+// Deliberately NOT permanent, and keyed on the tail rather than the mailbox: a
+// backfill can insert mail BELOW a tail the client already holds, and this file
+// has twice shipped a bug that retired a source for good and skipped months of
+// mail. The tail check catches the ordinary case (any older message that
+// reaches the list BECOMES the new tail, so the memory no longer applies), and
+// the TTL bounds the one case it cannot see -- older mail that exists on the
+// server but never entered this list.
+const EXHAUSTED_CONSTITUENT_TTL_MS = 60000
+let exhaustedConstituentProbes = new Map()
+
+export function resetExhaustedConstituentProbesForTests() {
+	exhaustedConstituentProbes = new Map()
+}
+
+/**
+ * Cache key for "this source had nothing below this exact tail".
+ *
+ * @param {number} mailboxId the constituent mailbox
+ * @param {object} query the envelope list query
+ * @param {object} tail the constituent's furthest envelope, or undefined
+ * @return {string} the key
+ */
+function exhaustedProbeKey(mailboxId, query, tail) {
+	return `${mailboxId}::${normalizedEnvelopeListId(query)}::${tail?.dateInt ?? 'none'}::${tail?.databaseId ?? 'none'}`
+}
+
+/**
+ * Has this source already said there is nothing below exactly this tail?
+ *
+ * @param {number} mailboxId the constituent mailbox
+ * @param {object} query the envelope list query
+ * @param {object} tail the constituent's furthest envelope, or undefined
+ * @param {number} now current epoch milliseconds
+ * @return {boolean} true when asking again would repeat a known-empty answer
+ */
+function constituentIsKnownExhausted(mailboxId, query, tail, now) {
+	const recordedAt = exhaustedConstituentProbes.get(exhaustedProbeKey(mailboxId, query, tail))
+	if (recordedAt === undefined) {
+		return false
+	}
+	if (now - recordedAt > EXHAUSTED_CONSTITUENT_TTL_MS) {
+		exhaustedConstituentProbes.delete(exhaustedProbeKey(mailboxId, query, tail))
+		return false
+	}
+	return true
+}
+
+/**
+ * Record that a source had nothing below the given tail.
+ *
+ * @param {number} mailboxId the constituent mailbox
+ * @param {object} query the envelope list query
+ * @param {object} tail the constituent's furthest envelope, or undefined
+ * @param {number} now current epoch milliseconds
+ */
+function rememberConstituentExhausted(mailboxId, query, tail, now) {
+	exhaustedConstituentProbes.set(exhaustedProbeKey(mailboxId, query, tail), now)
+}
+
 // How long a direct user action (opening a message, switching folders,
 // starring/deleting/flagging, ...) gets priority over the background
 // watched-mailbox poller. Long enough to cover a normal interaction's
@@ -3715,7 +3782,20 @@ export default function mainStoreActions() {
 							tap((mbs) => logger.info('individual mailboxes', { mbs })),
 							filter(needsFetch(query, nextLocalEnvelopes(accounts))),
 						)(accounts)
-						const mbs = mailboxesToFetch(this.getAccounts)
+						const allMbs = mailboxesToFetch(this.getAccounts)
+						// Drop the sources that told us moments ago there is
+						// nothing past their current tail. They stay retired for
+						// this merge exactly as if they had been asked again and
+						// answered empty -- the boundary treatment is identical,
+						// only the round trip is gone.
+						const probedAt = Date.now()
+						const mbs = allMbs.filter((mb) => {
+							if (!constituentIsKnownExhausted(mb.databaseId, query, individualCursor(query, mb), probedAt)) {
+								return true
+							}
+							exhaustedConstituents.add(mb.databaseId)
+							return false
+						})
 
 						if (allowRecursiveFetch && mbs.length) {
 							logger.debug('not enough local envelopes for the next fanned-out page. ' + mbs.length + ' fetches required', {
@@ -3761,6 +3841,9 @@ export default function mainStoreActions() {
 								).then((fetched) => {
 									if (fetched.length === 0) {
 										exhaustedConstituents.add(mb.databaseId)
+										// Nothing was added, so the tail read here
+										// is still the one this answer was about.
+										rememberConstituentExhausted(mb.databaseId, query, individualCursor(query, mb), Date.now())
 									}
 									return fetched
 								}).catch((error) => {

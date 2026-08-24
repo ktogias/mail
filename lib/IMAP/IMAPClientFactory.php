@@ -36,14 +36,35 @@ class IMAPClientFactory {
 	private const MAX_ACCOUNT_CONCURRENCY = 10;
 	private const RESERVED_INTERACTIVE_CONNECTIONS = 1;
 	/**
-	 * Idle timeout for work no user is waiting on.
+	 * Read deadline for work no user is waiting on.
 	 *
-	 * Two seconds is enough for a healthy server to answer and short enough
-	 * that a sequence of stalled steps cannot add up to the 41.9s that was
-	 * measured. A provider this slow is not going to produce a useful body
-	 * search anyway.
+	 * Twenty seconds is long enough that a healthy provider always answers
+	 * within it and short enough that a stalled body search is abandoned while
+	 * its results could still have been used. It replaces a 2s `timeout` that
+	 * never bounded anything (see getClient(): Horde treats `timeout` as a poll
+	 * interval and `read_timeout` as the deadline) and broke the login
+	 * handshake instead.
 	 */
-	private const DEFAULT_BACKGROUND_TIMEOUT_SECONDS = 2;
+	private const DEFAULT_BACKGROUND_READ_TIMEOUT_SECONDS = 20;
+
+	/**
+	 * Read deadline for work a user is waiting on. Below Horde's own 120s
+	 * default, because a minute of silence is already a failed interaction.
+	 */
+	private const DEFAULT_READ_TIMEOUT_SECONDS = 60;
+
+	/**
+	 * Connect timeout, and the interval at which a silent read is polled.
+	 *
+	 * It has to cover a full TCP + TLS + greeting + AUTHENTICATE exchange,
+	 * because that phase is NOT covered by the tolerant SERVER_READTIMEOUT
+	 * handling in Horde's command loop -- a read that times out there
+	 * desynchronises the stream and surfaces as a bogus authentication
+	 * failure. Fifteen seconds against a provider whose healthy handshake was
+	 * measured in fractions of a second leaves generous headroom for the slow
+	 * ones without letting a genuinely dead host hang a worker.
+	 */
+	private const DEFAULT_CONNECT_TIMEOUT_SECONDS = 15;
 
 	private const DEFAULT_USER_FETCH_WAIT_MILLISECONDS = 8_000;
 	private const MAX_USER_FETCH_WAIT_MILLISECONDS = 15_000;
@@ -125,28 +146,38 @@ class IMAPClientFactory {
 			$sslMode = false;
 		}
 
-		// One idle timeout does not suit every caller.
+		// One idle timeout does not suit every caller -- but `timeout` was the
+		// wrong lever for saying so, and this used to set only that one.
 		//
-		// This value reaches stream_set_timeout(), so it bounds how long ANY
-		// single read may sit with no data -- and Horde's literal-data loop
-		// checks it explicitly too. What it cannot bound is the SUM: a request
-		// that connects, is refused, refreshes its token, logs in again,
-		// SELECTs and SEARCHes spends up to this long at each step, and none of
-		// them misbehaves. Measured 2026-08-15: one deep-search took 41.9s that
-		// way and the client abandoned it at about 40s, so the last stretch was
-		// work whose result nobody could still read.
+		// Horde spends `timeout` three ways: the connect timeout, the argument
+		// to stream_set_timeout(), and the bound on its literal-data read loop.
+		// What it is NOT is a deadline. When a read times out mid-command,
+		// Socket.php catches SERVER_READTIMEOUT and keeps reading for as long
+		// as the total is still under `read_timeout` -- so `timeout` is a POLL
+		// INTERVAL and `read_timeout` is the actual deadline. We never set
+		// `read_timeout`, leaving it at Horde's 120s default.
 		//
-		// Interactive work keeps the full patience: a user waiting on a delete
-		// would rather wait than retry. Background and search work does not
-		// earn it -- for a body search the header results are already on screen
-		// in ~100ms, so giving up early costs the user nothing and giving up
-		// late costs them the whole page.
-		$timeout = self::isInteractiveCaller($allowReservedSlot, $workClass)
-			? (int)$this->config->getSystemValue('app.mail.imap.timeout', 5)
-			: max(1, (int)$this->config->getSystemValue(
-				'app.mail.imap.background-timeout',
-				self::DEFAULT_BACKGROUND_TIMEOUT_SECONDS,
-			));
+		// So a 2s `timeout` bought no impatience whatsoever, and cost the one
+		// phase that tolerant catch does not cover: connect, greeting and
+		// AUTHENTICATE. Captured live against Gmail on 2026-08-24 with
+		// per-account IMAP debug -- 67 read timeouts across 32 connections in
+		// ten minutes, each leaving the stream desynchronised, so the next
+		// command came back `BAD Unknown command: AUTHENTICATE` and Horde
+		// reported it as `Mail server denied authentication` (code 102). Horde
+		// then fell back to plaintext LOGIN, which Gmail refused as well: two
+		// failed auth attempts per incident feeding our own breaker, for what
+		// was never an authentication problem. Nine days of "Gmail is rejecting
+		// our OAuth token" was this.
+		//
+		// Hence: `timeout` is now a connect/poll value with room for a TLS
+		// handshake, and the per-caller patience moved to `read_timeout`, which
+		// is the value Horde actually enforces. Interactive work keeps the
+		// longer deadline -- a user waiting on a delete would rather wait than
+		// retry; background and search work does not earn it, because a body
+		// search's header results are already on screen in ~100ms.
+		[$connectTimeout, $readTimeout] = $this->resolveTimeouts(
+			self::isInteractiveCaller($allowReservedSlot, $workClass),
+		);
 
 		$params = [
 			'username' => $user,
@@ -154,7 +185,8 @@ class IMAPClientFactory {
 			'hostspec' => $host,
 			'port' => $port,
 			'secure' => $sslMode,
-			'timeout' => $timeout,
+			'timeout' => $connectTimeout,
+			'read_timeout' => $readTimeout,
 			'context' => [
 				'ssl' => [
 					'verify_peer' => $this->config->getSystemValueBool('app.mail.verify-tls-peer', true),
@@ -260,6 +292,39 @@ class IMAPClientFactory {
 		return $allowReservedSlot
 			|| $workClass === ImapWorkClass::QUICK_MUTATION
 			|| ($workClass !== null && ImapWorkClass::isForeground($workClass));
+	}
+
+	/**
+	 * The connect/poll timeout and the read deadline for this caller.
+	 *
+	 * Extracted for the same reason as isInteractiveCaller(): getClient()
+	 * builds a real socket client, so the arithmetic around it is otherwise
+	 * unreachable from a unit test.
+	 *
+	 * The connect value is never allowed below the read deadline's own floor
+	 * of one poll -- a `read_timeout` shorter than the `timeout` that has to
+	 * fire before Horde ever consults it would be silently unenforceable, and
+	 * a connect timeout shorter than a TLS handshake is the defect this whole
+	 * change exists to remove.
+	 *
+	 * @return array{int, int} connect timeout and read deadline, in seconds
+	 */
+	public function resolveTimeouts(bool $interactive): array {
+		$connect = max(1, (int)$this->config->getSystemValue(
+			'app.mail.imap.connect-timeout',
+			self::DEFAULT_CONNECT_TIMEOUT_SECONDS,
+		));
+		$read = $interactive
+			? (int)$this->config->getSystemValue(
+				'app.mail.imap.timeout',
+				self::DEFAULT_READ_TIMEOUT_SECONDS,
+			)
+			: (int)$this->config->getSystemValue(
+				'app.mail.imap.background-timeout',
+				self::DEFAULT_BACKGROUND_READ_TIMEOUT_SECONDS,
+			);
+
+		return [$connect, max($connect, $read)];
 	}
 
 	private function buildRateLimiterHash(Account $account): string {

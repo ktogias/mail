@@ -423,11 +423,17 @@ export default {
 
 		searchQuery() {
 			this.endReached = false
+			// Same reasoning as endReached directly above, and the reason the
+			// declaration says "reset with endReached": a refill that came back
+			// empty for the PREVIOUS query says nothing about this one, and
+			// leaving it set suppresses refills for the rest of the session.
+			this.refillExhaustedAt = -1
 			this.loadEnvelopes()
 		},
 
 		sortOrder() {
 			this.endReached = false
+			this.refillExhaustedAt = -1
 			this.loadEnvelopes()
 		},
 	},

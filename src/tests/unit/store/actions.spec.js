@@ -19,7 +19,7 @@ import * as RequestCoordinatorService from '../../../service/RequestCoordinator.
 import * as ThreadService from '../../../service/ThreadService.js'
 import { PAGE_SIZE, PRIORITY_INBOX_ID, UNIFIED_INBOX_ID } from '../../../store/constants.js'
 import useMainStore from '../../../store/mainStore.js'
-import { computeLockRetryDelayMs, mapWithConcurrencyLimit, reconcileNearExpiryLocalChanges, resetPendingDeleteRefillsForTests, resetRecentLocalChangesForTests, resetSharedNetworkLimiterForTests } from '../../../store/mainStore/actions.js'
+import { computeLockRetryDelayMs, mapWithConcurrencyLimit, reconcileNearExpiryLocalChanges, resetExhaustedConstituentProbesForTests, resetPendingDeleteRefillsForTests, resetRecentLocalChangesForTests, resetSharedNetworkLimiterForTests } from '../../../store/mainStore/actions.js'
 import { normalizedEnvelopeListId } from '../../../util/normalization.js'
 import { wait } from '../../../util/wait.js'
 
@@ -68,6 +68,7 @@ describe('Vuex store actions', () => {
 		resetSharedNetworkLimiterForTests()
 		resetRecentLocalChangesForTests()
 		resetPendingDeleteRefillsForTests()
+		resetExhaustedConstituentProbesForTests()
 		DeepSearchService.deepSearch.mockResolvedValue({
 			accountId: 13,
 			results: [],
@@ -3720,6 +3721,108 @@ describe('Vuex store actions', () => {
 
 		// No hole was appended.
 		expect(store.getEnvelopes(UNIFIED_INBOX_ID, undefined).map((e) => e.databaseId)).toEqual(before)
+	})
+
+	describe('exhausted fanned-out sources', () => {
+		// Live on 2026-08-24: a burst of deletes produced 139 identical
+		// `mailboxId=10&filter=is:starred&limit=1` requests in three hours,
+		// every one a 22-byte empty array -- 38.7s of server time re-asking a
+		// source that had 0 starred messages below the cursor and was never
+		// going to grow one.
+		const twoInboxes = (store) => {
+			const account13 = { id: 13 }
+			const account26 = { id: 26 }
+			store.preferences['sort-order'] = 'newest'
+			store.preferences['layout-message-view'] = 'threaded'
+			store.addAccountMutation(account13)
+			store.addAccountMutation(account26)
+			store.addMailboxMutation({
+				account: account13,
+				mailbox: { name: 'INBOX', databaseId: 11, specialRole: 'inbox' },
+			})
+			store.addMailboxMutation({
+				account: account26,
+				mailbox: { name: 'INBOX', databaseId: 21, specialRole: 'inbox' },
+			})
+			// 21 is the short one: its tail is already the unified cursor, so
+			// every page asks it and it always has nothing more to give.
+			store.addEnvelopesMutation({ envelopes: reverse(range(30, 40)).map(mockEnvelope(11)) })
+			store.addEnvelopesMutation({ envelopes: reverse(range(38, 40)).map(mockEnvelope(21)) })
+		}
+
+		const callsFor = (mailboxId) => MessageService.fetchEnvelopes.mock.calls.filter((call) => call[1] === mailboxId).length
+
+		it('does not re-ask a source that just answered empty', async () => {
+			twoInboxes(store)
+			let next = 30
+			MessageService.fetchEnvelopes.mockImplementation(async (accountId, mailboxId) => {
+				if (mailboxId === 21) {
+					return []
+				}
+				next -= 5
+				return reverse(range(next, next + 5)).map(mockEnvelope(11))
+			})
+
+			await store.fetchNextEnvelopePage({ mailboxId: UNIFIED_INBOX_ID, quantity: PAGE_SIZE })
+			const askedOnce = callsFor(21)
+			expect(askedOnce).toBeGreaterThan(0)
+
+			await store.fetchNextEnvelopePage({ mailboxId: UNIFIED_INBOX_ID, quantity: PAGE_SIZE })
+
+			// The short inbox was asked on the first page and not again on the
+			// second; the big one still is, every time.
+			expect(callsFor(21)).toBe(askedOnce)
+			expect(callsFor(11)).toBeGreaterThan(1)
+		})
+
+		it('asks again once the source has a different tail', async () => {
+			// The safety property. A backfill inserting older mail makes that
+			// mail the new tail, and the memory is keyed on the tail precisely
+			// so it stops applying the moment that happens -- this file has
+			// twice shipped a bug that retired a source for good.
+			twoInboxes(store)
+			MessageService.fetchEnvelopes.mockImplementation(async (accountId, mailboxId) => {
+				if (mailboxId === 21) {
+					return []
+				}
+				return reverse(range(25, 30)).map(mockEnvelope(11))
+			})
+
+			await store.fetchNextEnvelopePage({ mailboxId: UNIFIED_INBOX_ID, quantity: PAGE_SIZE })
+			const askedOnce = callsFor(21)
+
+			// Older mail lands in the short inbox: it becomes the new tail.
+			store.addEnvelopesMutation({ envelopes: reverse(range(20, 22)).map(mockEnvelope(21)) })
+
+			await store.fetchNextEnvelopePage({ mailboxId: UNIFIED_INBOX_ID, quantity: PAGE_SIZE })
+			expect(callsFor(21)).toBeGreaterThan(askedOnce)
+		})
+
+		it('forgets an empty answer once the memory has expired', async () => {
+			twoInboxes(store)
+			let next = 30
+			MessageService.fetchEnvelopes.mockImplementation(async (accountId, mailboxId) => {
+				if (mailboxId === 21) {
+					return []
+				}
+				next -= 5
+				return reverse(range(next, next + 5)).map(mockEnvelope(11))
+			})
+
+			await store.fetchNextEnvelopePage({ mailboxId: UNIFIED_INBOX_ID, quantity: PAGE_SIZE })
+			const askedOnce = callsFor(21)
+
+			// Older mail that never entered this list is the one case the tail
+			// check cannot see, so the memory is bounded in time as well.
+			const realNow = Date.now
+			Date.now = () => realNow() + 61000
+			try {
+				await store.fetchNextEnvelopePage({ mailboxId: UNIFIED_INBOX_ID, quantity: PAGE_SIZE })
+			} finally {
+				Date.now = realNow
+			}
+			expect(callsFor(21)).toBeGreaterThan(askedOnce)
+		})
 	})
 
 	it('cuts a fanned-out page where the merge stops being complete instead of padding it from an older source', async () => {

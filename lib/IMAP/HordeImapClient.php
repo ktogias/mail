@@ -56,6 +56,15 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 	 */
 	private $sleep = 'usleep';
 
+	/**
+	 * Monotonic seconds, injectable so the transport-failure discriminator
+	 * below can be tested without waiting out a real timeout. Resolved lazily
+	 * rather than in the constructor, which the test subclass skips.
+	 *
+	 * @var null|callable(): float
+	 */
+	private $monotonic = null;
+
 	public function __construct(
 		array $params,
 		private IMAPClientFactory $factory,
@@ -63,9 +72,22 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 		parent::__construct($params);
 	}
 
+	private function monotonicNow(): float {
+		if ($this->monotonic === null) {
+			return hrtime(true) / 1_000_000_000;
+		}
+
+		return ($this->monotonic)();
+	}
+
 	/** @param callable(int): void $sleep */
 	public function setSleepForTesting(callable $sleep): void {
 		$this->sleep = $sleep;
+	}
+
+	/** @param callable(): float $monotonic */
+	public function setMonotonicForTesting(callable $monotonic): void {
+		$this->monotonic = $monotonic;
 	}
 
 	public function setWorkClassForTesting(string $workClass): void {
@@ -304,6 +326,7 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 			);
 		}
 
+		$startedAt = $this->monotonicNow();
 		try {
 			$result = $this->imapLoginWithConnectionSlot();
 			// Success -- whatever caused any earlier failures has
@@ -316,6 +339,20 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 		} catch (Horde_Imap_Client_Exception $e) {
 			if (!$this->isRetryableAuthFailure($e)) {
 				throw $e;
+			}
+			// A login that ran into the socket timeout did not get an answer
+			// at all -- it got a desynchronised stream, which Horde reports
+			// with the very same code and message as a real refusal. Counting
+			// it would let a slow network drive the breaker (and, since Horde
+			// retries the exchange as plaintext LOGIN, do it twice per
+			// incident); refreshing the token for it is answering a question
+			// nobody asked. Rethrow as what it was.
+			if ($this->loginTimedOut($startedAt)) {
+				$this->logTransportFailure($e, $this->monotonicNow() - $startedAt);
+				throw new Horde_Imap_Client_Exception(
+					'Error when communicating with the mail server.',
+					Horde_Imap_Client_Exception::SERVER_READTIMEOUT
+				);
 			}
 			$this->logAuthRejection($e, $allowAuthRetry ? 'initial' : 'post_refresh');
 
@@ -486,6 +523,42 @@ class HordeImapClient extends Horde_Imap_Client_Socket {
 			return '5-30m';
 		}
 		return '30m+';
+	}
+
+	/**
+	 * Did this login attempt run into the socket timeout rather than an answer?
+	 *
+	 * The discriminator is elapsed time against the connect timeout Horde was
+	 * given, because the two cases are indistinguishable by code or message.
+	 * A provider that means "no" says so in well under a second -- measured
+	 * against Gmail, a genuine refusal is sub-second while every desynchronised
+	 * exchange in the 2026-08-24 capture had a read timeout in it. The margin
+	 * exists because the timeout may fire on the second or third read of a
+	 * handshake, so the attempt as a whole runs slightly past one interval.
+	 */
+	private function loginTimedOut(float $startedAt): bool {
+		$timeout = (int)$this->getParam('timeout');
+		if ($timeout <= 0) {
+			return false;
+		}
+
+		return ($this->monotonicNow() - $startedAt) >= $timeout;
+	}
+
+	private function logTransportFailure(Horde_Imap_Client_Exception $e, float $elapsed): void {
+		if ($this->logger === null || $this->account === null) {
+			return;
+		}
+
+		$this->logger->warning('IMAP login timed out for account {accountId}, reported by Horde as an auth failure', [
+			'accountId' => $this->account->getId(),
+			'app' => 'mail',
+			'host' => $this->account->getMailAccount()->getInboundHost(),
+			'elapsedSeconds' => round($elapsed, 1),
+			'timeout' => (int)$this->getParam('timeout'),
+			'hordeCode' => $e->getCode(),
+			'reason' => $e->getMessage(),
+		]);
 	}
 
 	private function isRetryableAuthFailure(Horde_Imap_Client_Exception $e): bool {

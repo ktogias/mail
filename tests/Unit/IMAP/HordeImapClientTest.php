@@ -66,6 +66,10 @@ class TestableHordeImapClient extends HordeImapClient {
 		return $this->_login();
 	}
 
+	public function setTimeoutForTesting(int $seconds): void {
+		$this->_params['timeout'] = $seconds;
+	}
+
 	protected function imapLogin() {
 		$this->imapLoginCalls++;
 		if ($this->imapLoginOverride !== null) {
@@ -607,6 +611,66 @@ class HordeImapClientTest extends TestCase {
 
 		self::assertSame(2, $this->client->imapLoginCalls, 'initial plus the post-refresh retry, and no more');
 		self::assertSame([], $slept);
+	}
+
+	/**
+	 * Elapsed time is the only thing separating these two cases: Horde reports
+	 * a stream that desynchronised after a read timeout with exactly the code
+	 * and message it uses for a genuine refusal.
+	 *
+	 * Captured live on 2026-08-24 -- nine days of "Gmail is rejecting our OAuth
+	 * token" were read timeouts during the handshake, each one counted as an
+	 * auth failure (twice, since Horde then retried the exchange as plaintext
+	 * LOGIN) and each one triggering a pointless token refresh.
+	 */
+	private function fixedElapsed(float $seconds): void {
+		$calls = 0;
+		$this->client->setMonotonicForTesting(static function () use (&$calls, $seconds): float {
+			return $calls++ === 0 ? 1000.0 : 1000.0 + $seconds;
+		});
+	}
+
+	public function testALoginThatRanIntoTheSocketTimeoutIsNotAnAuthFailure(): void {
+		$account = $this->googleAccount();
+		$googleIntegration = $this->createMock(GoogleIntegration::class);
+		$this->client->enableAuthRetry($account, $googleIntegration, $this->createMock(MicrosoftIntegration::class), $this->createMock(MailAccountMapper::class), $this->createMock(ICrypto::class));
+		$googleIntegration->method('isGoogleOauthAccount')->with($account)->willReturn(true);
+		$googleIntegration->expects(self::never())->method('refresh');
+		$this->client->setTimeoutForTesting(15);
+		$this->fixedElapsed(15.4);
+		$this->client->succeeds = false;
+
+		try {
+			$this->client->attemptLogin();
+			self::fail('expected the transport failure to propagate');
+		} catch (Horde_Imap_Client_Exception $e) {
+			self::assertSame(
+				Horde_Imap_Client_Exception::SERVER_READTIMEOUT,
+				$e->getCode(),
+				'a timed-out login must be reported as what it was, not as a denied login',
+			);
+		}
+
+		self::assertSame(1, $this->client->imapLoginCalls, 'no token refresh, no retry -- there was no answer to react to');
+		self::assertNull($this->cache->get('testhash_failures'), 'a slow network must not drive the auth breaker');
+	}
+
+	public function testARefusalThatArrivedPromptlyStillCounts(): void {
+		// The other side of the discriminator: the fix must not swallow real
+		// refusals, which is the failure mode that would leave a genuinely
+		// wrong credential retrying for ever.
+		$this->client->setTimeoutForTesting(15);
+		$this->fixedElapsed(0.2);
+		$this->client->succeeds = false;
+
+		try {
+			$this->client->attemptLogin();
+			self::fail('expected the rejection to propagate');
+		} catch (Horde_Imap_Client_Exception $e) {
+			self::assertSame('Mail server denied authentication.', $e->getMessage());
+		}
+
+		self::assertSame(1, (int)$this->cache->get('testhash_failures'), 'a prompt refusal is still a refusal');
 	}
 
 	public function testLoginGivesUpAfterASecondAuthRejectionEvenAfterARefreshButOnlyCountsOneFailure(): void {

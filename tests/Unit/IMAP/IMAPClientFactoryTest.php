@@ -83,6 +83,62 @@ class IMAPClientFactoryTest extends TestCase {
 		];
 	}
 
+	/**
+	 * @param array<string, int> $configured
+	 * @return array{int, int}
+	 */
+	private function timeouts(bool $interactive, array $configured = []): array {
+		$config = $this->createMock(IConfig::class);
+		$config->method('getSystemValue')->willReturnCallback(
+			static fn (string $key, $default) => $configured[$key] ?? $default,
+		);
+
+		$reflection = new ReflectionClass(IMAPClientFactory::class);
+		/** @var IMAPClientFactory $factory */
+		$factory = $reflection->newInstanceWithoutConstructor();
+		$reflection->getProperty('config')->setValue($factory, $config);
+
+		return $factory->resolveTimeouts($interactive);
+	}
+
+	/**
+	 * Horde spends `timeout` on the connect, on stream_set_timeout() and on its
+	 * literal-read loop -- but it is a POLL INTERVAL, not a deadline: a read
+	 * that times out mid-command is tolerated for as long as the total stays
+	 * under `read_timeout`. The connect and AUTHENTICATE phase gets no such
+	 * tolerance, so a `timeout` too small for a TLS handshake desynchronises
+	 * the stream and surfaces as a bogus "Mail server denied authentication".
+	 *
+	 * That is what a 2s background `timeout` did here for nine days, while
+	 * buying no impatience at all -- `read_timeout` was never set, so the real
+	 * deadline stayed at Horde's 120s default.
+	 */
+	public function testTheConnectTimeoutLeavesRoomForAHandshakeForEveryCaller(): void {
+		[$interactiveConnect] = $this->timeouts(true);
+		[$backgroundConnect] = $this->timeouts(false);
+
+		self::assertSame($interactiveConnect, $backgroundConnect, 'the handshake costs the same whoever asked for it');
+		self::assertGreaterThanOrEqual(10, $backgroundConnect, 'a TLS handshake against a slow provider must fit');
+	}
+
+	public function testImpatienceIsExpressedAsAReadDeadlineNotAConnectTimeout(): void {
+		[, $interactiveRead] = $this->timeouts(true);
+		[, $backgroundRead] = $this->timeouts(false);
+
+		self::assertLessThan($interactiveRead, $backgroundRead, 'work nobody waits on gives up sooner');
+		self::assertLessThan(120, $interactiveRead, 'still below the Horde default it replaces');
+	}
+
+	/**
+	 * Horde only consults `read_timeout` once a `timeout` has fired, so a read
+	 * deadline shorter than one poll could never be enforced.
+	 */
+	public function testAReadDeadlineIsNeverShorterThanASinglePoll(): void {
+		[$connect, $read] = $this->timeouts(false, ['app.mail.imap.background-timeout' => 1]);
+
+		self::assertSame($connect, $read);
+	}
+
 	public function testRateLimiterHashIsStableAcrossCredentialRotation(): void {
 		$before = $this->rateLimiterHash($this->account(
 			accessToken: 'encrypted-old-access-token',
