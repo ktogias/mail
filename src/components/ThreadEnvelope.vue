@@ -403,6 +403,7 @@
 			:smart-replies="showFollowUpHeader ? [] : smartReplies"
 			:reply-button-label="replyButtonLabel"
 			@load="onMessageLoaded"
+			@print-shortcut="$emit('print-shortcut')"
 			@translate="onOpenTranslationModal"
 			@reply="(body) => onReply(body, showFollowUpHeader)" />
 		<Error
@@ -678,6 +679,17 @@ export default {
 			return this.mainStore.getAccount(this.envelope.accountId)
 		},
 
+		/**
+		 * Whether this message is rendered and can therefore be printed. The
+		 * message body is only in the DOM once the message itself has been
+		 * fetched and its loading state has settled.
+		 *
+		 * @return {boolean}
+		 */
+		printable() {
+			return this.loading === Loading.Done && this.message !== undefined
+		},
+
 		senderEmailColor() {
 			if (this.isInternal) {
 				return 'var(--color-text-maxcontrast)'
@@ -901,7 +913,16 @@ export default {
 			// already-open, still-unread message also sets loading to
 			// Done (just to reset local state, see the expanded watcher
 			// above), and must not start this timer too.
-			if (this.expanded && !this.envelope.flags.seen && this.hasSeenAcl && this.seenTimer === undefined) {
+			// Delay comes from upstream's `auto-mark-as-read` preference (ms;
+			// negative disables it entirely). The guards around it are the
+			// fork's own -- see the comment above.
+			const configuredDelay = parseInt(this.mainStore.getPreference('auto-mark-as-read', '3000'), 10)
+			// A preference that is absent or unparseable must not silently
+			// disable marking as read -- NaN fails every comparison, so the
+			// guard below would just never fire and messages would stay unread
+			// with nothing to show for it.
+			const autoMarkAsReadDelay = Number.isNaN(configuredDelay) ? 3000 : configuredDelay
+			if (this.expanded && !this.envelope.flags.seen && this.hasSeenAcl && this.seenTimer === undefined && autoMarkAsReadDelay >= 0) {
 				logger.info('Starting timer to mark message as seen/read')
 				this.seenTimer = setTimeout(() => {
 					// This is an idempotent target, never a toggle. The envelope can
@@ -918,7 +939,7 @@ export default {
 					}).finally(() => {
 						this.seenTimer = undefined
 					})
-				}, 2000)
+				}, autoMarkAsReadDelay)
 			}
 			if (this.expanded) {
 				// Tidy the copies dedupeFolderCopies() hides behind this one.

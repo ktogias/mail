@@ -332,7 +332,7 @@ class MailManager implements IMailManager {
 		$messageUids = array_values(array_unique(array_map('intval', $messageUids)));
 		foreach ($messageUids as $messageUid) {
 			$this->eventDispatcher->dispatchTyped(
-				new BeforeMessageDeletedEvent($account, $mailbox->getName(), $messageUid)
+				new BeforeMessageDeletedEvent($account, $mailbox, $messageUid)
 			);
 		}
 
@@ -507,14 +507,27 @@ class MailManager implements IMailManager {
 		// connections. Maintaining the row here makes it one.
 		$this->syncImportanceTagRows($account, $mb, $uids, $flags);
 
+		// Upstream now hands the listener the resolved Message rather than a
+		// uid. Resolve the whole batch once instead of per (flag, uid) pair, and
+		// skip anything the cache does not know: the client could not have named
+		// a uid it never saw, so that is a stale view, not a reason to fail the
+		// flag operation for every other message in the batch.
+		$messagesByUid = [];
+		foreach ($this->dbMessageMapper->findByUids($mb, $uids) as $cached) {
+			$messagesByUid[$cached->getUid()] = $cached;
+		}
+
 		foreach ($flags as $flag => $value) {
 			foreach ($uids as $uid) {
+				if (!isset($messagesByUid[$uid])) {
+					continue;
+				}
 				$this->eventDispatcher->dispatch(
 					MessageFlaggedEvent::class,
 					new MessageFlaggedEvent(
 						$account,
 						$mb,
-						$uid,
+						$messagesByUid[$uid],
 						$flag,
 						filter_var($value, FILTER_VALIDATE_BOOLEAN),
 					)

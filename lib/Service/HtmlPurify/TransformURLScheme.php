@@ -89,22 +89,22 @@ class TransformURLScheme extends HTMLPurifier_URIFilter {
 		$proxyUrl = $this->urlGenerator->linkToRoute('mail.proxy.proxy', [
 			'id' => $this->messageId,
 			'hmac' => $this->hmacGenerator->generate($this->messageId, $originalURL),
-			'src' => $originalURL
 		]);
 		$parsedProxyUrl = parse_url($proxyUrl);
 		/** @var array{path: string, query?: string} $parsedProxyUrl */
+		// Upstream's 23ed0bdbc appends the original URL rawurlencoded so that
+		// percent-encoding survives the proxy hop. parse_url() omits 'query'
+		// entirely for a URL that has none, so it is coalesced rather than
+		// assumed -- in normal use mail.proxy.proxy always carries id/hmac.
+		$existingQuery = $parsedProxyUrl['query'] ?? '';
+		$query = ($existingQuery === '' ? '' : $existingQuery . '&')
+			. 'src=' . rawurlencode($originalURL);
 		return new \HTMLPurifier_URI(
 			$this->request->getServerProtocol(),
 			null, $this->request->getServerHost(),
 			null,
 			$parsedProxyUrl['path'],
-			// parse_url() only includes 'query' at all when the URL
-			// actually has one -- in normal use mail.proxy.proxy always
-			// gets id/hmac/src as query params, so this never mattered in
-			// practice, but assuming the key unconditionally exists is
-			// still one query-string-shape assumption too many for a
-			// value we don't control the construction of ourselves.
-			$parsedProxyUrl['query'] ?? null,
+			$query,
 			null
 		);
 	}

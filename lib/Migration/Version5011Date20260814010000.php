@@ -10,7 +10,6 @@ declare(strict_types=1);
 namespace OCA\Mail\Migration;
 
 use Closure;
-use OCP\DB\ISchemaWrapper;
 use OCP\IDBConnection;
 use OCP\Migration\IOutput;
 use OCP\Migration\SimpleMigrationStep;

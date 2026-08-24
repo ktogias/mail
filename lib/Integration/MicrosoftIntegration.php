@@ -12,8 +12,10 @@ namespace OCA\Mail\Integration;
 use Exception;
 use OCA\Mail\Account;
 use OCA\Mail\AppInfo\Application;
+use OCA\Mail\ConfigLexicon;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\Http\Client\IClientService;
+use OCP\IAppConfig;
 use OCP\ICacheFactory;
 use OCP\IConfig;
 use OCP\IMemcache;
@@ -24,7 +26,7 @@ use function json_decode;
 
 class MicrosoftIntegration {
 	private ITimeFactory $timeFactory;
-	private IConfig $config;
+	private IAppConfig $appConfig;
 	private ICrypto $crypto;
 	private IClientService $clientService;
 	private IURLGenerator $urlGenerator;
@@ -39,61 +41,62 @@ class MicrosoftIntegration {
 
 	public function __construct(
 		ITimeFactory $timeFactory,
-		IConfig $config,
+		IAppConfig $appConfig,
 		ICrypto $crypto,
 		IClientService $clientService,
 		IURLGenerator $urlGenerator,
 		private LoggerInterface $logger,
 		private ICacheFactory $cacheFactory,
+		private IConfig $config,
 	) {
 		$this->timeFactory = $timeFactory;
 		$this->clientService = $clientService;
 		$this->crypto = $crypto;
-		$this->config = $config;
+		$this->appConfig = $appConfig;
 		$this->urlGenerator = $urlGenerator;
 	}
 
 	public function configure(?string $tenantId, string $clientId, string $clientSecret): void {
 		if ($tenantId !== null) {
-			$this->config->setAppValue(
+			$this->appConfig->setValueString(
 				Application::APP_ID,
-				'microsoft_oauth_tenant_id',
+				ConfigLexicon::MICROSOFT_OAUTH_TENANT_ID,
 				$tenantId
 			);
 		}
-		$this->config->setAppValue(
+		$this->appConfig->setValueString(
 			Application::APP_ID,
-			'microsoft_oauth_client_id',
+			ConfigLexicon::MICROSOFT_OAUTH_CLIENT_ID,
 			$clientId
 		);
-		$this->config->setAppValue(
+		$this->appConfig->setValueString(
 			Application::APP_ID,
-			'microsoft_oauth_client_secret',
+			ConfigLexicon::MICROSOFT_OAUTH_CLIENT_SECRET,
 			$this->crypto->encrypt($clientSecret),
 		);
 	}
 
 	public function unlink(): void {
-		$this->config->deleteAppValue(
+		$this->appConfig->deleteKey(
 			Application::APP_ID,
-			'microsoft_oauth_tenant_id',
+			ConfigLexicon::MICROSOFT_OAUTH_TENANT_ID,
 		);
-		$this->config->deleteAppValue(
+		$this->appConfig->deleteKey(
 			Application::APP_ID,
-			'microsoft_oauth_client_id',
+			ConfigLexicon::MICROSOFT_OAUTH_CLIENT_ID,
 		);
-		$this->config->deleteAppValue(
+		$this->appConfig->deleteKey(
 			Application::APP_ID,
-			'microsoft_oauth_client_secret',
+			ConfigLexicon::MICROSOFT_OAUTH_CLIENT_SECRET,
 		);
 	}
 
 	public function getTenantId(): ?string {
-		return $this->config->getAppValue(Application::APP_ID, 'microsoft_oauth_tenant_id', 'common');
+		return $this->appConfig->getValueString(Application::APP_ID, ConfigLexicon::MICROSOFT_OAUTH_TENANT_ID, 'common');
 	}
 
 	public function getClientId(): ?string {
-		$value = $this->config->getAppValue(Application::APP_ID, 'microsoft_oauth_client_id');
+		$value = $this->appConfig->getValueString(Application::APP_ID, ConfigLexicon::MICROSOFT_OAUTH_CLIENT_ID);
 		if ($value === '') {
 			return null;
 		}
@@ -108,8 +111,8 @@ class MicrosoftIntegration {
 	public function finishConnect(Account $account,
 		string $code): Account {
 		$tenantId = $this->getTenantId();
-		$clientId = $this->config->getAppValue(Application::APP_ID, 'microsoft_oauth_client_id');
-		$encryptedClientSecret = $this->config->getAppValue(Application::APP_ID, 'microsoft_oauth_client_secret');
+		$clientId = $this->appConfig->getValueString(Application::APP_ID, ConfigLexicon::MICROSOFT_OAUTH_CLIENT_ID);
+		$encryptedClientSecret = $this->appConfig->getValueString(Application::APP_ID, ConfigLexicon::MICROSOFT_OAUTH_CLIENT_SECRET);
 		if (empty($tenantId) || empty($clientId) || empty($encryptedClientSecret)) {
 			// This is highly unexpected
 			$this->logger->critical('Can not finish Microsoft account linking due to missing client secrets');
@@ -175,9 +178,9 @@ class MicrosoftIntegration {
 			return $account;
 		}
 
-		$tenantId = $this->config->getAppValue(Application::APP_ID, 'microsoft_oauth_tenant_id');
-		$clientId = $this->config->getAppValue(Application::APP_ID, 'microsoft_oauth_client_id');
-		$encryptedClientSecret = $this->config->getAppValue(Application::APP_ID, 'microsoft_oauth_client_secret');
+		$tenantId = $this->appConfig->getValueString(Application::APP_ID, ConfigLexicon::MICROSOFT_OAUTH_TENANT_ID);
+		$clientId = $this->appConfig->getValueString(Application::APP_ID, ConfigLexicon::MICROSOFT_OAUTH_CLIENT_ID);
+		$encryptedClientSecret = $this->appConfig->getValueString(Application::APP_ID, ConfigLexicon::MICROSOFT_OAUTH_CLIENT_SECRET);
 		if (empty($tenantId) || empty($clientId) || empty($encryptedClientSecret)) {
 			// Nothing to do here
 			return $account;

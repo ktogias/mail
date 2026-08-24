@@ -517,6 +517,7 @@ describe('ThreadEnvelope', () => {
 			vi.useFakeTimers()
 			window.HTMLElement.prototype.scrollIntoView = vi.fn()
 			store = useMainStore()
+			store.preferences['auto-mark-as-read'] = '2000'
 			store.toggleEnvelopeSeen = vi.fn()
 			store.getAccount = vi.fn().mockReturnValue({ name: 'Test', emailAddress: 'test@test.com' })
 		})
@@ -571,7 +572,7 @@ describe('ThreadEnvelope', () => {
 			await vi.advanceTimersByTimeAsync(0)
 
 			// The data is in hand, but nothing has told us the content
-			// actually rendered yet -- advancing well past the 2s
+			// actually rendered yet -- advancing well past the configured
 			// mark-as-read delay must not fire it.
 			await vi.advanceTimersByTimeAsync(5000)
 
@@ -651,7 +652,7 @@ describe('ThreadEnvelope', () => {
 			view.destroy()
 		})
 
-		it('marks as read 2s after the content actually finishes rendering', async () => {
+		it('marks as read after the configured delay once the content finishes rendering', async () => {
 			const view = mountThreadEnvelope(true, true)
 			await vi.advanceTimersByTimeAsync(0)
 

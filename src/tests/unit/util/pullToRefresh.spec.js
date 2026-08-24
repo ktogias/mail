@@ -114,5 +114,4 @@ describe('enablePullToRefresh', () => {
 	it('asks for a deliberate gesture, not a flick', () => {
 		expect(PULL_REFRESH_THRESHOLD_PX).toBeGreaterThanOrEqual(100)
 	})
-
 })

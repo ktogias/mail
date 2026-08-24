@@ -97,6 +97,7 @@ OC.L10N.register(
     "Last week" : "Amalas yezrin",
     "Last month" : "Ayyur yezrin",
     "Choose target folder" : "Fren akaram aniccan",
+    "No results" : "Ulac igmad",
     "Favorites" : "Imenyafen",
     "Other" : "Wayeḍ",
     "Forward" : "Avancer",
@@ -131,8 +132,8 @@ OC.L10N.register(
     "New Contact" : "Anermis amaynut",
     "Copy to clipboard" : "Nɣel-it ar tecfawit",
     "Add" : "Rnu",
-    "Show less" : "Ssken cwiṭ",
-    "Show more" : "Sken ugar",
+    "Collapse" : "Seggelmes",
+    "Expand" : "Simɣur",
     "Clear" : "Ṣfeḍ",
     "Close" : "Mdel",
     "Body" : "Tafekka",
@@ -142,7 +143,6 @@ OC.L10N.register(
     "Custom" : "Udmawan",
     "Add tag" : "Rnu tabzimt",
     "Task created" : "Tawuri tettwarna",
-    "Print" : "Siggez",
     "Not found" : "Ulac-it",
     "Reply all" : "Err-assen akk",
     "Unsubscribe" : "Ffeɣ seg ujerred",
@@ -194,6 +194,9 @@ OC.L10N.register(
     "Trash" : "Iḍumman",
     "Nextcloud Mail" : "Imayl n Nextcloud",
     "Discard changes" : "Sefsex ibeddilen",
-    "Message sent" : "Izen yettwazen"
+    "Message sent" : "Izen yettwazen",
+    "Date:" : "Azemz:",
+    "Show less" : "Ssken cwiṭ",
+    "Show more" : "Sken ugar"
 },
 "nplurals=2; plural=(n != 1);");

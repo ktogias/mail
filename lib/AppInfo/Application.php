@@ -11,6 +11,7 @@ declare(strict_types=1);
 namespace OCA\Mail\AppInfo;
 
 use Horde_Translation;
+use OCA\Mail\ConfigLexicon;
 use OCA\Mail\ContextChat\ContextChatProvider;
 use OCA\Mail\Contracts\IAttachmentService;
 use OCA\Mail\Contracts\IAvatarService;
@@ -37,11 +38,11 @@ use OCA\Mail\HordeTranslationHandler;
 use OCA\Mail\Http\Middleware\ErrorMiddleware;
 use OCA\Mail\Http\Middleware\ProvisioningMiddleware;
 use OCA\Mail\Listener\AccountSynchronizedThreadUpdaterListener;
-use OCA\Mail\Listener\IncrementalThreadUpdaterListener;
 use OCA\Mail\Listener\AddressCollectionListener;
 use OCA\Mail\Listener\DeleteDraftListener;
 use OCA\Mail\Listener\FollowUpClassifierListener;
 use OCA\Mail\Listener\HamReportListener;
+use OCA\Mail\Listener\IncrementalThreadUpdaterListener;
 use OCA\Mail\Listener\InteractionListener;
 use OCA\Mail\Listener\MailboxesSynchronizedSpecialMailboxesUpdater;
 use OCA\Mail\Listener\MessageCacheUpdaterListener;
@@ -175,6 +176,8 @@ final class Application extends App implements IBootstrap {
 		$context->registerSetupCheck(MailConnectionPerformance::class);
 
 		$context->registerUserMigrator(MailAccountMigrator::class);
+
+		$context->registerConfigLexicon(ConfigLexicon::class);
 
 		// bypass Horde Translation system
 		Horde_Translation::setHandler('Horde_Imap_Client', new HordeTranslationHandler());

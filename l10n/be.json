@@ -127,6 +127,7 @@
     "Last month" : "Мінулы месяц",
     "Loading messages …" : "Загрузка паведамленняў …",
     "Choose target folder" : "Выберыце мэтавую папку",
+    "No results" : "Няма вынікаў",
     "Favorites" : "Абранае",
     "Other" : "Іншае",
     "Direct link copied to clipboard" : "Прамая спасылка скапіявана ў буфер абмену",
@@ -177,6 +178,8 @@
     "Copy to clipboard" : "Капіяваць у буфер абмену",
     "Contact name …" : "Імя кантакту …",
     "Add" : "Дадаць",
+    "Collapse" : "Згарнуць",
+    "Expand" : "Разгарнуць",
     "Clear" : "Ачысціць",
     "Search in folder" : "Пошук у папцы",
     "Close" : "Закрыць",
@@ -282,6 +285,7 @@
     "There was a problem loading {tag}{name}{endtag}" : "Узнікла праблема з загрузкай {tag}{name}{endtag}",
     "Could not load your message" : "Не ўдалося загрузіць ваша паведамленне",
     "Could not load the message" : "Не ўдалося загрузіць паведамленне",
+    "Date:" : "Дата:",
     "Error loading message" : "Памылка пры загрузцы паведамлення"
 },"pluralForm" :"nplurals=4; plural=(n%10==1 && n%100!=11 ? 0 : n%10>=2 && n%10<=4 && (n%100<12 || n%100>14) ? 1 : n%10==0 || (n%10>=5 && n%10<=9) || (n%100>=11 && n%100<=14)? 2 : 3);"
 }

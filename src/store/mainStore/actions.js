@@ -2550,7 +2550,7 @@ export default function mainStoreActions() {
 						// Reply-To points to the list address, not the original sender.
 						// For regular emails, honor Reply-To if the sender set one.
 						const isMailingList = !!(original.unsubscribeUrl || original.unsubscribeMailto)
-						let to = (!isMailingList && original.replyTo !== undefined)
+						let to = (!isMailingList && original.replyTo?.length > 0)
 							? original.replyTo
 							: reply.data.from
 						// Replying to a message we sent ourselves: follow up with the
@@ -6068,7 +6068,7 @@ export default function mainStoreActions() {
 			imapLabel,
 		}) {
 			return handleHttpAuthErrors(async () => {
-				// TODO: fetch tags indepently of envelopes and only send tag id here
+				// TODO: fetch tags independently of envelopes and only send tag id here
 				const tag = await setEnvelopeTag(envelope.databaseId, imapLabel)
 				if (!this.getTag(tag.id)) {
 					this.addTagMutation({ tag })
@@ -6192,10 +6192,9 @@ export default function mainStoreActions() {
 		}) {
 			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
-				this.removeEnvelopeMutation({ id: envelope.databaseId })
-
 				try {
 					await ThreadService.moveThread(envelope.databaseId, destMailboxId)
+					this.removeEnvelopeMutation({ id: envelope.databaseId })
 					logger.debug('thread moved')
 				} catch (e) {
 					logger.error('could not move thread', { error: e })

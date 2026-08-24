@@ -127,6 +127,7 @@
 				:has-multiple-accounts="hasMultipleAccounts"
 				:selected-envelopes="selectedEnvelopes"
 				:compact-mode="compactMode"
+				:date-grouped="dateGrouped"
 				@delete="$emit('delete', env.databaseId)"
 				@request-delete="onRequestDeleteOne"
 				@request-archive="onRequestArchiveOne"
@@ -304,6 +305,11 @@ export default {
 		},
 
 		compactMode: {
+			type: Boolean,
+			default: false,
+		},
+
+		dateGrouped: {
 			type: Boolean,
 			default: false,
 		},

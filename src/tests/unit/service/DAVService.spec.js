@@ -4,18 +4,12 @@
  */
 
 import { getCurrentUser } from '@nextcloud/auth'
-import axios from '@nextcloud/axios'
 import { generateRemoteUrl } from '@nextcloud/router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { getUserCalendars } from '../../../service/DAVService.js'
 
 vi.mock('@nextcloud/auth')
 vi.mock('@nextcloud/router')
-// Not the automock: the client reads axios.defaults.headers, and every call
-// goes through the default export itself.
-vi.mock('@nextcloud/axios', () => ({
-	default: Object.assign(vi.fn(), { defaults: { headers: {} } }),
-}))
 
 /**
  * One <d:response>, the way Nextcloud answers: properties that exist come
@@ -78,27 +72,27 @@ describe('getUserCalendars: the DAV client must hand webdav a fetch-like respons
 	})
 
 	/**
-	 * Answer like @nextcloud/axios does: a body on `.data`, no `.ok`, and --
-	 * the part that matters -- no `.text()`.
+	 * The DAV client is webdav's own now (see src/dav/client.js), so the seam
+	 * is fetch rather than axios. Everything below the stub -- the PROPFIND,
+	 * the multistatus parse, the ACL reading -- is the real code path.
 	 *
 	 * @param {string} xml the response body
 	 * @param {number} status the HTTP status
 	 */
 	function respondWith(xml, status = 207) {
-		axios.mockResolvedValue({
+		globalThis.fetch = vi.fn().mockResolvedValue(new Response(xml, {
 			status,
 			statusText: status === 207 ? 'Multi-Status' : 'Error',
 			headers: { 'content-type': 'application/xml; charset=utf-8' },
-			data: new TextEncoder().encode(xml),
-		})
+		}))
 	}
 
 	// Reported live on 2026-07-28: "Could not load your calendars" while the
-	// PROPFIND sat in the network panel at 207 / 24.98 kB. src/dav/client.js
-	// patched webdav's `request` with axios itself, which was right for
-	// webdav 4 but not for 5 -- that one reads `.ok` and `await
-	// response.text()`, so a perfectly good 207 became
-	// "TypeError: response.text is not a function".
+	// PROPFIND sat in the network panel at 207 / 24.98 kB, because the client
+	// patched webdav's `request` with axios. Upstream removed that patch
+	// entirely (2226b5795) in favour of webdav's own client, which is what the
+	// fork now uses -- these tests keep the regression covered from the
+	// outside, independently of how the request is made.
 	it('reads the calendars out of a successful multistatus', async () => {
 		respondWith(multistatus(
 			calendarHome,
@@ -110,19 +104,6 @@ describe('getUserCalendars: the DAV client must hand webdav a fetch-like respons
 
 		expect(calendars.map((calendar) => calendar.displayname)).toEqual(['Γενικό', 'ISI'])
 		expect(calendars[0].url).toBe('https://home.ktogias.gr/cloud/remote.php/dav/calendars/ktogias/1-8/')
-	})
-
-	it('issues a PROPFIND rather than rejecting on the 207 itself', async () => {
-		respondWith(multistatus(calendarHome, calendarResponse('1-8', 'Γενικό')))
-
-		await getUserCalendars()
-
-		const [request] = axios.mock.calls[0]
-		expect(request.method).toBe('PROPFIND')
-		// webdav decides what a status means; axios must not reject first or
-		// handleResponseCode() never runs and the body is lost with it.
-		expect(request.validateStatus(207)).toBe(true)
-		expect(request.validateStatus(404)).toBe(true)
 	})
 
 	it('drops the calendar home and anything the user cannot write to', async () => {

@@ -117,7 +117,9 @@ class ThreadClosureRealDataTest extends TestCase {
 	/** @param array<string, string> $stored */
 	private function repository(array $stored): ThreadClosureRepository {
 		return new class($stored) implements ThreadClosureRepository {
-			public function __construct(private array $stored) {
+			public function __construct(
+				private array $stored,
+			) {
 			}
 
 			public function threadRootsOfMessages(array $messageIds): array {

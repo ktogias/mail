@@ -164,7 +164,7 @@ class MessageMapper {
 		// Here we assume somewhat equally distributed UIDs
 		// +1 is added to fetch all messages with the rare case of strictly
 		// continuous UIDs and fractions
-		$estimatedPageSize = (int)((float)($totalRange / $total) * $maxResults) + 1;
+		$estimatedPageSize = (int)((float)($totalRange / $total) * (float)$maxResults) + 1;
 
 		// $highestKnownUid === 0 means "no anchor established yet" (the
 		// very first call ever) -- there's nothing to catch up ON above an
@@ -212,7 +212,7 @@ class MessageMapper {
 		while ($actualPageSize > $maxResults) {
 			$logger->debug("Range for findAll matches too many messages: min=$min max=$max total=$total estimatedPageSize=$estimatedPageSize actualPageSize=$actualPageSize");
 
-			$estimatedPageSize = (int)($estimatedPageSize / 2.0);
+			$estimatedPageSize = (int)((float)$estimatedPageSize / 2.0);
 
 			if ($catchingUp) {
 				$upper = min(
@@ -921,8 +921,12 @@ class MessageMapper {
 		// TODO: compare logic and merge with getAttachments()
 
 		$query = new Horde_Imap_Client_Fetch_Query();
-		$query->bodyPart($attachmentId);
-		$query->mimeHeader($attachmentId);
+		$query->bodyPart($attachmentId, [
+			'peek' => true,
+		]);
+		$query->mimeHeader($attachmentId, [
+			'peek' => true,
+		]);
 		$this->smimeService->addEncryptionCheckQueries($query);
 
 		$uids = new Horde_Imap_Client_Ids($messageUid);
@@ -1006,6 +1010,7 @@ class MessageMapper {
 	 */
 	private function buildAttachmentsPartsQuery(Horde_Mime_Part $structure, array $attachmentIds) : Horde_Imap_Client_Fetch_Query {
 		$partsQuery = new Horde_Imap_Client_Fetch_Query();
+		$partsQuery->fullText(['peek' => true]);
 		foreach ($structure->partIterator() as $part) {
 			/** @var Horde_Mime_Part $part */
 			if ($part->getMimeId() === '0') {

@@ -67,6 +67,7 @@ OC.L10N.register(
     "Yesterday" : "Ièr",
     "Last week" : "La setmana passada",
     "Last month" : "Lo mes passat",
+    "No results" : "Cap de resultat",
     "Favorites" : "Favorits",
     "Other" : "Autre",
     "Link copied" : "Ligam copiat",
@@ -84,6 +85,7 @@ OC.L10N.register(
     "Retry" : "Tornar ensajar",
     "Copy to clipboard" : "Copiar dins lo quichapapièrs",
     "Add" : "Apondre",
+    "Collapse" : "Replegar",
     "Clear" : "Escafar",
     "Close" : "Tampar",
     "Body" : "Còs",
@@ -126,6 +128,7 @@ OC.L10N.register(
     "Error while sharing file" : "Error pendent lo partiment del fichièr",
     "{from}\n{subject}" : "{from}\n{subject}",
     "Message sent" : "Messatge mandat",
+    "Date:" : "Data :",
     "Error loading message" : "Error al moment del cargament del messatge",
     "Choose a file to add as attachment" : "Causissètz un fichièr de jónher al messatge"
 },

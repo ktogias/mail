@@ -6,12 +6,14 @@
 import { describe, expect, it } from 'vitest'
 import { findShadowedUnreadCopies } from '../../../util/shadowedCopies.js'
 
-const envelope = (databaseId, messageId, seen, accountId = 4) => ({
-	databaseId,
-	messageId,
-	accountId,
-	flags: { seen },
-})
+function envelope(databaseId, messageId, seen, accountId = 4) {
+	return {
+		databaseId,
+		messageId,
+		accountId,
+		flags: { seen },
+	}
+}
 
 describe('shadowed copies', () => {
 	it('finds the unread twin the thread view hides', () => {

@@ -45,6 +45,7 @@
 					:loading-more="false"
 					:load-more-button="false"
 					:skip-transition="skipListTransition"
+					:date-grouped="true"
 					@delete="onDelete" />
 			</div>
 		</template>
@@ -519,7 +520,7 @@ export default {
 			this.loadingCacheInitialization = true
 			this.error = false
 
-			logger.debug(`syncing folder ${this.mailbox.databaseId} (${this.query}) during cache initalization`)
+			logger.debug(`syncing folder ${this.mailbox.databaseId} (${this.query}) during cache initialization`)
 			// Missing `return` and `.catch()` here previously meant: (1) the
 			// caller's `await this.initializeCache()` awaited `undefined`,
 			// not this chain, so its own try/catch never engaged either;

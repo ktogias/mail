@@ -14,7 +14,6 @@ use OCA\Mail\Contracts\IDkimService;
 use OCA\Mail\Contracts\IDkimValidator;
 use OCA\Mail\Db\Mailbox;
 use OCA\Mail\Exception\MessageSourceUnavailableException;
-use OCA\Mail\Exception\ServiceException;
 use OCA\Mail\IMAP\IMAPClientFactory;
 use OCA\Mail\IMAP\MessageMapper;
 use OCP\ICache;

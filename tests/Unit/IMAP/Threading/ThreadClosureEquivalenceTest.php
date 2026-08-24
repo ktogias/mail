@@ -113,7 +113,9 @@ class ThreadClosureEquivalenceTest extends TestCase {
 	 */
 	private function repository(array $storedThreadIds): ThreadClosureRepository {
 		return new class($storedThreadIds) implements ThreadClosureRepository {
-			public function __construct(private array $stored) {
+			public function __construct(
+				private array $stored,
+			) {
 			}
 
 			public function threadRootsOfMessages(array $messageIds): array {

@@ -46,6 +46,7 @@
     "Newest first" : "Primero lo nuevo",
     "Oldest first" : "Primero lo antiguo",
     "Ok" : "D'acuerdu",
+    "Manually" : "Manualmente",
     "Shared with me" : "Compartióse conmigo",
     "Privacy" : "Privacidá",
     "Security" : "Seguranza",
@@ -145,6 +146,7 @@
     "Last month" : "El mes anterior",
     "Choose target folder" : "Escoyer la carpeta de destín",
     "No more submailboxes in here" : "Equí nun hai más sobandexes",
+    "No results" : "Nun hai nengún resultáu",
     "Favorites" : "Favoritos",
     "Important info" : "Información importante",
     "Forward" : "Avanzar",
@@ -203,8 +205,8 @@
     "New Contact" : "Contautu nuevu",
     "Copy to clipboard" : "Copiar nel cartafueyu",
     "Add" : "Amestar",
-    "Show less" : "Amosar menos",
-    "Show more" : "Amosar más",
+    "Collapse" : "Contrayer",
+    "Expand" : "Espander",
     "Clear" : "Borrar",
     "Close" : "Zarrar",
     "Search parameters" : "Parámetros de busca",
@@ -310,8 +312,11 @@
     "Could not load your message" : "Nun se pudo cargar el mensaxe",
     "Could not load the desired message" : "Nun se pudo cargar el mensaxe deseáu",
     "Could not load the message" : "Nun se pudo cargar el mensaxe",
+    "Date:" : "Data:",
     "Tag name cannot be empty" : "El nome de la etiqueta nun pue tar baleru",
     "Tag already exists" : "La etiqueta yá esiste",
-    "Error loading message" : "Hebo un error al cargar el mensaxe"
+    "Error loading message" : "Hebo un error al cargar el mensaxe",
+    "Show less" : "Amosar menos",
+    "Show more" : "Amosar más"
 },"pluralForm" :"nplurals=2; plural=(n != 1);"
 }

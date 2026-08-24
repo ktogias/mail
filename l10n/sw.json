@@ -28,6 +28,7 @@
     "Newest first" : "Mpya kwanza",
     "Oldest first" : "Ya zamani kwanza",
     "Ok" : "Sawa",
+    "Manually" : "ya kawaida",
     "Shared with me" : "Shared with me",
     "Privacy" : "Faragha",
     "Security" : "Ulinzi",
@@ -92,6 +93,7 @@
     "Last week" : "Wiki iliyopita",
     "Last month" : "Mwezi uliopita",
     "Choose target folder" : "Chagua kasha lililolengwa",
+    "No results" : "Hakuna matokeo",
     "Favorites" : "Vipendwa",
     "Other" : "Mengine",
     "Direct link copied to clipboard" : "Kiungio cha moja kwa moja kimenakiliwa kwenye ubao wa kunakili",
@@ -124,8 +126,8 @@
     "Message" : "Message",
     "Copy to clipboard" : "Nakili kwenye ubao wa kunakili",
     "Add" : "Ongeza",
-    "Show less" : "Show less",
-    "Show more" : "Show more",
+    "Collapse" : "Vunja",
+    "Expand" : "Panua",
     "Clear" : "Futa",
     "Close" : "Funga",
     "Body" : "Body",
@@ -180,7 +182,10 @@
     "Nextcloud Mail" : "Nextcloud Mail",
     "Discard changes" : "Discard changes",
     "Message sent" : "Ujumbe umetumwa",
+    "Date:" : "Tarehe:",
+    "Show less" : "Show less",
+    "Show more" : "Show more"
+},"pluralForm" :"nplurals=2; plural=(n != 1);",
     "Choose a file to add as attachment" : "Chagua faili kuongeza kama kiambatanisho",
     "Choose a file to share as a link" : "Chagua faili kushirikisha kama kiungo"
-},"pluralForm" :"nplurals=2; plural=(n != 1);"
 }

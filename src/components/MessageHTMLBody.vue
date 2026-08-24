@@ -43,12 +43,16 @@
 			</NcButton>
 		</div>
 		<div id="message-container" :class="{ scroll: !fullHeight }">
+			<!-- allow-scripts: the server-injected iframe-resizer child must run to size the frame to its content.
+			     allow-same-origin: parent JS accesses contentDocument directly (image unblocking, resize, print).
+			     allow-popups + allow-popups-to-escape-sandbox: email links must open as normal tabs, not sandboxed ones. -->
 			<iframe
 				ref="iframe"
 				class="message-frame"
 				:title="t('mail', 'Message frame')"
 				:src="url"
 				seamless
+				sandbox="allow-scripts allow-same-origin allow-popups allow-popups-to-escape-sandbox"
 				@load="onMessageFrameLoad" />
 		</div>
 	</div>
@@ -57,7 +61,6 @@
 <script>
 import { loadState } from '@nextcloud/initial-state'
 import { NcActionButton as ActionButton, NcActions as Actions, NcButton } from '@nextcloud/vue'
-import PrintScout from 'printscout'
 import IconDomain from 'vue-material-design-icons/Domain.vue'
 import IconMail from 'vue-material-design-icons/EmailOutline.vue'
 import IconImage from 'vue-material-design-icons/ImageSizeSelectActual.vue'
@@ -66,8 +69,8 @@ import NeedsTranslationInfo from './NeedsTranslationInfo.vue'
 import logger from '../logger.js'
 import { needsTranslation } from '../service/AiIntergrationsService.js'
 import { trustSender } from '../service/TrustedSenderService.js'
+import { isPrintShortcut } from '../util/printMessage.ts'
 
-const scout = new PrintScout()
 const MESSAGE_HTML_READY = 'nextcloud-mail:message-html-ready'
 
 // How long to wait for the frame to say it is ready before giving up on it.
@@ -122,7 +125,6 @@ export default {
 			isSenderTrusted: this.message.isSenderTrusted,
 			needsTranslation: false,
 			enabledFreePrompt: loadState('mail', 'llm_freeprompt_available', false),
-			printOriginalHeight: null,
 			frameTimedOut: false,
 		}
 	},
@@ -138,8 +140,6 @@ export default {
 	},
 
 	beforeMount() {
-		scout.on('beforeprint', this.onBeforePrint)
-		scout.on('afterprint', this.onAfterPrint)
 		window.addEventListener('message', this.onMessageFrameReady)
 	},
 
@@ -158,11 +158,16 @@ export default {
 		// keys -- a component using beforeUnmount()/unmounted() here
 		// would silently never have it called at all. Confirmed directly
 		// against the installed Vue source, not just empirically.
-		scout.off('beforeprint', this.onBeforePrint)
-		scout.off('afterprint', this.onAfterPrint)
 		window.removeEventListener('message', this.onMessageFrameReady)
 		clearTimeout(this.frameReadyTimeout)
 		this.resizeObserver?.disconnect()
+		// The frame's document goes away with the frame, so this is housekeeping
+		// rather than a fix for a leak. It is done because the listener is added
+		// to a document this component does not own: nothing guarantees the frame
+		// is torn down right away, and until it is, a keydown in it would still
+		// reach a destroyed component.
+		this.getIframeDoc()?.removeEventListener('keydown', this.onFrameKeyDown)
+		this.$refs.iframe?.iFrameResizer?.close()
 	},
 
 	methods: {
@@ -197,7 +202,7 @@ export default {
 
 		getIframeDoc() {
 			const iframe = this.$refs.iframe
-			return iframe.contentDocument || iframe.contentWindow.document
+			return iframe?.contentDocument ?? iframe?.contentWindow?.document ?? null
 		},
 
 		onMessageFrameReady(event) {
@@ -223,6 +228,19 @@ export default {
 
 		prepareMessageFrame() {
 			const iframeDoc = this.getIframeDoc()
+
+			// A frame has a window of its own, and a keydown is delivered to the
+			// window of whatever is focused. So while the reader has the message
+			// focused, the app's own window listener never sees the print
+			// shortcut and the browser would take it instead.
+			//
+			// Registered before the guard below, and deliberately: whether this
+			// document has already been PREPARED says nothing about whether it
+			// can be typed into, and a frame still showing about:blank is
+			// exactly where the shortcut would otherwise escape to the browser.
+			// Re-adding the same listener reference is a no-op per the DOM spec.
+			iframeDoc?.addEventListener?.('keydown', this.onFrameKeyDown)
+
 			if (
 				!iframeDoc?.body
 				|| iframeDoc.location?.href === 'about:blank'
@@ -295,17 +313,17 @@ export default {
 			}
 		},
 
-		onBeforePrint() {
-			const iframe = this.$refs.iframe
-			this.printOriginalHeight = iframe.style.height
-			iframe.style.setProperty('height', `${this.getIframeDoc().body.scrollHeight}px`, 'important')
-		},
-
-		onAfterPrint() {
-			if (this.printOriginalHeight !== null) {
-				this.$refs.iframe.style.height = this.printOriginalHeight
-				this.printOriginalHeight = null
+		/**
+		 * Hand the print shortcut to the app, from inside the message frame.
+		 *
+		 * @param {KeyboardEvent} event the frame's keydown event
+		 */
+		onFrameKeyDown(event) {
+			if (!isPrintShortcut(event)) {
+				return
 			}
+			event.preventDefault()
+			this.$emit('print-shortcut')
 		},
 
 		displayIframe() {
@@ -350,7 +368,7 @@ export default {
 }
 
 // account for 12px (was 8) margin on iframe body
-// should be 12px so it maches the rest of the content
+// should be 12px so it matches the rest of the content
 .html-message-body {
 	margin : 2px calc(var(--default-grid-baseline) * 3) 0 calc(var(--default-grid-baseline) * 14);
 	background-color: #FFFFFF;
@@ -407,4 +425,5 @@ export default {
 :deep(.button-vue--vue-tertiary) {
 	color: var(--color-text-maxcontrast);
 }
+
 </style>

@@ -17,9 +17,9 @@ use OCA\Mail\Account;
 use OCA\Mail\BackgroundJob\BackfillJob;
 use OCA\Mail\Db\MailAccount;
 use OCA\Mail\Db\Mailbox;
-use OCA\Mail\IMAP\ImapWorkClass;
 use OCA\Mail\Exception\IncompleteSyncException;
 use OCA\Mail\Exception\MailboxLockedException;
+use OCA\Mail\IMAP\ImapWorkClass;
 use OCP\AppFramework\Db\DoesNotExistException;
 use OCP\IUser;
 

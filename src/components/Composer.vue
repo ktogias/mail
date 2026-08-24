@@ -3,7 +3,11 @@
   - SPDX-License-Identifier: AGPL-3.0-or-later
 -->
 <template>
-	<div class="message-composer">
+	<div
+		class="message-composer"
+		@dragover.prevent
+		@drop="onDrop"
+		@paste="onPaste">
 		<NcReferencePickerModal
 			v-if="isPickerAvailable && isPickerOpen"
 			id="reference-picker"
@@ -350,14 +354,6 @@
 							t('mail', 'Add attachment from Files')
 						}}
 					</ActionButton>
-					<ActionButton :close-after-click="true" :disabled="encrypt" @click="onAddCloudAttachmentLink">
-						<template #icon>
-							<IconPublic :size="20" />
-						</template>
-						{{
-							t('mail', 'Add share link from Files')
-						}}
-					</ActionButton>
 				</Actions>
 
 				<Actions
@@ -522,7 +518,6 @@ import { NcReferencePickerModal } from '@nextcloud/vue/components/NcRichText'
 import ChevronLeft from 'vue-material-design-icons/ChevronLeft.vue'
 import IconFolder from 'vue-material-design-icons/FolderOutline.vue'
 import IconFormat from 'vue-material-design-icons/FormatSize.vue'
-import IconPublic from 'vue-material-design-icons/Link.vue'
 import Paperclip from 'vue-material-design-icons/Paperclip.vue'
 import SendClock from 'vue-material-design-icons/SendClockOutline.vue'
 import Send from 'vue-material-design-icons/SendOutline.vue'
@@ -546,7 +541,7 @@ import { EDITOR_MODE_HTML, EDITOR_MODE_TEXT } from '../store/constants.js'
 import useMainStore from '../store/mainStore.js'
 import { parseEmailList } from '../util/emailAddress.js'
 import { formatDateTime } from '../util/formatDateTime.js'
-import { detect, html, toHtml, toPlain } from '../util/text.js'
+import { containsImage, detect, html, toHtml, toPlain } from '../util/text.js'
 import { showError, showWarning } from '../util/toast.js'
 import textBlockSvg from './../../img/text_snippet.svg'
 
@@ -573,7 +568,6 @@ export default {
 		Download,
 		IconUpload,
 		IconFolder,
-		IconPublic,
 		IconLinkPicker,
 		NcSelect,
 		NcIconSvgWrapper,
@@ -1212,7 +1206,10 @@ export default {
 			}
 			// Only overwrite editormode if body is empty
 			if (previous === NO_ALIAS_SET && (!this.body || this.body.value === '')) {
-				this.editorMode = this.selectedAlias.editorMode
+				// Pick the mode before the editor exists so insertSignature doesn't have to re-create it
+				this.editorMode = containsImage(toHtml(detect(this.selectedAlias.signature)).value)
+					? EDITOR_MODE_HTML
+					: this.selectedAlias.editorMode
 			}
 		},
 
@@ -1301,6 +1298,22 @@ export default {
 		},
 
 		insertSignature() {
+			const signature = toHtml(detect(this.selectedAlias.signature)).value
+
+			/**
+			 * Plain text can't carry the images of a signature, they would be
+			 * dropped when the body is converted on submit. Switch to rich text
+			 * instead of losing them.
+			 *
+			 * As editorMode is the key for the TextEditor component the change
+			 * destroys the current instance and the signature is inserted via
+			 * the onEditorReady event of the new instance.
+			 */
+			if (this.editorPlainText && containsImage(signature)) {
+				this.editorMode = EDITOR_MODE_HTML
+				return
+			}
+
 			let trigger
 
 			if (this.changeSignature) {
@@ -1312,7 +1325,7 @@ export default {
 			this.$refs.editor.editorExecute(
 				'insertSignature',
 				trigger,
-				toHtml(detect(this.selectedAlias.signature)).value,
+				signature,
 				this.selectedAlias.signatureAboveQuote,
 			)
 
@@ -1411,10 +1424,6 @@ export default {
 		onAddCloudAttachment() {
 			this.bus.emit('on-add-cloud-attachment')
 			this.saveDraftDebounced()
-		},
-
-		onAddCloudAttachmentLink() {
-			this.bus.emit('on-add-cloud-attachment-link')
 		},
 
 		onAutocomplete(term, addressType) {
@@ -1753,6 +1762,42 @@ export default {
 			}
 
 			return option.email
+		},
+
+		onDrop(event) {
+			event.preventDefault()
+
+			const files = Array.from(event.dataTransfer.files)
+
+			if (!files.length) {
+				return
+			}
+
+			this.bus.emit('on-add-local-files', files)
+			this.saveDraftDebounced()
+		},
+
+		onPaste(event) {
+			const files = []
+
+			for (const item of event.clipboardData.items) {
+				if (item.kind === 'file') {
+					const file = item.getAsFile()
+
+					if (file) {
+						files.push(file)
+					}
+				}
+			}
+
+			if (!files.length) {
+				return
+			}
+
+			event.preventDefault()
+
+			this.bus.emit('on-add-local-files', files)
+			this.saveDraftDebounced()
 		},
 
 	},

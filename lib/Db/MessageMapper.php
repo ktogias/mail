@@ -33,13 +33,13 @@ use OCP\IUser;
 use RuntimeException;
 use Throwable;
 use function array_chunk;
-use function array_unique;
-use function array_values;
 use function array_combine;
 use function array_keys;
 use function array_map;
 use function array_merge;
 use function array_udiff;
+use function array_unique;
+use function array_values;
 use function get_class;
 use function in_array;
 use function ltrim;
@@ -1561,9 +1561,9 @@ class MessageMapper extends QBMapper {
 
 	/**
 	 * @param array<string, int[]>|null $uidsByText one UID set PER free-text
-	 *        word, so a word may be satisfied by the body independently of the
-	 *        others. $uids is a single set meaning "every body term present"
-	 *        and cannot express that.
+	 *                                              word, so a word may be satisfied by the body independently of the
+	 *                                              others. $uids is a single set meaning "every body term present"
+	 *                                              and cannot express that.
 	 */
 	public function findIdsByQuery(Mailbox $mailbox, SearchQuery $query, string $sortOrder, ?int $limit, ?array $uids = null, bool $uidsRestrict = false, bool $prioritySplit = false, ?array $uidsByText = null): array {
 		$qb = $this->db->getQueryBuilder();
@@ -1574,7 +1574,6 @@ class MessageMapper extends QBMapper {
 		$select = $qb->select(['m.id', 'm.sent_at']);
 
 		$select->from($this->getTableName(), 'm');
-
 
 		$select->where(
 			$qb->expr()->eq('m.mailbox_id', $qb->createNamedParameter($mailbox->getId()), IQueryBuilder::PARAM_INT)
@@ -2375,13 +2374,14 @@ class MessageMapper extends QBMapper {
 		if ($ids === []) {
 			return [];
 		}
+		$direction = strtoupper($sortOrder) === 'DESC' ? 'DESC' : 'ASC';
 		$qb = $this->db->getQueryBuilder();
 		$qb->select('*')
 			->from($this->getTableName())
 			->where(
 				$qb->expr()->in('id', $qb->createParameter('ids'))
 			)
-			->orderBy($orderBy, $sortOrder);
+			->orderBy($orderBy, $direction);
 
 		$results = [];
 		foreach (array_chunk($ids, 1000) as $chunk) {

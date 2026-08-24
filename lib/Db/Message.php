@@ -73,6 +73,8 @@ use function json_encode;
  * @method void setEncrypted(bool|null $encrypted)
  * @method bool getMentionsMe()
  * @method void setMentionsMe(bool $isMentionned)
+ * @method string|null getRemoteId()
+ * @method void setRemoteId(?string $remoteId)
  */
 class Message extends Entity implements JsonSerializable {
 	private const MUTABLE_FLAGS = [
@@ -117,6 +119,7 @@ class Message extends Entity implements JsonSerializable {
 	protected $imipProcessed = false;
 	protected $imipError = false;
 	protected $mentionsMe = false;
+	protected ?string $remoteId = null;
 
 	/**
 	 * @var bool|null
@@ -471,6 +474,7 @@ class Message extends Entity implements JsonSerializable {
 			'databaseId' => $this->getId(),
 			'syncState' => $this->getSyncState(),
 			'uid' => $this->getUid(),
+			'remoteId' => $this->getRemoteId(),
 			'subject' => $this->getSubject(),
 			'dateInt' => $this->getSentAt(),
 			'flags' => [

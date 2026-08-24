@@ -54,6 +54,7 @@ import {
 } from 'ckeditor5'
 import { getLinkWithPicker, searchProvider } from '@nextcloud/vue/components/NcRichText'
 import TextDirectionPlugin from '../ckeditor/direction/TextDirectionPlugin.js'
+import ImageDowncastPlugin from '../ckeditor/image/ImageDowncastPlugin.ts'
 import MailPlugin from '../ckeditor/mail/MailPlugin.js'
 import QuotePlugin from '../ckeditor/quote/QuotePlugin.js'
 import SignaturePlugin from '../ckeditor/signature/SignaturePlugin.js'
@@ -131,12 +132,12 @@ export default {
 			Mention,
 			Link,
 			FindAndReplace,
-			GeneralHtmlSupport,
 		]
 		const toolbar = ['undo', 'redo']
 
 		if (this.html) {
 			plugins.push(...[
+				GeneralHtmlSupport,
 				Heading,
 				Alignment,
 				Bold,
@@ -150,6 +151,7 @@ export default {
 				Image,
 				ImageUpload,
 				ImageResize,
+				ImageDowncastPlugin,
 				Font,
 				RemoveFormat,
 				Base64UploadAdapter,
@@ -199,6 +201,11 @@ export default {
 				plugins,
 				toolbar,
 				language: 'en',
+				image: {
+					// A percentage would be relative to the recipient's unknown viewport.
+					resizeUnit: 'px',
+				},
+
 				mention: {
 					feeds: [
 						{
@@ -860,7 +867,7 @@ https://github.com/ckeditor/ckeditor5/issues/1142
 	color: var(--color-main-text);
 }
 
-/* We need the paragraph field a bit smaller so it doesnt break the toolbar for signature */
+/* We need the paragraph field a bit smaller so it doesn't break the toolbar for signature */
 .ck.ck-dropdown.ck-heading-dropdown .ck-dropdown__button .ck-button__label {
 	width: 6em !important;
 }

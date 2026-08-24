@@ -49,6 +49,7 @@ use OCP\AppFramework\Http\TemplateResponse;
 use OCP\AppFramework\Http\ZipResponse;
 use OCP\Files\Folder;
 use OCP\Files\GenericFileException;
+use OCP\Files\IFilenameValidator;
 use OCP\Files\IMimeTypeDetector;
 use OCP\Files\NotPermittedException;
 use OCP\ICache;
@@ -91,6 +92,7 @@ class MessagesController extends Controller {
 		private ItineraryService $itineraryService,
 		private ?string $userId,
 		private ?Folder $userFolder,
+		private IFilenameValidator $filenameValidator,
 		private LoggerInterface $logger,
 		IL10N $l10n,
 		IMimeTypeDetector $mimeTypeDetector,
@@ -275,7 +277,7 @@ class MessagesController extends Controller {
 				$message = $this->mailManager->getMessage($effectiveUserId, $id);
 				$mailbox = $this->mailManager->getMailbox($effectiveUserId, $message->getMailboxId());
 				$account = $this->accountService->find($effectiveUserId, $mailbox->getAccountId());
-			} catch (DoesNotExistException | ClientException) {
+			} catch (DoesNotExistException|ClientException) {
 				// Not ours, or gone. Prefetch never reports on someone else's
 				// mail, not even by admitting it exists.
 				$skipped++;
@@ -785,6 +787,76 @@ class MessagesController extends Controller {
 			$message->getSubject() . '.eml',
 			'message/rfc822',
 		);
+	}
+
+	/**
+	 * Save a whole message as an .eml file in the local storage
+	 *
+	 * @NoAdminRequired
+	 *
+	 * @param int $id
+	 * @param string $targetPath
+	 *
+	 * @return Response
+	 *
+	 * @throws ClientException
+	 * @throws GenericFileException
+	 * @throws NotPermittedException
+	 * @throws LockedException
+	 * @throws ServiceException
+	 */
+	#[TrapError]
+	public function saveFile(int $id, string $targetPath): Response {
+		if ($this->userId === null) {
+			return new JSONResponse([], Http::STATUS_UNAUTHORIZED);
+		}
+		if ($this->userFolder === null) {
+			return new JSONResponse([], Http::STATUS_INTERNAL_SERVER_ERROR);
+		}
+		if (!$this->userFolder->nodeExists($targetPath)) {
+			return new JSONResponse([], Http::STATUS_BAD_REQUEST);
+		}
+		if (!($this->userFolder->get($targetPath) instanceof Folder)) {
+			return new JSONResponse([], Http::STATUS_BAD_REQUEST);
+		}
+		try {
+			$effectiveUserId = $this->delegationService->resolveMessageUserId($id, $this->userId);
+			$message = $this->mailManager->getMessage($effectiveUserId, $id);
+			$mailbox = $this->mailManager->getMailbox($effectiveUserId, $message->getMailboxId());
+			$account = $this->accountService->find($effectiveUserId, $mailbox->getAccountId());
+		} catch (DoesNotExistException $e) {
+			return new JSONResponse([], Http::STATUS_FORBIDDEN);
+		}
+
+		$client = $this->clientFactory->getClient($account);
+		try {
+			$source = $this->mailManager->getSource(
+				$client,
+				$account,
+				$mailbox->getName(),
+				$message->getUid()
+			);
+		} finally {
+			$client->logout();
+		}
+
+		if ($source === null) {
+			return new JSONResponse([], Http::STATUS_INTERNAL_SERVER_ERROR);
+		}
+
+		$fileName = $this->filenameValidator->sanitizeFilename($message->getSubject());
+		$fileExtension = 'eml';
+		$fullPath = "$targetPath/$fileName.$fileExtension";
+		$counter = 2;
+		while ($this->userFolder->nodeExists($fullPath)) {
+			$fullPath = "$targetPath/$fileName ($counter).$fileExtension";
+			$counter++;
+		}
+
+		$newFile = $this->userFolder->newFile($fullPath);
+		$newFile->putContent($source);
+
+		return new JSONResponse();
 	}
 
 	/**

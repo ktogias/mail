@@ -11,11 +11,13 @@ namespace OCA\Mail\Tests\Unit\Integration;
 
 use ChristophWurst\Nextcloud\Testing\TestCase;
 use OCA\Mail\Account;
+use OCA\Mail\ConfigLexicon;
 use OCA\Mail\Db\MailAccount;
 use OCA\Mail\Integration\MicrosoftIntegration;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\Http\Client\IClientService;
 use OCP\Http\Client\IResponse;
+use OCP\IAppConfig;
 use OCP\ICacheFactory;
 use OCP\IConfig;
 use OCP\IMemcache;
@@ -27,6 +29,7 @@ use Psr\Log\LoggerInterface;
 class MicrosoftIntegrationTest extends TestCase {
 	private ITimeFactory&MockObject $timeFactory;
 	private IConfig&MockObject $config;
+	private IAppConfig&MockObject $appConfig;
 	private ICrypto&MockObject $crypto;
 	private IClientService&MockObject $clientService;
 	private IURLGenerator&MockObject $urlGenerator;
@@ -40,6 +43,7 @@ class MicrosoftIntegrationTest extends TestCase {
 
 		$this->timeFactory = $this->createMock(ITimeFactory::class);
 		$this->config = $this->createMock(IConfig::class);
+		$this->appConfig = $this->createMock(IAppConfig::class);
 		$this->crypto = $this->createMock(ICrypto::class);
 		$this->clientService = $this->createMock(IClientService::class);
 		$this->urlGenerator = $this->createMock(IURLGenerator::class);
@@ -50,12 +54,13 @@ class MicrosoftIntegrationTest extends TestCase {
 
 		$this->integration = new MicrosoftIntegration(
 			$this->timeFactory,
-			$this->config,
+			$this->appConfig,
 			$this->crypto,
 			$this->clientService,
 			$this->urlGenerator,
 			$this->logger,
 			$this->cacheFactory,
+			$this->config,
 		);
 	}
 
@@ -74,10 +79,10 @@ class MicrosoftIntegrationTest extends TestCase {
 		$this->timeFactory->method('getTime')->willReturn(1000);
 		$this->crypto->method('decrypt')->willReturnArgument(0);
 		$this->crypto->method('encrypt')->willReturnArgument(0);
-		$this->config->method('getAppValue')->willReturnMap([
-			['mail', 'microsoft_oauth_tenant_id', '', 'tenant-id'],
-			['mail', 'microsoft_oauth_client_id', '', 'client-id'],
-			['mail', 'microsoft_oauth_client_secret', '', 'encrypted-client-secret'],
+		$this->appConfig->method('getValueString')->willReturnMap([
+			['mail', ConfigLexicon::MICROSOFT_OAUTH_TENANT_ID, '', false, 'tenant-id'],
+			['mail', ConfigLexicon::MICROSOFT_OAUTH_CLIENT_ID, '', false, 'client-id'],
+			['mail', ConfigLexicon::MICROSOFT_OAUTH_CLIENT_SECRET, '', false, 'encrypted-client-secret'],
 		]);
 		$this->lockCache->expects(self::once())
 			->method('add')
@@ -147,10 +152,10 @@ class MicrosoftIntegrationTest extends TestCase {
 		$this->timeFactory->method('getTime')->willReturn(1000);
 		$this->crypto->method('decrypt')->willReturnArgument(0);
 		$this->crypto->method('encrypt')->willReturnArgument(0);
-		$this->config->method('getAppValue')->willReturnMap([
-			['mail', 'microsoft_oauth_tenant_id', '', 'tenant-id'],
-			['mail', 'microsoft_oauth_client_id', '', 'client-id'],
-			['mail', 'microsoft_oauth_client_secret', '', 'encrypted-client-secret'],
+		$this->appConfig->method('getValueString')->willReturnMap([
+			['mail', ConfigLexicon::MICROSOFT_OAUTH_TENANT_ID, '', false, 'tenant-id'],
+			['mail', ConfigLexicon::MICROSOFT_OAUTH_CLIENT_ID, '', false, 'client-id'],
+			['mail', ConfigLexicon::MICROSOFT_OAUTH_CLIENT_SECRET, '', false, 'encrypted-client-secret'],
 		]);
 		$mailAccount = new MailAccount();
 		$mailAccount->setId(21);

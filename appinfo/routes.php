@@ -234,6 +234,11 @@ return [
 			'verb' => 'POST'
 		],
 		[
+			'name' => 'messages#saveFile',
+			'url' => '/api/messages/{id}/file',
+			'verb' => 'POST'
+		],
+		[
 			'name' => 'messages#getBody',
 			'url' => '/api/messages/{id}/body',
 			'verb' => 'GET'

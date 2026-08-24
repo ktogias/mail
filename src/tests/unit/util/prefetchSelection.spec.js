@@ -15,10 +15,12 @@ import {
  * @param {number[]} unreadIds which ids are unread
  * @return {object[]} a list in display order, newest first
  */
-const list = (n, unreadIds = []) => Array.from({ length: n }, (_, i) => ({
-	databaseId: i + 1,
-	flags: { seen: !unreadIds.includes(i + 1) },
-}))
+function list(n, unreadIds = []) {
+	return Array.from({ length: n }, (_, i) => ({
+		databaseId: i + 1,
+		flags: { seen: !unreadIds.includes(i + 1) },
+	}))
+}
 
 describe('prefetch selection', () => {
 	it('warms both sides of the open message', () => {
