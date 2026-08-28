@@ -274,4 +274,93 @@ class ProviderTest extends TestCase {
 
 		self::assertSame('UTF-8', $builtQuery['charset']);
 	}
+
+	/**
+	 * The same rule, for the OR search that opens the two-step body search.
+	 *
+	 * That path was added after the charset fix above and did not carry it:
+	 * it declares UTF-8 on the parent query and then puts each term in a
+	 * SUB-query, and Horde only walks a charset into sub-queries when it is
+	 * asked to convert them -- which it is not, and which could not work
+	 * anyway, since the sub-queries are built afterwards.
+	 *
+	 * The gap stayed invisible for as long as no unified/priority search
+	 * asked for bodies. The moment one did (2026-08-28, .126) every Greek
+	 * body search on the one account with body search enabled answered
+	 * HTTP 500 with "String contains non-ASCII characters." -- thrown
+	 * client-side by build(), before any network I/O.
+	 */
+	public function testFindAnyMatchDeclaresUtf8OnEverySubQuerySoNonAsciiTermsDontThrow(): void {
+		$account = $this->account(4);
+		$mailbox = $this->mailbox(39, 'INBOX');
+		$imapClient = $this->createMock(Horde_Imap_Client_Socket::class);
+		$this->clientFactory->method('getClient')->willReturn($imapClient);
+		$this->cache->method('get')->willReturn(null);
+
+		$builtQuery = null;
+		$imapClient->method('search')->willReturnCallback(function ($mailboxName, $query) use (&$builtQuery) {
+			// build() is what Horde_Imap_Client_Base::search() calls, and it
+			// is where the rejection happens.
+			$builtQuery = $query->build();
+			return ['match' => (object)['ids' => []]];
+		});
+
+		// Mixed on purpose: the ASCII term alone would have passed either way,
+		// which is how a half-broken OR would look like a working one.
+		$this->provider->findAnyMatch($account, $mailbox, ['ifiroumelioti', 'εκθέματος']);
+
+		self::assertSame('UTF-8', $builtQuery['charset']);
+		// The Greek term does not appear in the string form: a non-ASCII
+		// criterion is sent as an IMAP literal, which prints as "()". Read it
+		// out of the command list instead, or this assertion would pass on a
+		// query that dropped the term entirely -- Horde SKIPS an empty
+		// sub-query in an OR rather than failing.
+		self::assertStringContainsString('εκθέματος', $this->literals($builtQuery['query']));
+	}
+
+	/**
+	 * Every literal/quoted string in a built command list, flattened.
+	 *
+	 * @param mixed $list a Horde_Imap_Client_Data_Format_List, or one entry
+	 */
+	private function literals($list): string {
+		$out = '';
+		foreach ($list as $entry) {
+			if ($entry instanceof \Traversable || is_array($entry)) {
+				$out .= $this->literals($entry);
+			} elseif ($entry instanceof \Horde_Imap_Client_Data_Format) {
+				// Not escape(): it refuses a value that has to go out as a
+				// literal, which is exactly what a non-ASCII term is. The raw
+				// cast is what carries the bytes.
+				$out .= (string)$entry . ' ';
+			} else {
+				$out .= (string)$entry . ' ';
+			}
+		}
+		return $out;
+	}
+
+	/**
+	 * And for step two, which restricts one term to the candidates. It sets
+	 * its charset on the query that carries the text, so it was never broken
+	 * -- asserted so that a future refactor into sub-queries cannot silently
+	 * reintroduce what findAnyMatch() just had.
+	 */
+	public function testFindMatchesWithinCandidatesDeclaresUtf8ForANonAsciiTerm(): void {
+		$account = $this->account(4);
+		$mailbox = $this->mailbox(39, 'INBOX');
+		$imapClient = $this->createMock(Horde_Imap_Client_Socket::class);
+		$this->clientFactory->method('getClient')->willReturn($imapClient);
+		$this->cache->method('get')->willReturn(null);
+
+		$builtQuery = null;
+		$imapClient->method('search')->willReturnCallback(function ($mailboxName, $query) use (&$builtQuery) {
+			$builtQuery = $query->build();
+			return ['match' => (object)['ids' => []]];
+		});
+
+		$this->provider->findMatchesWithinCandidates($account, $mailbox, 'εκθέματος', [1, 2, 3]);
+
+		self::assertSame('UTF-8', $builtQuery['charset']);
+	}
 }

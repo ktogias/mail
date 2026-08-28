@@ -137,6 +137,21 @@ class Provider {
 		$alternatives = [];
 		foreach ($terms as $term) {
 			$one = new Horde_Imap_Client_Search_Query();
+			// The charset belongs to the query that CARRIES the text, and
+			// each of these sub-queries carries its own. Declaring it on the
+			// parent does nothing for them: charset() only walks into
+			// sub-queries when asked to CONVERT them, which it is not here --
+			// and could not help regardless, since these are built after the
+			// parent's declaration.
+			//
+			// Without this line every non-ASCII term is rejected client-side
+			// by build(), before any network I/O, exactly as documented in
+			// convertMailQueryToHordeQuery(). That is not hypothetical: this
+			// OR-then-restrict path was added after the charset fix and did
+			// not carry it, so a Greek body search failed with "String
+			// contains non-ASCII characters." the first time one reached it
+			// (2026-08-28, HTTP 500 on mailbox 39).
+			$one->charset('UTF-8', false);
 			$one->text($term, true);
 			$alternatives[] = $one;
 		}
