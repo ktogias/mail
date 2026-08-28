@@ -370,6 +370,78 @@ class MailSearchTest extends TestCase {
 	}
 
 	/**
+	 * The two-step body path is the one place a word can lose the messages it
+	 * should have matched while everything reports success, so what it
+	 * actually resolved has to be recorded -- per word, not in aggregate.
+	 */
+	public function testTheTwoStepBodyPathRecordsWhatEachWordResolvedTo(): void {
+		$account = $this->createMock(Account::class);
+		$account->method('getUserId')->willReturn('admin');
+		$account->method('getMailAccount')
+			->willReturn($this->accountWithBodySearch(true));
+		$mailbox = $this->cachedMailbox();
+		$query = new SearchQuery();
+		$query->addText('ifiroumelioti');
+		$query->addText('εκθέματος');
+		$query->addBody('ifiroumelioti');
+		$query->addBody('εκθέματος');
+		$this->filterStringParser->method('parse')->willReturn($query);
+		$this->imapSearchProvider->method('findAnyMatch')->willReturn([11, 12, 13]);
+		$this->imapSearchProvider->method('findMatchesWithinCandidates')
+			->willReturnCallback(static function ($account, $mailbox, string $text) {
+				// The reported shape: one word finds nothing in any body.
+				return $text === 'εκθέματος' ? [12] : [];
+			});
+		$this->messageMapper->method('findIdsByQuery')->willReturn([]);
+		$this->messageMapper->method('findByIds')->willReturn([]);
+		$this->previewEnhancer->method('process')->willReturnArgument(2);
+
+		$this->searchTelemetry->expects($this->once())
+			->method('recordBodyResolution')
+			->with(
+				$mailbox,
+				'two_step',
+				3,
+				// Lengths, never the words themselves.
+				[13, 9],
+				[0, 1],
+				0,
+				$this->anything(),
+			);
+
+		$this->search->findMessages($account, $mailbox, 'DESC', 'ifiroumelioti εκθέματος', null, null, null, null);
+	}
+
+	/**
+	 * And the fallback has to say so: past the candidate ceiling the search
+	 * stops asking per word and every word shares one combined body result,
+	 * which is a different set of failure modes.
+	 */
+	public function testTheCombinedFallbackIsRecordedAsSuch(): void {
+		$account = $this->createMock(Account::class);
+		$account->method('getUserId')->willReturn('admin');
+		$account->method('getMailAccount')
+			->willReturn($this->accountWithBodySearch(true));
+		$mailbox = $this->cachedMailbox();
+		$query = new SearchQuery();
+		$query->addText('needle');
+		$query->addBody('needle');
+		$this->filterStringParser->method('parse')->willReturn($query);
+		// Empty candidate set: nothing to restrict, so the combined search runs.
+		$this->imapSearchProvider->method('findAnyMatch')->willReturn([]);
+		$this->imapSearchProvider->method('findMatches')->willReturn([7, 8]);
+		$this->messageMapper->method('findIdsByQuery')->willReturn([]);
+		$this->messageMapper->method('findByIds')->willReturn([]);
+		$this->previewEnhancer->method('process')->willReturnArgument(2);
+
+		$this->searchTelemetry->expects($this->once())
+			->method('recordBodyResolution')
+			->with($mailbox, 'combined_fallback', 0, [6], [], 2, $this->anything());
+
+		$this->search->findMessages($account, $mailbox, 'DESC', 'needle', null, null, null, null);
+	}
+
+	/**
 	 * Free-text words are ANDed, so an empty list is the same picture
 	 * whether one word is a typo or every word is fine and only their
 	 * combination is not. Naming the words that match nothing is the

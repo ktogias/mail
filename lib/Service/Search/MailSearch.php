@@ -24,8 +24,11 @@ use OCP\AppFramework\Db\DoesNotExistException;
 use OCP\AppFramework\Utility\ITimeFactory;
 use OCP\IUser;
 use Throwable;
+use function array_map;
+use function array_values;
 use function count;
 use function hrtime;
+use function mb_strlen;
 
 class MailSearch implements IMailSearch {
 	/**
@@ -279,6 +282,9 @@ class MailSearch implements IMailSearch {
 		// The candidate count is only known after the OR, so the decision is
 		// made here rather than guessed: past the threshold the narrowing has
 		// not paid for itself and the combined set is used as before.
+		$resolutionStarted = hrtime(true);
+		$termLengths = array_map(static fn (string $text) => mb_strlen($text), $query->getTexts());
+
 		$texts = $query->getTexts();
 		if ($texts !== []) {
 			$candidates = $this->imapSearchProvider->findAnyMatch($account, $mailbox, $texts);
@@ -289,6 +295,15 @@ class MailSearch implements IMailSearch {
 						$account, $mailbox, $text, $candidates,
 					);
 				}
+				$this->searchTelemetry->recordBodyResolution(
+					$mailbox,
+					'two_step',
+					count($candidates),
+					$termLengths,
+					array_map(static fn (array $uids) => count($uids), array_values($uidsByText)),
+					0,
+					hrtime(true) - $resolutionStarted,
+				);
 				return $this->messageMapper->findIdsByQuery(
 					$mailbox, $query, $sortOrder, $limit, null, false, $prioritySplit, $uidsByText,
 				);
@@ -299,6 +314,15 @@ class MailSearch implements IMailSearch {
 			$account,
 			$mailbox,
 			$query
+		);
+		$this->searchTelemetry->recordBodyResolution(
+			$mailbox,
+			$texts === [] ? 'no_free_text' : 'combined_fallback',
+			isset($candidates) ? count($candidates) : 0,
+			$termLengths,
+			[],
+			count($fromImap),
+			hrtime(true) - $resolutionStarted,
 		);
 		return $this->messageMapper->findIdsByQuery($mailbox, $query, $sortOrder, $limit, $fromImap, false, $prioritySplit);
 	}

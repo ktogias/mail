@@ -16,6 +16,7 @@ use OCP\IMemcache;
 use Psr\Log\LoggerInterface;
 use Throwable;
 use function array_fill;
+use function array_filter;
 use function array_sum;
 use function ceil;
 use function count;
@@ -102,6 +103,75 @@ class SearchTelemetry {
 			$this->logger->warning('mail_search_slow_or_failed ' . json_encode($metric, JSON_THROW_ON_ERROR));
 		} catch (Throwable) {
 			// A custom logger is part of observability, never the search path.
+		}
+	}
+
+	/**
+	 * How a body search resolved its per-word UID sets.
+	 *
+	 * The two-step path -- one OR search for candidates, then one restricted
+	 * search per word -- is the only place in this app where a word can lose
+	 * the messages it should have matched while everything reports success.
+	 * A candidate set that comes back empty, or over the ceiling, or a single
+	 * word whose restricted search returns nothing, all end the same way: a
+	 * search that quietly returns fewer rows, status ok.
+	 *
+	 * That is not hypothetical. On 2026-08-28 `ifiroumelioti Ασυρματο δίκτυο`
+	 * returned nothing while `ifigenia Ασυρματο δίκτυο` found the message --
+	 * and the database half was verified sound, `ifiroumelioti` matching that
+	 * very message's To header. Reasoning from the outside got two hypotheses
+	 * wrong in a row, so this records what the path actually did.
+	 *
+	 * PII-safe like the rest of this class: word LENGTHS and set sizes, never
+	 * the words. A search term is the most sensitive thing here.
+	 *
+	 * @param string $branch 'two_step', 'combined_fallback' or 'headers_only'
+	 * @param int[] $termLengths one per free-text word, in query order
+	 * @param int[] $uidCounts how many UIDs each of those words resolved to,
+	 *                         parallel to $termLengths; empty for a branch
+	 *                         that does not resolve per word
+	 */
+	public function recordBodyResolution(
+		Mailbox $mailbox,
+		string $branch,
+		int $candidateCount,
+		array $termLengths,
+		array $uidCounts,
+		int $combinedUidCount,
+		int $durationNanoseconds,
+	): void {
+		$durationMs = (int)round(max(0, $durationNanoseconds) / 1_000_000);
+
+		// A word that resolved to nothing is the interesting case, and it is
+		// invisible in the search's own metric: the row count it produces is
+		// indistinguishable from "there really was nothing".
+		$starvedWords = count(array_filter($uidCounts, static fn (int $count) => $count === 0));
+		$interesting = $starvedWords > 0
+			|| $candidateCount === 0
+			|| $branch !== 'two_step'
+			|| $durationMs >= self::SLOW_SEARCH_MILLISECONDS;
+		if (!$interesting) {
+			return;
+		}
+
+		$metric = [
+			'event' => 'mail_search_body_resolution',
+			'phase' => 'body_resolution',
+			'accountId' => $mailbox->getAccountId(),
+			'mailboxId' => $mailbox->getId(),
+			'branch' => $branch,
+			'candidateCount' => $candidateCount,
+			'termLengths' => $termLengths,
+			'uidCounts' => $uidCounts,
+			'starvedWords' => $starvedWords,
+			'combinedUidCount' => $combinedUidCount,
+			'durationMs' => $durationMs,
+		];
+
+		try {
+			$this->logger->warning('mail_search_body_resolution ' . json_encode($metric, JSON_THROW_ON_ERROR));
+		} catch (Throwable) {
+			// Observability is never allowed to break the search itself.
 		}
 	}
 
