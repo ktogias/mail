@@ -199,6 +199,41 @@ export function fetchEnvelopes(accountId, mailboxId, query, cursor, limit, sort,
 	// signal without touching the network, so it never occupies a worker.
 	return isFreeTextSearch(query) ? textSearchLimit(run) : run()
 }
+/**
+ * Ask why a search that returned nothing returned nothing.
+ *
+ * Free-text words are ANDed -- every word has to appear somewhere -- so an
+ * empty list looks identical whether one word is a typo, only occurs in a
+ * message body that was not searched, or is simply written with different
+ * accents than the user typed. The server re-runs the same query one word at
+ * a time and names the words that match nothing.
+ *
+ * PREFETCH, not ACTIVE_CONTENT: this only ever runs once the list has already
+ * settled on empty, so it must never compete with a search the user is still
+ * typing. It queues rather than being dropped outright, which SPECULATIVE
+ * would be under foreground pressure -- and being dropped is exactly what this
+ * request must not be, since it is the whole explanation the user gets.
+ *
+ * @param {number|string} mailboxId the mailbox the empty search ran against
+ * @param {string} query the filter string that search used
+ * @param {string} view 'threaded' or 'singleton', same as the search
+ * @param {AbortSignal} [signal] aborts when the search is superseded
+ * @return {Promise<string[]>} the words matching nothing, in typed order
+ */
+export async function fetchUnmatchedSearchTerms(mailboxId, query, view, signal) {
+	const url = generateUrl('/apps/mail/api/messages/unmatched-terms')
+	const { data } = await axios.get(url, {
+		params: {
+			mailboxId,
+			filter: query,
+			view,
+		},
+		signal,
+		mailWorkClass: WorkClass.PREFETCH,
+	})
+	return data?.unmatched ?? []
+}
+
 export async function fetchThread(id, { signal, speculative = false } = {}) {
 	const url = generateUrl('apps/mail/api/messages/{id}/thread', {
 		id,

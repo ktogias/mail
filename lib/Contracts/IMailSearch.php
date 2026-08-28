@@ -69,4 +69,23 @@ interface IMailSearch {
 	 * @throws ServiceException
 	 */
 	public function findMessagesGlobally(IUser $user, SearchQuery $query, ?int $limit): array;
+
+	/**
+	 * Which of a search's free-text words match nothing in this mailbox.
+	 *
+	 * Only meaningful for a search that returned nothing: the words are
+	 * ANDed, so an empty list never says which word was responsible, and a
+	 * user cannot tell a typo from a word that is only in a message body from
+	 * a word whose accents or capitalisation differ from what they typed.
+	 *
+	 * @return string[] a subset of the query's free-text words, in the order
+	 *                  they were typed; empty when every word matches
+	 *                  something and only their combination does not
+	 *
+	 * @throws ClientException
+	 * @throws ServiceException
+	 */
+	public function findUnmatchedTexts(Mailbox $mailbox,
+		?string $filter,
+		?string $view): array;
 }

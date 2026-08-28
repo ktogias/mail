@@ -32,7 +32,10 @@
 			v-else-if="loadingCacheInitialization"
 			:hint="t('mail', 'Loading messages …')"
 			:slow-hint="t('mail', 'Indexing your messages. This can take a bit longer for larger folders.')" />
-		<EmptyMailboxSection v-else-if="(isPriorityInbox || searchQuery) && !hasMessages" key="empty" />
+		<EmptyMailboxSection
+			v-else-if="(isPriorityInbox || searchQuery) && !hasMessages"
+			key="empty"
+			:unmatched-terms="unmatchedSearchTerms" />
 		<EmptyMailbox v-else-if="!hasMessages" key="empty" />
 		<template v-else-if="hasGroupedEnvelopes && !isPriorityInbox">
 			<div v-for="[label, group] in visibleGroupEnvelopes" :key="label">
@@ -208,6 +211,9 @@ export default {
 			// requests would otherwise keep occupying server workers and
 			// their late responses would repaint over the newer results.
 			loadEnvelopesAbortController: undefined,
+			// Words of the current search that match nothing here, filled in
+			// only when a search comes back empty (explainEmptySearch()).
+			unmatchedSearchTerms: [],
 		}
 	},
 
@@ -429,6 +435,9 @@ export default {
 			// empty for the PREVIOUS query says nothing about this one, and
 			// leaving it set suppresses refills for the rest of the session.
 			this.refillExhaustedAt = -1
+			// An explanation of the PREVIOUS query is worse than none: it names
+			// words the user has already stopped searching for.
+			this.unmatchedSearchTerms = []
 			this.loadEnvelopes()
 		},
 
@@ -546,6 +555,45 @@ export default {
 				})
 		},
 
+		/**
+		 * Ask the server why an empty search is empty, and remember the answer.
+		 *
+		 * Only for a search that actually returned nothing: free-text words
+		 * are ANDed, so a list can be empty because a single word is a typo,
+		 * or only occurs in a message body that was not searched, or is
+		 * spelled with different accents than the user typed -- and all three
+		 * look identical. This turns that into "εκθέματος matched nothing".
+		 *
+		 * Fire-and-forget on purpose. It runs after the list has already
+		 * settled, must never delay it, and an explanation that fails to
+		 * arrive simply leaves the empty state as it was before.
+		 *
+		 * @param {AbortSignal} signal the load's signal, so a superseded
+		 *                             search never lands its explanation on
+		 *                             top of a newer one
+		 */
+		explainEmptySearch(signal) {
+			const query = this.searchQuery
+			if (!query || this.hasMessages) {
+				return
+			}
+
+			this.mainStore.fetchUnmatchedSearchTerms({
+				mailboxId: this.mailbox.databaseId,
+				query,
+				view: this.mainStore.getPreference('layout-message-view', 'threaded'),
+				signal,
+			}).then((terms) => {
+				// The user may have kept typing while this was in flight.
+				if (signal.aborted || this.searchQuery !== query) {
+					return
+				}
+				this.unmatchedSearchTerms = terms
+			}).catch((error) => {
+				logger.debug(`Could not explain the empty search "${query}"`, { error })
+			})
+		},
+
 		async loadEnvelopes() {
 			// Opening/switching a folder is a direct user action -- give
 			// it priority over the background watched-mailbox poller (see
@@ -583,6 +631,7 @@ export default {
 
 				this.syncedMailboxes.add(this.mailbox.databaseId + (this.searchQuery ?? ''))
 				this.loadingEnvelopes = false
+				this.explainEmptySearch(abortController.signal)
 			} catch (error) {
 				if (abortController.signal.aborted) {
 					// Superseded by a newer loadEnvelopes() (or the

@@ -11,6 +11,8 @@ namespace OCA\Mail\Tests\Unit\Service\Search;
 
 use ChristophWurst\Nextcloud\Testing\TestCase;
 use OCA\Mail\Account;
+use OCA\Mail\Contracts\IUserPreferences;
+use OCA\Mail\Db\MailAccount;
 use OCA\Mail\Db\Mailbox;
 use OCA\Mail\Db\Message;
 use OCA\Mail\Db\MessageMapper;
@@ -45,6 +47,8 @@ class MailSearchTest extends TestCase {
 
 	private SearchTelemetry&MockObject $searchTelemetry;
 
+	private IUserPreferences&MockObject $preferences;
+
 	protected function setUp(): void {
 		parent::setUp();
 
@@ -54,6 +58,7 @@ class MailSearchTest extends TestCase {
 		$this->previewEnhancer = $this->createMock(PreviewEnhancer::class);
 		$this->timeFactory = $this->createMock(ITimeFactory::class);
 		$this->searchTelemetry = $this->createMock(SearchTelemetry::class);
+		$this->preferences = $this->createMock(IUserPreferences::class);
 
 		$this->search = new MailSearch(
 			$this->filterStringParser,
@@ -61,6 +66,7 @@ class MailSearchTest extends TestCase {
 			$this->messageMapper,
 			$this->previewEnhancer,
 			$this->searchTelemetry,
+			$this->preferences,
 			$this->timeFactory
 		);
 	}
@@ -254,6 +260,8 @@ class MailSearchTest extends TestCase {
 		$mailbox->setSyncNewToken('abc');
 		$mailbox->setSyncChangedToken('def');
 		$mailbox->setSyncVanishedToken('ghi');
+		$account->method('getMailAccount')
+			->willReturn($this->accountWithBodySearch(true));
 		$query = new SearchQuery();
 		$query->addBody('my');
 		$query->addBody('search');
@@ -287,5 +295,143 @@ class MailSearchTest extends TestCase {
 		);
 
 		$this->assertCount(2, $messages);
+	}
+
+	private function accountWithBodySearch(bool $enabled): MailAccount {
+		$mailAccount = new MailAccount();
+		$mailAccount->setSearchBody($enabled);
+		return $mailAccount;
+	}
+
+	private function cachedMailbox(): Mailbox {
+		$mailbox = new Mailbox();
+		$mailbox->setSyncNewToken('abc');
+		$mailbox->setSyncChangedToken('def');
+		$mailbox->setSyncVanishedToken('ghi');
+		return $mailbox;
+	}
+
+	/**
+	 * The unified and priority inboxes fan one filter string out to every
+	 * account, so `body:` now arrives for accounts that never asked for it.
+	 * Each account has to decline for itself -- a body search is a
+	 * full-mailbox IMAP SEARCH, so honouring it would put seconds on every
+	 * account the user deliberately left switched off.
+	 */
+	public function testFindMessagesSkipsTheBodySearchForAnAccountThatOptedOut(): void {
+		$account = $this->createMock(Account::class);
+		$account->method('getUserId')->willReturn('admin');
+		$account->method('getMailAccount')
+			->willReturn($this->accountWithBodySearch(false));
+		$mailbox = $this->cachedMailbox();
+		$query = new SearchQuery();
+		$query->addBody('needle');
+		$this->filterStringParser->method('parse')->willReturn($query);
+		$this->preferences->method('getPreference')
+			->with('admin', 'search-priority-body', 'false')
+			->willReturn('false');
+		$this->imapSearchProvider->expects($this->never())
+			->method('findMatches');
+		$this->imapSearchProvider->expects($this->never())
+			->method('findAnyMatch');
+		$this->messageMapper->expects($this->once())
+			->method('findIdsByQuery')
+			->with($mailbox, $query, 'DESC', null, null, false, false)
+			->willReturn([]);
+		$this->messageMapper->method('findByIds')->willReturn([]);
+		$this->previewEnhancer->method('process')->willReturnArgument(2);
+
+		$this->search->findMessages($account, $mailbox, 'DESC', 'needle', null, null, null, null);
+	}
+
+	/**
+	 * The priority inbox's own toggle promises that bodies are searched
+	 * there, so it has to outrank an account that says no.
+	 */
+	public function testFindMessagesSearchesBodiesWhenOnlyThePreferenceIsOn(): void {
+		$account = $this->createMock(Account::class);
+		$account->method('getUserId')->willReturn('admin');
+		$account->method('getMailAccount')
+			->willReturn($this->accountWithBodySearch(false));
+		$mailbox = $this->cachedMailbox();
+		$query = new SearchQuery();
+		$query->addBody('needle');
+		$this->filterStringParser->method('parse')->willReturn($query);
+		$this->preferences->method('getPreference')
+			->with('admin', 'search-priority-body', 'false')
+			->willReturn('true');
+		$this->imapSearchProvider->expects($this->once())
+			->method('findMatches')
+			->willReturn([7]);
+		$this->messageMapper->method('findByIds')->willReturn([]);
+		$this->previewEnhancer->method('process')->willReturnArgument(2);
+
+		$this->search->findMessages($account, $mailbox, 'DESC', 'needle', null, null, null, null);
+	}
+
+	/**
+	 * Free-text words are ANDed, so an empty list is the same picture
+	 * whether one word is a typo or every word is fine and only their
+	 * combination is not. Naming the words that match nothing is the
+	 * difference between the two.
+	 */
+	public function testFindUnmatchedTextsNamesOnlyTheWordsThatMatchNothing(): void {
+		$mailbox = $this->cachedMailbox();
+		$query = new SearchQuery();
+		$query->addText('ifiroumelioti');
+		$query->addText('εκθέματος');
+		$this->filterStringParser->method('parse')->willReturn($query);
+		$this->messageMapper->expects($this->exactly(2))
+			->method('findIdsByQuery')
+			->willReturnCallback(function (Mailbox $mb, SearchQuery $probe, string $order, ?int $limit) {
+				// One word per probe, and the probe must be a limit-1
+				// existence question, never a page.
+				$this->assertCount(1, $probe->getTexts());
+				$this->assertSame(1, $limit);
+				return $probe->getTexts() === ['ifiroumelioti'] ? [42] : [];
+			});
+
+		$unmatched = $this->search->findUnmatchedTexts($mailbox, 'text:ifiroumelioti text:εκθέματος', null);
+
+		$this->assertSame(['εκθέματος'], $unmatched);
+	}
+
+	/**
+	 * A single word is its own explanation -- the list is empty because
+	 * that word matched nothing, which the user can already see -- so the
+	 * probe is not worth a query.
+	 */
+	public function testFindUnmatchedTextsDoesNotProbeASingleWord(): void {
+		$query = new SearchQuery();
+		$query->addText('ifiroumelioti');
+		$this->filterStringParser->method('parse')->willReturn($query);
+		$this->messageMapper->expects($this->never())
+			->method('findIdsByQuery');
+
+		$this->assertSame([], $this->search->findUnmatchedTexts($this->cachedMailbox(), 'text:ifiroumelioti', null));
+	}
+
+	/**
+	 * A probe must ask the same question the search asked, minus the one
+	 * word -- including the body, which is dropped precisely because
+	 * re-running it per word would be a full IMAP SEARCH each time while
+	 * the user waits in front of an already-empty list.
+	 */
+	public function testFindUnmatchedTextsNeverTouchesImap(): void {
+		$query = new SearchQuery();
+		$query->addText('one');
+		$query->addText('two');
+		$query->addBody('one');
+		$query->addBody('two');
+		$this->filterStringParser->method('parse')->willReturn($query);
+		$this->imapSearchProvider->expects($this->never())->method('findMatches');
+		$this->imapSearchProvider->expects($this->never())->method('findAnyMatch');
+		$this->messageMapper->method('findIdsByQuery')
+			->willReturnCallback(function (Mailbox $mb, SearchQuery $probe) {
+				$this->assertSame([], $probe->getBodies());
+				return [];
+			});
+
+		$this->assertSame(['one', 'two'], $this->search->findUnmatchedTexts($this->cachedMailbox(), 'one two', null));
 	}
 }

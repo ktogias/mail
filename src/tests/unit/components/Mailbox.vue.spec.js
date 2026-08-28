@@ -84,6 +84,31 @@ describe('Mailbox', () => {
 			expect(view.findComponent({ name: 'EmptyMailbox' }).exists()).toBe(false)
 		})
 
+		/**
+		 * "No messages" alone cannot distinguish a typo from a word that is
+		 * only in a message body from a word whose accents differ from what
+		 * was typed -- and free-text words are ANDed, so any one of them
+		 * empties the whole list. The explanation is fetched only once the
+		 * list has already settled on empty, so it must never gate rendering.
+		 */
+		it('hands the empty state the words that matched nothing', async () => {
+			const view = mountMailbox({ searchQuery: 'text:ifiroumelioti text:εκθέματος' })
+
+			await view.setData({ unmatchedSearchTerms: ['εκθέματος'] })
+
+			expect(view.findComponent({ name: 'EmptyMailboxSection' }).props('unmatchedTerms'))
+				.toEqual(['εκθέματος'])
+		})
+
+		it('drops the previous query\'s explanation the moment the term changes', async () => {
+			const view = mountMailbox({ searchQuery: 'text:ifiroumelioti text:εκθέματος' })
+			await view.setData({ unmatchedSearchTerms: ['εκθέματος'] })
+
+			await view.setProps({ searchQuery: 'text:ifiroumelioti' })
+
+			expect(view.vm.unmatchedSearchTerms).toEqual([])
+		})
+
 		it('keeps "folder is empty" wording for the plain, unfiltered view', () => {
 			const view = mountMailbox()
 

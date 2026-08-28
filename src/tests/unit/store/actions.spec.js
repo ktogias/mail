@@ -1911,6 +1911,119 @@ describe('Vuex store actions', () => {
 		})
 	})
 
+	/**
+	 * Free-text words are ANDed -- every word has to appear somewhere -- so
+	 * an empty list looks the same whether one word is a typo, only occurs in
+	 * a message body that was not searched, or is spelled with different
+	 * accents than the user typed. Naming the words that match nothing is the
+	 * only thing that tells those apart.
+	 *
+	 * Reported live on 2026-08-28: `ifiroumelioti εκθέματος` returned nothing
+	 * while `ifiroumelioti` alone matched 204 messages, and the empty list
+	 * gave no clue which half was responsible.
+	 */
+	describe('explaining an empty search', () => {
+		beforeEach(() => {
+			normalizedEnvelopeListId.mockImplementation((query) => query ?? '')
+			for (const id of [13, 14]) {
+				const account = { id, personalNamespace: '', mailboxes: [] }
+				store.addAccountMutation(account)
+				store.addMailboxMutation({
+					account,
+					mailbox: {
+						id: 'INBOX',
+						name: 'INBOX',
+						databaseId: id * 10,
+						accountId: id,
+						specialRole: 'inbox',
+					},
+				})
+			}
+		})
+
+		it('asks the mailbox the search ran against', async () => {
+			MessageService.fetchUnmatchedSearchTerms.mockResolvedValue(['εκθέματος'])
+
+			const unmatched = await store.fetchUnmatchedSearchTerms({
+				mailboxId: 130,
+				query: 'text:ifiroumelioti text:εκθέματος',
+				view: 'threaded',
+			})
+
+			expect(unmatched).toEqual(['εκθέματος'])
+			expect(MessageService.fetchUnmatchedSearchTerms).toHaveBeenCalledTimes(1)
+			expect(MessageService.fetchUnmatchedSearchTerms).toHaveBeenCalledWith(
+				130,
+				'text:ifiroumelioti text:εκθέματος',
+				'threaded',
+				undefined,
+			)
+		})
+
+		/**
+		 * The unified list is the UNION of its accounts, so a word one
+		 * account matched has plainly not emptied it. Reporting per mailbox
+		 * would name words that are demonstrably there.
+		 */
+		it('only names a word no constituent inbox matched', async () => {
+			MessageService.fetchUnmatchedSearchTerms
+				.mockResolvedValueOnce(['εκθέματος', 'ifiroumelioti'])
+				.mockResolvedValueOnce(['εκθέματος'])
+
+			const unmatched = await store.fetchUnmatchedSearchTerms({
+				mailboxId: PRIORITY_INBOX_ID,
+				query: 'text:ifiroumelioti text:εκθέματος',
+				view: 'threaded',
+			})
+
+			expect(unmatched).toEqual(['εκθέματος'])
+			expect(MessageService.fetchUnmatchedSearchTerms).toHaveBeenCalledTimes(2)
+		})
+
+		/**
+		 * Best-effort by design: this runs after the list has already settled
+		 * on empty, and nothing depends on the answer beyond a line of text.
+		 * A mailbox that cannot answer must not remove words from the
+		 * intersection -- silence is not agreement that a word matched.
+		 */
+		it('ignores a mailbox whose probe fails rather than trusting it', async () => {
+			MessageService.fetchUnmatchedSearchTerms
+				.mockRejectedValueOnce(new Error('boom'))
+				.mockResolvedValueOnce(['εκθέματος'])
+
+			const unmatched = await store.fetchUnmatchedSearchTerms({
+				mailboxId: PRIORITY_INBOX_ID,
+				query: 'text:ifiroumelioti text:εκθέματος',
+				view: 'threaded',
+			})
+
+			expect(unmatched).toEqual(['εκθέματος'])
+		})
+
+		it('claims nothing when no mailbox could answer', async () => {
+			MessageService.fetchUnmatchedSearchTerms.mockRejectedValue(new Error('boom'))
+
+			const unmatched = await store.fetchUnmatchedSearchTerms({
+				mailboxId: PRIORITY_INBOX_ID,
+				query: 'text:ifiroumelioti text:εκθέματος',
+				view: 'threaded',
+			})
+
+			expect(unmatched).toEqual([])
+		})
+
+		it('does not ask at all without a search', async () => {
+			const unmatched = await store.fetchUnmatchedSearchTerms({
+				mailboxId: 130,
+				query: undefined,
+				view: 'threaded',
+			})
+
+			expect(unmatched).toEqual([])
+			expect(MessageService.fetchUnmatchedSearchTerms).not.toHaveBeenCalled()
+		})
+	})
+
 	describe('fetchEnvelopes marks its list as in-flight', () => {
 		// MailboxThread's priority sections are v-shown on "has
 		// envelopes"; during a search every list is empty until the

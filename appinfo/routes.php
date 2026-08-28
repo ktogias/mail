@@ -206,6 +206,15 @@ return [
 			'verb' => 'POST'
 		],
 		[
+			// Why an otherwise-successful search returned nothing. Its own
+			// route rather than a field on the listing above: it is asked
+			// only from the empty state, so the listing keeps its array
+			// response shape and pays nothing on the path that found rows.
+			'name' => 'messages#unmatchedTerms',
+			'url' => '/api/messages/unmatched-terms',
+			'verb' => 'GET',
+		],
+		[
 			// Warm several message bodies over one IMAP connection. POST
 			// because the id list is a body, not because it changes anything:
 			// it is a cache warm and is safe to repeat.

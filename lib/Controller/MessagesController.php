@@ -119,6 +119,46 @@ class MessagesController extends Controller {
 	}
 
 	/**
+	 * Explain an empty search: which of its words match nothing here.
+	 *
+	 * @NoAdminRequired
+	 *
+	 * @param int $mailboxId
+	 * @param string|null $filter the filter string the empty search used
+	 * @param string|null $view same view the search ran in
+	 *
+	 * @return JSONResponse
+	 *
+	 * @throws ClientException
+	 * @throws ServiceException
+	 */
+	#[TrapError]
+	public function unmatchedTerms(int $mailboxId,
+		?string $filter = null,
+		?string $view = null): JSONResponse {
+		if ($this->userId === null) {
+			return new JSONResponse([], Http::STATUS_UNAUTHORIZED);
+		}
+
+		try {
+			$effectiveUserId = $this->delegationService->resolveMailboxUserId($mailboxId, $this->userId);
+			$mailbox = $this->mailManager->getMailbox($effectiveUserId, $mailboxId);
+		} catch (DoesNotExistException $e) {
+			return new JSONResponse([], Http::STATUS_FORBIDDEN);
+		}
+
+		$view = $view === 'singleton' ? IMailSearch::VIEW_SINGLETON : IMailSearch::VIEW_THREADED;
+
+		return new JSONResponse([
+			'unmatched' => $this->mailSearch->findUnmatchedTexts(
+				$mailbox,
+				$filter === '' ? null : $filter,
+				$view,
+			),
+		]);
+	}
+
+	/**
 	 * @NoAdminRequired
 	 *
 	 * @param int $mailboxId

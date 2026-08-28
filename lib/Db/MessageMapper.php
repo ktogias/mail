@@ -45,8 +45,10 @@ use function in_array;
 use function ltrim;
 use function mb_convert_encoding;
 use function mb_strcut;
+use function mb_strtolower;
 use function OCA\Mail\array_flat_map;
 use function strlen;
+use function strtr;
 use function usort;
 
 /**
@@ -1599,11 +1601,7 @@ class MessageMapper extends QBMapper {
 		// those are alternatives to each other, and these are requirements.
 		foreach ($query->getTexts() as $text) {
 			$alternatives = [
-				$qb->expr()->iLike(
-					'm.subject',
-					$qb->createNamedParameter('%' . $this->db->escapeLikeParameter($text) . '%', IQueryBuilder::PARAM_STR),
-					IQueryBuilder::PARAM_STR,
-				),
+				$this->foldedLike($qb, 'm.subject', $text),
 				$this->recipientTermsMatchExists($qb, Recipient::TYPE_FROM, [$text]),
 				$this->recipientTermsMatchExists($qb, Recipient::TYPE_TO, [$text]),
 			];
@@ -1666,11 +1664,7 @@ class MessageMapper extends QBMapper {
 
 		if (!empty($query->getSubjects())) {
 			$textOrs[] = $qb->expr()->orX(
-				...array_map(fn (string $subject) => $qb->expr()->iLike(
-					'm.subject',
-					$qb->createNamedParameter('%' . $this->db->escapeLikeParameter($subject) . '%', IQueryBuilder::PARAM_STR),
-					IQueryBuilder::PARAM_STR
-				), $query->getSubjects())
+				...array_map(fn (string $subject) => $this->foldedLike($qb, 'm.subject', $subject), $query->getSubjects())
 			);
 		}
 		// createParameter
@@ -2138,11 +2132,7 @@ class MessageMapper extends QBMapper {
 		if (!empty($query->getSubjects())) {
 			$select->andWhere(
 				$qb->expr()->orX(
-					...array_map(fn (string $subject) => $qb->expr()->iLike(
-						'm.subject',
-						$qb->createNamedParameter('%' . $this->db->escapeLikeParameter($subject) . '%', IQueryBuilder::PARAM_STR),
-						IQueryBuilder::PARAM_STR
-					), $query->getSubjects())
+					...array_map(fn (string $subject) => $this->foldedLike($qb, 'm.subject', $subject), $query->getSubjects())
 				)
 			);
 		}
@@ -2229,6 +2219,130 @@ class MessageMapper extends QBMapper {
 	 * @return bool
 	 */
 	/**
+	 * Greek loses a search two ways at once, and both are invisible.
+	 *
+	 * ILIKE lowercases the stored text, and lowercasing a capital sigma
+	 * always yields the medial σ -- never the final ς that a Greek word
+	 * actually ends in and that a user therefore types. So a message
+	 * reading `ΤΊΤΛΟΣ ΕΚΘΈΜΑΤΟΣ` can never match the search term
+	 * `εκθέματος`, however carefully it was typed. Accents split the
+	 * same word a second time: `εκθεματος` and `εκθέματος` are two
+	 * different strings, and mail is written both ways.
+	 *
+	 * That is not a hypothetical: a real search on 2026-08-28 returned
+	 * nothing for a word that was in the message, with an empty list and
+	 * no hint as to why.
+	 *
+	 * Both collapse under one character map applied to lower(): it needs
+	 * no extension (unaccent is available on this install but not
+	 * enabled, and requiring it would make the search silently
+	 * inconsistent between deployments), and being a pure per-character
+	 * substitution over the Greek block it cannot touch a Latin or an
+	 * ASCII term.
+	 *
+	 * Deliberately NOT backed by an expression index. A trigram index on
+	 * the folded subject would be 221 MB on a machine with 1.6 GB of RAM
+	 * and a database already larger than that, and it would not be used:
+	 * this predicate sits in a plan that walks
+	 * mail_msg_mailbox_sent_id_idx in output order so it can stop at the
+	 * LIMIT, where the subject is a filter either way -- which is exactly
+	 * what the unfolded ILIKE does today, its own trigram index unused
+	 * (62 scans against 7,659 for the recipient ones). The cost of the
+	 * fold is computing it per candidate row, and an index does not
+	 * remove that; keeping the fold off non-Greek terms does, which is
+	 * what foldsSearchText() is for.
+	 *
+	 * The map is idempotent, so folding the term and folding the column
+	 * always meet: PHP's mb_strtolower() and PostgreSQL's lower() disagree
+	 * about final sigma in some versions, and after this they no longer can.
+	 */
+	private const FOLD_FROM = 'άέήίόύώϊϋΐΰς';
+	private const FOLD_TO = 'αεηιουωιυιυσ';
+
+	/**
+	 * Whether this term is worth folding.
+	 *
+	 * translate() is PostgreSQL-only, so everywhere else -- including the
+	 * sqlite the test suite runs on -- the search keeps its previous ILIKE
+	 * behaviour rather than failing.
+	 *
+	 * On PostgreSQL it is still applied only to terms that actually contain
+	 * Greek, because the fold is not free: translate(lower(subject)) has to be
+	 * computed for every candidate row, and no index removes that cost in the
+	 * plan this predicate ends up in (the planner walks
+	 * mail_msg_mailbox_sent_id_idx in output order and filters, which is what
+	 * lets it stop at the LIMIT). Measured on mailbox 194, 193,847 messages:
+	 * 1,549 ms unfolded against 17,287 ms folded -- past the point where a
+	 * fanned-out search returns anything at all.
+	 *
+	 * A term with no Greek in it cannot match differently either way, so
+	 * every Latin search -- which is nearly all of them, addresses included --
+	 * keeps exactly the plan and the timing it has today, and only a Greek
+	 * term pays for being one.
+	 */
+	private function foldsSearchText(string $term): bool {
+		if ($this->db->getDatabaseProvider() !== IDBConnection::PLATFORM_POSTGRES) {
+			return false;
+		}
+		return self::termNeedsFolding($term);
+	}
+
+	/**
+	 * Whether a term can match differently once folded.
+	 *
+	 * Split out from foldsSearchText() and kept free of any database so it
+	 * can be tested directly: this predicate is the only thing standing
+	 * between a Greek search and every OTHER search paying the fold's
+	 * per-row cost, and getting it wrong is silent -- searches keep
+	 * returning the right rows, just an order of magnitude slower.
+	 */
+	public static function termNeedsFolding(string $term): bool {
+		return preg_match('/\p{Greek}/u', $term) === 1;
+	}
+
+	/**
+	 * The PHP half of the fold, for the search term. Must produce exactly
+	 * what translate(lower(column)) produces for the same input.
+	 */
+	public function foldSearchText(string $text): string {
+		$from = preg_split('//u', self::FOLD_FROM, -1, PREG_SPLIT_NO_EMPTY);
+		$to = preg_split('//u', self::FOLD_TO, -1, PREG_SPLIT_NO_EMPTY);
+		return strtr(mb_strtolower($text, 'UTF-8'), array_combine($from, $to));
+	}
+
+	/**
+	 * `column contains term`, accent- and case-insensitively.
+	 *
+	 * @param IQueryBuilder $qb the builder the parameter is bound on -- which
+	 *                          is not always the builder the expression ends
+	 *                          up in, see recipientTermsMatchExists()
+	 */
+	private function foldedLike(IQueryBuilder $qb, string $column, string $term): string {
+		if (!$this->foldsSearchText($term)) {
+			return $qb->expr()->iLike(
+				$column,
+				$qb->createNamedParameter('%' . $this->db->escapeLikeParameter($term) . '%', IQueryBuilder::PARAM_STR),
+				IQueryBuilder::PARAM_STR,
+			);
+		}
+
+		// The term is folded here rather than in SQL so that the parameter
+		// stays a plain bound value: a translate() around the placeholder
+		// would defeat the expression index on the column side.
+		$param = $qb->createNamedParameter(
+			'%' . $this->db->escapeLikeParameter($this->foldSearchText($term)) . '%',
+			IQueryBuilder::PARAM_STR,
+		);
+		return sprintf(
+			"translate(lower(%s), '%s', '%s') LIKE %s",
+			$column,
+			self::FOLD_FROM,
+			self::FOLD_TO,
+			$param,
+		);
+	}
+
+	/**
 	 * Recipient match as an EXISTS(...) sub-query instead of an INNER JOIN.
 	 *
 	 * Joining mail_recipients (up to four times, one alias per address
@@ -2256,8 +2370,12 @@ class MessageMapper extends QBMapper {
 				$inner->expr()->eq('r.message_id', 'm.id', IQueryBuilder::PARAM_INT),
 				$inner->expr()->eq('r.type', $qb->createNamedParameter($type, IQueryBuilder::PARAM_INT), IQueryBuilder::PARAM_INT),
 				$inner->expr()->orX(
+					// The address itself is not folded: it is ASCII by
+					// construction, so folding would only cost it
+					// mail_recips_email_trgm_idx (7,659 scans on this
+					// install, against 62 for the subject one).
 					...array_map(fn (string $email) => $inner->expr()->iLike('r.email', $qb->createNamedParameter('%' . $this->db->escapeLikeParameter($email) . '%', IQueryBuilder::PARAM_STR)), $terms),
-					...array_map(fn (string $label) => $inner->expr()->iLike('r.label', $qb->createNamedParameter('%' . $this->db->escapeLikeParameter($label) . '%', IQueryBuilder::PARAM_STR)), $terms),
+					...array_map(fn (string $label) => $this->foldedLike($qb, 'r.label', $label), $terms),
 				),
 			);
 		return 'EXISTS (' . $inner->getSQL() . ')';

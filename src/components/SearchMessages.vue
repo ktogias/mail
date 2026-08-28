@@ -434,8 +434,34 @@ export default {
 			}).length > 0
 		},
 
+		/**
+		 * Whether to ask the server to search message bodies too.
+		 *
+		 * In a single account's folder this is that account's own setting,
+		 * as it always was. In the unified and priority inboxes there is no
+		 * single account to ask -- `accountId` is the unified pseudo-account,
+		 * whose `searchBody` is undefined -- so until now the per-account
+		 * setting was silently ignored there and only the global preference
+		 * counted. An account with body search explicitly enabled therefore
+		 * never had its bodies searched from the inbox the user actually sits
+		 * in, which is how a real search on 2026-08-28 returned nothing for a
+		 * word that was in the message.
+		 *
+		 * Asking whenever ANY account wants it is safe because the decision is
+		 * now also made per account on the server (MailSearch::searchesBodies):
+		 * the accounts that opted out still pay nothing, and one filter string
+		 * can keep fanning out to all of them unchanged.
+		 */
 		searchBody() {
-			return this.mainStore.getAccount(this.accountId)?.searchBody || (this.mailbox.databaseId === 'priority' && this.mainStore.getPreference('search-priority-body', 'false') === 'true')
+			if (this.isFannedOut) {
+				return this.mainStore.getPreference('search-priority-body', 'false') === 'true'
+					|| this.mainStore.getAccounts.some((account) => account?.searchBody)
+			}
+			return !!this.mainStore.getAccount(this.accountId)?.searchBody
+		},
+
+		isFannedOut() {
+			return this.mailbox.isUnified === true || this.mailbox.isPriorityInbox === true
 		},
 
 		account() {

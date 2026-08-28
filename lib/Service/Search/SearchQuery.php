@@ -228,6 +228,35 @@ class SearchQuery {
 		$this->texts[] = $text;
 	}
 
+	/**
+	 * A copy of this query narrowed to a single one of its free-text words.
+	 *
+	 * Every word must match for the search to return anything, so an empty
+	 * result says nothing about WHICH word emptied it. Re-running the query
+	 * one word at a time answers that, and reusing this object rather than
+	 * rebuilding a query keeps the probe honest: it carries the same flags,
+	 * the same date range and the same mailbox scoping as the search whose
+	 * result the user is looking at, so a word can never be reported as
+	 * unmatched because the probe asked something subtly different.
+	 *
+	 * Bodies are dropped: a body probe is a full IMAP SEARCH per word (its
+	 * cost is the same for any date window), and this runs on the path where
+	 * the user is already waiting in front of an empty list. A word that only
+	 * appears in a body is therefore reported as unmatched, which is exactly
+	 * what the headers-only search it is explaining did.
+	 *
+	 * The cursor goes too -- a probe asks "anywhere in this mailbox", not
+	 * "on the page the user happens to be on".
+	 */
+	public function withOnlyText(string $text): self {
+		$copy = clone $this;
+		$copy->texts = [$text];
+		$copy->bodies = [];
+		$copy->cursor = null;
+		$copy->cursorId = null;
+		return $copy;
+	}
+
 	public function getBodies(): array {
 		return $this->bodies;
 	}

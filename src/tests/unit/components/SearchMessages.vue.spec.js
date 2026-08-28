@@ -151,3 +151,90 @@ describe('SearchMessages: the typed term must survive a re-mount', () => {
 		expect(mountFor(21).vm.query).toBe('')
 	})
 })
+
+/**
+ * A body search is decided per account. The unified and priority inboxes have
+ * no single account to ask -- `accountId` there is the unified pseudo-account,
+ * whose `searchBody` is undefined -- so the per-account setting used to be
+ * silently ignored in exactly the inbox the user sits in, and only the global
+ * preference counted.
+ *
+ * Reported live on 2026-08-28: a word that was in a message body of an account
+ * with body search explicitly enabled returned nothing from the priority
+ * inbox, and the request carried no `body:` token at all.
+ *
+ * Asking whenever ANY account wants it is safe because the server now decides
+ * per account too (MailSearch::searchesBodies), so the accounts that opted out
+ * still pay nothing for the ones that did not.
+ */
+describe('SearchMessages: whose bodies get searched', () => {
+	beforeEach(() => {
+		setActivePinia(createPinia())
+	})
+
+	/**
+	 * @param {object} mailbox the mailbox this search box belongs to
+	 * @param {number} accountId the account prop the parent passes down
+	 * @return {object} a shallow-mounted component
+	 */
+	const mountIn = (mailbox, accountId) => shallowMount(SearchMessages, {
+		propsData: { mailbox, accountId },
+		mocks: { t: (app, text) => text },
+		stubs: { NcChip: true },
+	})
+
+	const unifiedPseudoAccount = { id: 0, emailAddress: '', isUnified: true }
+	const bodySearchOn = { id: 13, emailAddress: 'me@example.org', searchBody: true }
+	const bodySearchOff = { id: 14, emailAddress: 'other@example.org', searchBody: false }
+
+	it('asks for bodies in the priority inbox when an account wants them', () => {
+		const store = useMainStore()
+		store.addAccountMutation(unifiedPseudoAccount)
+		store.addAccountMutation(bodySearchOff)
+		store.addAccountMutation(bodySearchOn)
+
+		const wrapper = mountIn({ databaseId: 'priority', isPriorityInbox: true }, 0)
+
+		expect(wrapper.vm.searchBody).toBe(true)
+	})
+
+	it('asks for bodies in the unified inbox on the same grounds', () => {
+		const store = useMainStore()
+		store.addAccountMutation(unifiedPseudoAccount)
+		store.addAccountMutation(bodySearchOn)
+
+		const wrapper = mountIn({ databaseId: 'unified', isUnified: true }, 0)
+
+		expect(wrapper.vm.searchBody).toBe(true)
+	})
+
+	it('does not ask when no account wants them and the preference is off', () => {
+		const store = useMainStore()
+		store.addAccountMutation(unifiedPseudoAccount)
+		store.addAccountMutation(bodySearchOff)
+
+		const wrapper = mountIn({ databaseId: 'priority', isPriorityInbox: true }, 0)
+
+		expect(wrapper.vm.searchBody).toBe(false)
+	})
+
+	it('still lets the priority-inbox preference turn them on by itself', () => {
+		const store = useMainStore()
+		store.addAccountMutation(unifiedPseudoAccount)
+		store.addAccountMutation(bodySearchOff)
+		store.savePreferenceMutation({ key: 'search-priority-body', value: 'true' })
+
+		const wrapper = mountIn({ databaseId: 'priority', isPriorityInbox: true }, 0)
+
+		expect(wrapper.vm.searchBody).toBe(true)
+	})
+
+	it('reads one account\'s own setting in that account\'s folder', () => {
+		const store = useMainStore()
+		store.addAccountMutation(bodySearchOn)
+		store.addAccountMutation(bodySearchOff)
+
+		expect(mountIn({ databaseId: 21 }, 13).vm.searchBody).toBe(true)
+		expect(mountIn({ databaseId: 22 }, 14).vm.searchBody).toBe(false)
+	})
+})

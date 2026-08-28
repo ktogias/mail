@@ -12,6 +12,7 @@ namespace OCA\Mail\Service\Search;
 use Horde_Imap_Client;
 use OCA\Mail\Account;
 use OCA\Mail\Contracts\IMailSearch;
+use OCA\Mail\Contracts\IUserPreferences;
 use OCA\Mail\Db\Mailbox;
 use OCA\Mail\Db\Message;
 use OCA\Mail\Db\MessageMapper;
@@ -52,6 +53,7 @@ class MailSearch implements IMailSearch {
 		private MessageMapper $messageMapper,
 		private PreviewEnhancer $previewEnhancer,
 		private SearchTelemetry $searchTelemetry,
+		private IUserPreferences $preferences,
 		ITimeFactory $timeFactory,
 	) {
 		$this->timeFactory = $timeFactory;
@@ -122,24 +124,7 @@ class MailSearch implements IMailSearch {
 		// findIdsByQuery() just return however many matching rows
 		// currently exist, same as they would for any other filtered
 		// query that happens to match fewer messages than expected.
-		$query = $this->filterStringParser->parse($filter);
-		if ($cursor !== null) {
-			$query->setCursor($cursor);
-			if ($cursorId !== null) {
-				$query->setCursorId($cursorId);
-			}
-		}
-		if ($view !== null) {
-			$query->setThreaded($view === self::VIEW_THREADED);
-		}
-		// In flagged we don't want anything but flagged messages
-		if ($mailbox->isSpecialUse(Horde_Imap_Client::SPECIALUSE_FLAGGED)) {
-			$query->addFlag(Flag::is(Flag::FLAGGED));
-		}
-		// Don't show deleted messages except for trash folders
-		if (!$mailbox->isSpecialUse(Horde_Imap_Client::SPECIALUSE_TRASH)) {
-			$query->addFlag(Flag::not(Flag::DELETED));
-		}
+		$query = $this->buildQuery($mailbox, $filter, $cursor, $cursorId, $view);
 
 		$started = hrtime(true);
 		$resultCount = null;
@@ -179,6 +164,80 @@ class MailSearch implements IMailSearch {
 	}
 
 	/**
+	 * The mailbox's implicit conditions, on top of whatever the user typed.
+	 *
+	 * Extracted so that findUnmatchedTexts() probes the very same query the
+	 * search it explains used. A probe that quietly omitted, say, the trash
+	 * folder's deleted-message rule could report a word as unmatched while the
+	 * real search would have matched it, which is worse than saying nothing.
+	 */
+	private function buildQuery(Mailbox $mailbox,
+		?string $filter,
+		?int $cursor,
+		?int $cursorId,
+		?string $view): SearchQuery {
+		$query = $this->filterStringParser->parse($filter);
+		if ($cursor !== null) {
+			$query->setCursor($cursor);
+			if ($cursorId !== null) {
+				$query->setCursorId($cursorId);
+			}
+		}
+		if ($view !== null) {
+			$query->setThreaded($view === self::VIEW_THREADED);
+		}
+		// In flagged we don't want anything but flagged messages
+		if ($mailbox->isSpecialUse(Horde_Imap_Client::SPECIALUSE_FLAGGED)) {
+			$query->addFlag(Flag::is(Flag::FLAGGED));
+		}
+		// Don't show deleted messages except for trash folders
+		if (!$mailbox->isSpecialUse(Horde_Imap_Client::SPECIALUSE_TRASH)) {
+			$query->addFlag(Flag::not(Flag::DELETED));
+		}
+		return $query;
+	}
+
+	/**
+	 * How many free-text words are worth probing.
+	 *
+	 * A search with more words than this is not a user wondering which one is
+	 * wrong, and the probes are one query each.
+	 */
+	private const MAX_PROBED_TEXTS = 6;
+
+	#[\Override]
+	public function findUnmatchedTexts(Mailbox $mailbox,
+		?string $filter,
+		?string $view): array {
+		$query = $this->buildQuery($mailbox, $filter, null, null, $view);
+		$texts = $query->getTexts();
+		// One word is its own explanation: the list is empty because that word
+		// matched nothing, which the user can already see.
+		if (count($texts) < 2 || count($texts) > self::MAX_PROBED_TEXTS) {
+			return [];
+		}
+
+		$unmatched = [];
+		foreach ($texts as $text) {
+			$ids = $this->messageMapper->findIdsByQuery(
+				$mailbox,
+				$query->withOnlyText($text),
+				self::ORDER_NEWEST_FIRST,
+				1,
+				null,
+				false,
+				// Never split into priority sections: the question is whether the
+				// word occurs at all, not where it would be filed.
+				false,
+			);
+			if ($ids === []) {
+				$unmatched[] = $text;
+			}
+		}
+		return $unmatched;
+	}
+
+	/**
 	 * Find messages across all mailboxes for a user
 	 *
 	 * @return Message[]
@@ -202,7 +261,7 @@ class MailSearch implements IMailSearch {
 	 * @throws ServiceException
 	 */
 	private function getIdsLocally(Account $account, Mailbox $mailbox, SearchQuery $query, string $sortOrder, ?int $limit, bool $prioritySplit): array {
-		if (empty($query->getBodies())) {
+		if (empty($query->getBodies()) || !$this->searchesBodies($account)) {
 			return $this->messageMapper->findIdsByQuery($mailbox, $query, $sortOrder, $limit, null, false, $prioritySplit);
 		}
 
@@ -253,5 +312,39 @@ class MailSearch implements IMailSearch {
 	 */
 	private function getIdsGlobally(IUser $user, SearchQuery $query, ?int $limit): array {
 		return $this->messageMapper->findIdsGloballyByQuery($user, $query, $limit);
+	}
+
+	/**
+	 * Whether this account's bodies may be searched over IMAP.
+	 *
+	 * Until now this was decided in the client alone, which worked while a
+	 * search only ever addressed one account. The unified inbox breaks that:
+	 * one filter string fans out to every account, so either the client sent
+	 * `body:` to all of them or -- what it actually did -- to none, and an
+	 * account with the setting explicitly enabled silently never had its
+	 * bodies searched there. A real search on 2026-08-28 returned nothing for
+	 * a word that was in the message body of exactly such an account.
+	 *
+	 * Deciding it here instead lets the client ask for bodies unconditionally
+	 * and each account answer for itself, which is the only place that knows.
+	 * A body search is a full-mailbox IMAP SEARCH whose cost is the same for
+	 * any date window (see the .107/.108 work), so this is a real protection
+	 * and not a formality: fanning one out to an account that opted out would
+	 * add seconds to every keystroke's worth of search.
+	 *
+	 * The user-level preference stays an override, because it is what the
+	 * priority-inbox toggle promises: turn it on and bodies are searched
+	 * there, whatever the individual accounts say.
+	 */
+	private function searchesBodies(Account $account): bool {
+		if ($account->getMailAccount()->getSearchBody()) {
+			return true;
+		}
+
+		return $this->preferences->getPreference(
+			$account->getUserId(),
+			'search-priority-body',
+			'false',
+		) === 'true';
 	}
 }

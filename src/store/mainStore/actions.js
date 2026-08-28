@@ -92,6 +92,7 @@ import {
 	fetchMessageHtmlBody,
 	fetchMessageItineraries,
 	fetchThread,
+	fetchUnmatchedSearchTerms as fetchUnmatchedSearchTermsExternal,
 	messageBodyRequestKey,
 	messageThreadRequestKey,
 	moveMessage,
@@ -3317,6 +3318,61 @@ export default function mainStoreActions() {
 				release()
 			}
 		},
+		/**
+		 * Which words of the current search match nothing, so that an empty
+		 * list can say why it is empty.
+		 *
+		 * Fans out exactly like the search it explains: the unified and
+		 * priority inboxes have no mailbox of their own to ask, so every
+		 * constituent inbox is asked and only a word that matched in NONE of
+		 * them is reported. Reporting per mailbox would be actively wrong --
+		 * the list the user is looking at is the union, so a word found in one
+		 * account has plainly not emptied it.
+		 *
+		 * Deliberately best-effort: a mailbox whose probe fails is left out of
+		 * the intersection rather than failing the explanation, and a total
+		 * failure returns no words instead of a wrong claim. Nothing depends
+		 * on the answer beyond a line of text under an already-empty list.
+		 *
+		 * @param {object} params param object
+		 * @param {number|string} params.mailboxId the searched mailbox
+		 * @param {string} params.query the filter string that came back empty
+		 * @param {string} params.view 'threaded' or 'singleton'
+		 * @param {AbortSignal} [params.signal] aborts when superseded
+		 * @return {Promise<string[]>} unmatched words, in typed order
+		 */
+		async fetchUnmatchedSearchTerms({ mailboxId, query, view, signal }) {
+			if (!query) {
+				return []
+			}
+
+			const mailbox = this.getMailbox(mailboxId)
+			if (!mailbox) {
+				return []
+			}
+			const mailboxes = (mailbox.isUnified || mailbox.isPriorityInbox)
+				? findIndividualMailboxes(this.getMailboxes, mailbox.specialRole)(this.getAccounts)
+				: [mailbox]
+
+			const answers = (await mapWithConcurrencyLimit(
+				mailboxes,
+				TEXT_SEARCH_ENVELOPE_FETCH_CONCURRENCY,
+				(mb) => fetchUnmatchedSearchTermsExternal(mb.databaseId, query, view, signal)
+					.catch((error) => {
+						if (axios.isCancel(error)) {
+							throw error
+						}
+						logger.debug(`Could not explain the empty search for mailbox ${mb.databaseId}: ${error}`, { error })
+						return null
+					}),
+			)).filter((terms) => terms !== null)
+
+			if (answers.length === 0) {
+				return []
+			}
+			return answers.reduce((common, terms) => common.filter((term) => terms.includes(term)))
+		},
+
 		fetchEnvelopes({
 			mailboxId,
 			query,
