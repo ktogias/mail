@@ -777,7 +777,23 @@ const sharedSearchFlagTokens = new Set([
 	priorityOtherQuery,
 ])
 
-const textSearchPredicatePattern = /^(to|from|cc|bcc|subject|body):/i
+// `text:` belongs here and was missing, which quietly disabled the whole
+// shared search for the one query shape the app actually sends.
+//
+// .120 changed a free-text search from one `subject:` phrase into one `text:`
+// token per word. This pattern was not changed with it, so from then on
+// hasTextSearchPredicate() was false for every ordinary search,
+// sharedContentSearchDescriptor() returned null, and each of the three
+// Priority sections issued its OWN physical search per mailbox instead of
+// sharing one. Invisible while the searches were cheap header queries; not
+// invisible at .126, when the unified inboxes started asking for bodies and
+// the same 16 s IMAP round trip was paid three times over (measured live on
+// account 4: termCount 1 -> 16.7 s, 2 -> 17.7 s, 5 -> 30.2 s, issued in
+// identical concurrent pairs).
+//
+// The existing tests all used `subject:`, which is in the list, so the
+// mechanism looked covered.
+const textSearchPredicatePattern = /^(text|to|from|cc|bcc|subject|body):/i
 
 function hasTextSearchPredicate(query) {
 	return typeof query === 'string'

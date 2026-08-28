@@ -1327,6 +1327,56 @@ describe('Vuex store actions', () => {
 			]
 		}
 
+		/**
+		 * The shape the app actually sends.
+		 *
+		 * .120 changed a free-text search from one `subject:` phrase into one
+		 * `text:` token per word, and textSearchPredicatePattern was not
+		 * changed with it -- so every ordinary search silently stopped
+		 * sharing and each section issued its own physical search per
+		 * mailbox. Every test here used `subject:`, which is in the pattern,
+		 * so the mechanism looked covered while the case that matters was
+		 * not.
+		 *
+		 * Cheap enough to hide while the searches were header-only. At .126
+		 * the unified inboxes began asking for bodies, and the same 16 s IMAP
+		 * round trip was paid three times over.
+		 */
+		it('shares one search for a free-text query, the shape an ordinary search actually has', async () => {
+			MessageService.fetchEnvelopes.mockImplementation(async (accountId, mailboxId) => searchResults(mailboxId))
+
+			await Promise.all([
+				store.fetchEnvelopes({ mailboxId: UNIFIED_INBOX_ID, query: 'text:needle match:anyof is:starred' }),
+				store.fetchEnvelopes({ mailboxId: UNIFIED_INBOX_ID, query: 'text:needle match:anyof not:starred is:pi-important' }),
+				store.fetchEnvelopes({ mailboxId: UNIFIED_INBOX_ID, query: 'text:needle match:anyof not:starred is:pi-other' }),
+			])
+
+			// Two physical INBOXes, one shared wave -- not three sections x
+			// two mailboxes. The flag tokens are stripped from what goes to
+			// the server; the sections classify the shared result locally.
+			expect(MessageService.fetchEnvelopes).toHaveBeenCalledTimes(4)
+			for (const call of MessageService.fetchEnvelopes.mock.calls) {
+				expect(call[2]).toMatch(/^text:needle match:anyof start:\d+ end:\d+$/)
+			}
+		})
+
+		/**
+		 * And with bodies asked for, which is what .126 made the unified
+		 * inboxes do -- the case where NOT sharing costs a full IMAP body
+		 * search per section.
+		 */
+		it('shares one search when the query also asks for bodies', async () => {
+			MessageService.fetchEnvelopes.mockImplementation(async (accountId, mailboxId) => searchResults(mailboxId))
+
+			await Promise.all([
+				store.fetchEnvelopes({ mailboxId: UNIFIED_INBOX_ID, query: 'text:needle body:needle match:anyof is:starred' }),
+				store.fetchEnvelopes({ mailboxId: UNIFIED_INBOX_ID, query: 'text:needle body:needle match:anyof not:starred is:pi-important' }),
+				store.fetchEnvelopes({ mailboxId: UNIFIED_INBOX_ID, query: 'text:needle body:needle match:anyof not:starred is:pi-other' }),
+			])
+
+			expect(MessageService.fetchEnvelopes).toHaveBeenCalledTimes(4)
+		})
+
 		it('runs one content query per physical mailbox and classifies the shared result into all three sections', async () => {
 			MessageService.fetchEnvelopes.mockImplementation(async (accountId, mailboxId) => searchResults(mailboxId))
 
