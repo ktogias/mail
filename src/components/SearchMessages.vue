@@ -330,6 +330,27 @@ import { hiddenTags } from './tags.js'
 
 const debouncedSearch = debouncePromise(findRecipient, 500)
 
+/**
+ * How long the box has to stay still before message BODIES are searched.
+ *
+ * Far longer than the 700 ms the rest of the search uses, and deliberately so:
+ * a header search is a local database query answering in about a second, while
+ * a body search is a full IMAP round trip whose cost belongs entirely to the
+ * mail server. Measured live on 2026-08-31 against isi.gr, one word 8.4 s,
+ * three words 25.1 s.
+ *
+ * At 700 ms every pause between words started its own. One search for
+ * `ifiroumelioti Ασυρματο δίκτυο` issued body searches for `ifi…`, then
+ * `ifiroumelioti`, then the whole phrase -- three real round trips for one
+ * question, ~40 s of which only the last was wanted. Aborting the superseded
+ * requests does not help: the HTTP client gives up, the PHP worker does not,
+ * so the round trip is paid whether or not anyone is still listening.
+ *
+ * Two seconds is comfortably longer than the pause between typing two words
+ * and still short enough to feel automatic.
+ */
+const BODY_SEARCH_SETTLE_MS = 2000
+
 export default {
 	name: 'SearchMessages',
 	components: {
@@ -361,6 +382,7 @@ export default {
 			match: 'allof',
 			query: '',
 			debouncedSearchQuery: debouncePromise(this.sendQueryEvent, 700),
+			debouncedBodySearch: debouncePromise(this.sendBodySearchEvent, BODY_SEARCH_SETTLE_MS),
 			autocompleteRecipients: [],
 			selectedTags: [],
 			moreSearchActions: false,
@@ -560,11 +582,18 @@ export default {
 			// somewhere, not every word in the same somewhere.
 			this.match = 'anyof'
 			this.freeText = this.query
-			this.searchInMessageBody = this.searchBody ? this.query : null
+			// Headers first, always. They come from the local database and are
+			// worth showing while the expensive half is still being decided;
+			// carrying the previous keystroke's `body:` forward here would
+			// also mean searching bodies for a word the user has moved on from.
+			this.searchInMessageBody = null
 			this.searchInSubject = null
 			this.searchInFrom = []
 			this.searchInTo = []
 			this.debouncedSearchQuery()
+			if (this.searchBody) {
+				this.debouncedBodySearch()
+			}
 		},
 
 		hasQuickFiltersActive(newVal) {
@@ -655,6 +684,23 @@ export default {
 
 		sendQueryEvent() {
 			this.$emit('search-changed', this.searchQuery)
+		},
+
+		/**
+		 * The same search again, now also asking for message bodies.
+		 *
+		 * Fires only once the box has been still for BODY_SEARCH_SETTLE_MS, so
+		 * the IMAP round trip is paid for the question the user actually
+		 * finished asking rather than for every prefix of it.
+		 */
+		sendBodySearchEvent() {
+			// The box can have been cleared, or emptied below the minimum
+			// length, while this was waiting to fire.
+			if (!this.searchBody || this.query.length < 3) {
+				return
+			}
+			this.searchInMessageBody = this.query
+			this.sendQueryEvent()
 		},
 
 		searchRecipients(term) {

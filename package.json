@@ -1,6 +1,6 @@
 {
   "name": "nextcloud-mail",
-  "version": "5.11.3+ktogias.130",
+  "version": "5.11.3+ktogias.131",
   "private": true,
   "description": "Nextcloud Mail",
   "license": "AGPL-3.0-only",

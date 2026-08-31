@@ -229,6 +229,79 @@ describe('SearchMessages: whose bodies get searched', () => {
 		expect(wrapper.vm.searchBody).toBe(true)
 	})
 
+	/**
+	 * Typing must not fire an IMAP round trip per keystroke.
+	 *
+	 * A header search is a local database query; a body search is a full round
+	 * trip to the mail server, measured live on 2026-08-31 at 8.4 s for one
+	 * word and 25.1 s for three. At the shared 700 ms debounce every pause
+	 * between two words started its own, so `ifiroumelioti Ασυρματο δίκτυο`
+	 * paid three real body searches for one question -- and aborting the
+	 * superseded requests does not help, because the HTTP client gives up
+	 * while the PHP worker carries on and pays for the round trip anyway.
+	 */
+	it('asks for headers while typing and never carries the last keystroke\'s bodies forward', async () => {
+		const store = useMainStore()
+		store.addAccountMutation(unifiedPseudoAccount)
+		store.addAccountMutation(bodySearchOn)
+		const wrapper = mountIn({ databaseId: 'priority', isPriorityInbox: true }, 0)
+
+		wrapper.vm.query = 'ifiroumelioti'
+		await wrapper.vm.$nextTick()
+
+		expect(wrapper.vm.searchBody).toBe(true)
+		expect(wrapper.vm.searchInMessageBody).toBe(null)
+		expect(wrapper.vm.searchQuery).not.toContain('body:')
+		expect(wrapper.vm.searchQuery).toContain('text:ifiroumelioti')
+	})
+
+	it('adds the bodies once the box has settled', async () => {
+		const store = useMainStore()
+		store.addAccountMutation(unifiedPseudoAccount)
+		store.addAccountMutation(bodySearchOn)
+		const wrapper = mountIn({ databaseId: 'priority', isPriorityInbox: true }, 0)
+		wrapper.vm.query = 'ifiroumelioti'
+		await wrapper.vm.$nextTick()
+
+		wrapper.vm.sendBodySearchEvent()
+
+		expect(wrapper.vm.searchInMessageBody).toBe('ifiroumelioti')
+		expect(wrapper.vm.searchQuery).toContain('body:ifiroumelioti')
+	})
+
+	/**
+	 * The settle timer outlives the text that started it: clearing the box, or
+	 * cutting it below the minimum length, must not leave a body search on its
+	 * way for a term nobody is looking for.
+	 */
+	it('does not search bodies for a query that has since been cleared', async () => {
+		const store = useMainStore()
+		store.addAccountMutation(unifiedPseudoAccount)
+		store.addAccountMutation(bodySearchOn)
+		const wrapper = mountIn({ databaseId: 'priority', isPriorityInbox: true }, 0)
+		wrapper.vm.query = 'ifiroumelioti'
+		await wrapper.vm.$nextTick()
+
+		wrapper.vm.query = ''
+		await wrapper.vm.$nextTick()
+		wrapper.vm.sendBodySearchEvent()
+
+		expect(wrapper.vm.searchInMessageBody).toBe(null)
+	})
+
+	it('does not schedule a body search at all for an account that opted out', async () => {
+		const store = useMainStore()
+		store.addAccountMutation(bodySearchOff)
+		const wrapper = mountIn({ databaseId: 22 }, 14)
+		wrapper.vm.query = 'ifiroumelioti'
+		await wrapper.vm.$nextTick()
+
+		wrapper.vm.sendBodySearchEvent()
+
+		expect(wrapper.vm.searchInMessageBody).toBe(null)
+		expect(wrapper.vm.searchQuery).not.toContain('body:')
+	})
+
 	it('reads one account\'s own setting in that account\'s folder', () => {
 		const store = useMainStore()
 		store.addAccountMutation(bodySearchOn)
