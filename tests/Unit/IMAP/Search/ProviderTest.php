@@ -18,6 +18,7 @@ use OCA\Mail\IMAP\Search\Provider;
 use OCA\Mail\Service\Search\SearchQuery;
 use OCP\ICache;
 use OCP\ICacheFactory;
+use OCP\IMemcache;
 use PHPUnit\Framework\MockObject\MockObject;
 use PHPUnit\Framework\TestCase;
 
@@ -273,6 +274,142 @@ class ProviderTest extends TestCase {
 		$this->provider->findMatches($account, $mailbox, $this->searchQuery('Ισηοπ'));
 
 		self::assertSame('UTF-8', $builtQuery['charset']);
+	}
+
+	/**
+	 * A body search must run once, however many requests ask for it at once.
+	 *
+	 * The result cache alone cannot achieve that: it only helps a request that
+	 * arrives AFTER another finished, and the requests this app makes arrive
+	 * together -- the priority sections and each window of a progressive
+	 * search all start within milliseconds and all miss the same empty cache.
+	 *
+	 * Measured live on 2026-08-31 for `ifiroumelioti Ασυρματο δίκτυο`: two
+	 * identical resolutions of the same terms against the same mailbox,
+	 * 25,493 ms and 22,185 ms, serialised behind the per-account IMAP limit
+	 * into the ~50 s actually waited. Identical inputs, identical outputs,
+	 * paid twice.
+	 *
+	 * @param callable(IMemcache&MockObject): void $arrange
+	 * @return array{0: Provider, 1: \stdClass} the provider, and a counter
+	 *                                          whose ->calls is how many IMAP connections it opened
+	 */
+	private function providerWithMemcache(callable $arrange): array {
+		$memcache = $this->createMock(IMemcache::class);
+		$arrange($memcache);
+		$cacheFactory = $this->createMock(ICacheFactory::class);
+		$cacheFactory->method('createDistributed')->willReturn($memcache);
+
+		$clientFactory = $this->createMock(IMAPClientFactory::class);
+		$counter = new \stdClass();
+		$counter->calls = 0;
+		$clientFactory->method('getClient')->willReturnCallback(function () use ($counter) {
+			$counter->calls++;
+			$client = $this->createMock(Horde_Imap_Client_Socket::class);
+			$client->method('search')->willReturn(['match' => (object)['ids' => [99]]]);
+			return $client;
+		});
+
+		$provider = new Provider($clientFactory, $cacheFactory);
+		// No real seconds in the wait loop.
+		$tick = 0.0;
+		$provider->setWaitHooksForTesting(
+			static function () use (&$tick): float {
+				$tick += 1.0;
+				return $tick;
+			},
+			static function (int $microseconds): void {
+			},
+		);
+		return [$provider, $counter];
+	}
+
+	public function testAWaiterTakesTheLeadersResultInsteadOfSearchingAgain(): void {
+		[$provider, $counter] = $this->providerWithMemcache(function (IMemcache&MockObject $memcache): void {
+			// Someone else already claimed this exact search.
+			$memcache->method('add')->willReturn(false);
+			$reads = 0;
+			$memcache->method('get')->willReturnCallback(static function (string $key) use (&$reads) {
+				if (str_ends_with($key, '-inflight')) {
+					return '1';
+				}
+				// Empty on the first look, then the leader stores its answer.
+				return ++$reads > 1 ? '[42]' : null;
+			});
+		});
+
+		$ids = $provider->findAnyMatch($this->account(4), $this->mailbox(39, 'INBOX'), ['needle']);
+
+		self::assertSame([42], $ids);
+		self::assertSame(0, $counter->calls, 'a waiter must not open its own IMAP connection');
+	}
+
+	/**
+	 * A leader can die between claiming and answering. Waiting out the full
+	 * ceiling for a search that will never arrive would turn one crash into a
+	 * stalled inbox, so the disappearance of the claim releases the waiter
+	 * immediately -- to do the work itself, never to fail.
+	 */
+	public function testAWaiterSearchesItselfWhenTheLeaderDisappears(): void {
+		[$provider, $counter] = $this->providerWithMemcache(function (IMemcache&MockObject $memcache): void {
+			$memcache->method('add')->willReturn(false);
+			// No result, and no claim either: nobody is coming.
+			$memcache->method('get')->willReturn(null);
+		});
+
+		$ids = $provider->findAnyMatch($this->account(4), $this->mailbox(39, 'INBOX'), ['needle']);
+
+		self::assertSame([99], $ids);
+		self::assertSame(1, $counter->calls);
+	}
+
+	/**
+	 * The claim is released after the result is stored, and released even when
+	 * the search threw -- the next request must be free to retry at once
+	 * rather than sit out the lock's full TTL.
+	 */
+	public function testTheClaimIsReleasedEvenWhenTheSearchFails(): void {
+		$memcache = $this->createMock(IMemcache::class);
+		$memcache->method('add')->willReturn(true);
+		$memcache->method('get')->willReturn(null);
+		$memcache->expects($this->once())
+			->method('remove')
+			->with($this->stringEndsWith('-inflight'));
+		$cacheFactory = $this->createMock(ICacheFactory::class);
+		$cacheFactory->method('createDistributed')->willReturn($memcache);
+
+		$clientFactory = $this->createMock(IMAPClientFactory::class);
+		$client = $this->createMock(Horde_Imap_Client_Socket::class);
+		$client->method('search')->willThrowException(new \Horde_Imap_Client_Exception('boom'));
+		$clientFactory->method('getClient')->willReturn($client);
+
+		$provider = new Provider($clientFactory, $cacheFactory);
+
+		$this->expectException(\OCA\Mail\Exception\ServiceException::class);
+		try {
+			$provider->findAnyMatch($this->account(4), $this->mailbox(39, 'INBOX'), ['needle']);
+		} finally {
+			// The remove() expectation is the assertion; this keeps the throw.
+		}
+	}
+
+	/**
+	 * Not every install has a memcache, and one without an atomic add cannot
+	 * single-flight anything. That must degrade to exactly the previous
+	 * behaviour -- search and cache -- not to an error and not to a wait.
+	 */
+	public function testACacheWithoutAtomicAddKeepsSearchingAsBefore(): void {
+		// $this->cache is a plain ICache, so `instanceof IMemcache` is false.
+		$this->cache->method('get')->willReturn(null);
+		$imapClient = $this->createMock(Horde_Imap_Client_Socket::class);
+		$imapClient->method('search')->willReturn(['match' => (object)['ids' => [7]]]);
+		$this->clientFactory->expects($this->once())
+			->method('getClient')
+			->willReturn($imapClient);
+
+		$ids = $this->provider->findAnyMatch($this->account(4), $this->mailbox(39, 'INBOX'), ['needle']);
+
+		self::assertSame([7], $ids);
 	}
 
 	/**

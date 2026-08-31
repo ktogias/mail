@@ -20,12 +20,15 @@ use OCA\Mail\IMAP\IMAPClientFactory;
 use OCA\Mail\Service\Search\SearchQuery;
 use OCP\ICache;
 use OCP\ICacheFactory;
+use OCP\IMemcache;
 use function array_reduce;
 use function array_unique;
+use function hrtime;
 use function json_decode;
 use function json_encode;
 use function md5;
 use function sort;
+use function usleep;
 
 class Provider {
 	/**
@@ -41,13 +44,150 @@ class Provider {
 	 */
 	private const CACHE_TTL_SECONDS = 300;
 
+	/**
+	 * How long a claim on an in-flight search stays valid.
+	 *
+	 * Only an upper bound for a leader that DIED: a healthy one releases as
+	 * soon as it has stored its result. Comfortably past the slowest search
+	 * measured on this install (25.5 s against isi.gr), because expiring
+	 * while the leader is still working is the one outcome that costs more
+	 * than having no lock at all -- every waiter would then start its own
+	 * round trip on top of the one already running.
+	 */
+	private const SEARCH_LOCK_TTL_SECONDS = 60;
+
+	/**
+	 * How long a waiter will wait before doing the search itself.
+	 *
+	 * A waiter is not idling: without this it would be spending the same time
+	 * on its OWN IMAP round trip, so waiting is strictly cheaper for both this
+	 * server and the mail server. It still has to be bounded -- a worker
+	 * blocked here is a worker not serving anything else -- and it stops early
+	 * the moment the result appears or the claim disappears, which is the
+	 * normal case: two searches that start together finish together.
+	 */
+	private const WAIT_CEILING_SECONDS = 30;
+
+	private const POLL_INTERVAL_MICROSECONDS = 250000;
+
 	private ICache $cache;
+
+	/** @var null|callable(): float */
+	private $monotonic = null;
+
+	/** @var null|callable(int): void */
+	private $sleeper = null;
 
 	public function __construct(
 		private IMAPClientFactory $clientFactory,
 		ICacheFactory $cacheFactory,
 	) {
 		$this->cache = $cacheFactory->createDistributed('mail_body_search');
+	}
+
+	/**
+	 * Drive the wait loop from a test without spending real seconds in it.
+	 */
+	public function setWaitHooksForTesting(callable $monotonic, callable $sleeper): void {
+		$this->monotonic = $monotonic;
+		$this->sleeper = $sleeper;
+	}
+
+	private function now(): float {
+		if ($this->monotonic === null) {
+			return hrtime(true) / 1_000_000_000;
+		}
+		return ($this->monotonic)();
+	}
+
+	private function pause(): void {
+		if ($this->sleeper === null) {
+			usleep(self::POLL_INTERVAL_MICROSECONDS);
+			return;
+		}
+		($this->sleeper)(self::POLL_INTERVAL_MICROSECONDS);
+	}
+
+	/**
+	 * Run a body search once, however many requests ask for it at once.
+	 *
+	 * The result cache alone does not achieve this. It only helps a request
+	 * that arrives AFTER another has finished, and the requests this app
+	 * makes arrive together: the priority sections, and each window of a
+	 * progressive search, all start within milliseconds of each other and
+	 * therefore all miss the same empty cache.
+	 *
+	 * Measured live on 2026-08-31, one search for `ifiroumelioti Ασυρματο
+	 * δίκτυο`: two identical resolutions of the same terms against the same
+	 * mailbox, 25,493 ms and 22,185 ms, serialised behind the per-account
+	 * IMAP limit into the ~50 s the user actually waited. Identical inputs,
+	 * identical outputs, paid twice.
+	 *
+	 * So the claim is taken BEFORE the search and released AFTER the result
+	 * is stored -- never the other way round, or a waiter would wake to find
+	 * neither a lock nor an answer and start a third round trip.
+	 *
+	 * Every failure mode degrades to today's behaviour rather than to an
+	 * error: no atomic add available (the cache is not a memcache), the claim
+	 * lost, the leader gone, or the wait exhausted all end with this request
+	 * doing the search itself.
+	 *
+	 * @param callable(): int[] $search
+	 * @return int[]
+	 * @throws ServiceException
+	 */
+	private function resolveOnce(string $cacheKey, callable $search): array {
+		$cached = $this->cache->get($cacheKey);
+		if ($cached !== null) {
+			return json_decode($cached, true);
+		}
+
+		$lockKey = $cacheKey . '-inflight';
+		$leads = !($this->cache instanceof IMemcache)
+			|| $this->cache->add($lockKey, '1', self::SEARCH_LOCK_TTL_SECONDS);
+
+		if (!$leads) {
+			$waited = $this->awaitResult($cacheKey, $lockKey);
+			if ($waited !== null) {
+				return $waited;
+			}
+			// The leader died, or took longer than anyone should wait for it.
+			// Fall through and pay for the search rather than fail.
+		}
+
+		try {
+			$ids = $search();
+			$this->cache->set($cacheKey, json_encode($ids), self::CACHE_TTL_SECONDS);
+		} finally {
+			// Released even when the search threw: the next request must be
+			// free to try again immediately, not sit out the lock's TTL.
+			if ($leads && $this->cache instanceof IMemcache) {
+				$this->cache->remove($lockKey);
+			}
+		}
+		return $ids;
+	}
+
+	/**
+	 * @return int[]|null the leader's result, or null to go and search
+	 */
+	private function awaitResult(string $cacheKey, string $lockKey): ?array {
+		$deadline = $this->now() + self::WAIT_CEILING_SECONDS;
+		while ($this->now() < $deadline) {
+			$this->pause();
+
+			$cached = $this->cache->get($cacheKey);
+			if ($cached !== null) {
+				return json_decode($cached, true);
+			}
+
+			// Checked AFTER the result, never before: a leader that has just
+			// stored its answer and released is a hit, not a failure.
+			if ($this->cache->get($lockKey) === null) {
+				return null;
+			}
+		}
+		return null;
 	}
 
 	/**
@@ -74,16 +214,23 @@ class Provider {
 		// the date range, so freshness comes from the sync tokens instead
 		// of from a short expiry.
 		$cacheKey = $this->buildCacheKey($account, $mailbox, $searchQuery);
-		$cached = $this->cache->get($cacheKey);
-		if ($cached !== null) {
-			return json_decode($cached, true);
-		}
+		return $this->resolveOnce($cacheKey, function () use ($account, $mailbox, $searchQuery): array {
+			return $this->runSearch($account, $mailbox, $this->convertMailQueryToHordeQuery($searchQuery), 'Could not get message IDs');
+		});
+	}
 
+	/**
+	 * One IMAP round trip: connect, SEARCH, log out.
+	 *
+	 * @return int[]
+	 * @throws ServiceException
+	 */
+	private function runSearch(Account $account, Mailbox $mailbox, Horde_Imap_Client_Search_Query $query, string $failureContext): array {
 		$client = $this->clientFactory->getClient($account);
 		try {
 			$fetchResult = $client->search(
 				$mailbox->getName(),
-				$this->convertMailQueryToHordeQuery($searchQuery)
+				$query
 			);
 		} catch (Horde_Imap_Client_Exception|Horde_Imap_Client_Data_Format_Exception $e) {
 			// Data_Format_Exception (thrown by build(), called inside
@@ -94,14 +241,12 @@ class Provider {
 			// uncaught: a raw, unclean error instead of the same
 			// ServiceException every other IMAP failure in this method
 			// produces.
-			throw new ServiceException('Could not get message IDs: ' . $e->getMessage(), 0, $e);
+			throw new ServiceException($failureContext . ': ' . $e->getMessage(), 0, $e);
 		} finally {
 			$client->logout();
 		}
 
-		$ids = $fetchResult['match']->ids;
-		$this->cache->set($cacheKey, json_encode($ids), self::CACHE_TTL_SECONDS);
-		return $ids;
+		return $fetchResult['match']->ids;
 	}
 
 	/**
@@ -127,11 +272,6 @@ class Provider {
 			$mailbox->getCacheBuster(),
 			...$terms,
 		]));
-		$cached = $this->cache->get($cacheKey);
-		if ($cached !== null) {
-			return json_decode($cached, true);
-		}
-
 		$query = new Horde_Imap_Client_Search_Query();
 		$query->charset('UTF-8', false);
 		$alternatives = [];
@@ -157,17 +297,7 @@ class Provider {
 		}
 		$query->orSearch($alternatives);
 
-		$client = $this->clientFactory->getClient($account);
-		try {
-			$result = $client->search($mailbox->getName(), $query);
-		} catch (Horde_Imap_Client_Exception|Horde_Imap_Client_Data_Format_Exception $e) {
-			throw new ServiceException('Could not get candidate message IDs: ' . $e->getMessage(), 0, $e);
-		} finally {
-			$client->logout();
-		}
-		$ids = $result['match']->ids;
-		$this->cache->set($cacheKey, json_encode($ids), self::CACHE_TTL_SECONDS);
-		return $ids;
+		return $this->resolveOnce($cacheKey, fn (): array => $this->runSearch($account, $mailbox, $query, 'Could not get candidate message IDs'));
 	}
 
 	/**
@@ -199,27 +329,12 @@ class Provider {
 			$term,
 			md5(implode(',', $candidates)),
 		]));
-		$cached = $this->cache->get($cacheKey);
-		if ($cached !== null) {
-			return json_decode($cached, true);
-		}
-
 		$query = new Horde_Imap_Client_Search_Query();
 		$query->charset('UTF-8', false);
 		$query->text($term, true);
 		$query->ids(new Horde_Imap_Client_Ids($candidates));
 
-		$client = $this->clientFactory->getClient($account);
-		try {
-			$result = $client->search($mailbox->getName(), $query);
-		} catch (Horde_Imap_Client_Exception|Horde_Imap_Client_Data_Format_Exception $e) {
-			throw new ServiceException('Could not narrow candidates: ' . $e->getMessage(), 0, $e);
-		} finally {
-			$client->logout();
-		}
-		$ids = $result['match']->ids;
-		$this->cache->set($cacheKey, json_encode($ids), self::CACHE_TTL_SECONDS);
-		return $ids;
+		return $this->resolveOnce($cacheKey, fn (): array => $this->runSearch($account, $mailbox, $query, 'Could not narrow candidates'));
 	}
 
 	/**
