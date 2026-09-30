@@ -14,6 +14,7 @@ use Horde_Imap_Client_Base;
 use Horde_Imap_Client_Exception;
 use Horde_Imap_Client_Ids;
 use OCA\Mail\Account;
+use OCA\Mail\BackgroundJob\FlagsCatchUpJob;
 use OCA\Mail\BackgroundJob\RepairMailboxJob;
 use OCA\Mail\Cache\HordeSyncToken;
 use OCA\Mail\Cache\HordeSyncTokenParser;
@@ -619,19 +620,30 @@ class ImapToDbSynchronizer {
 			$newOrVanished = $newMessages !== [];
 		}
 		if ($criteria & Horde_Imap_Client::SYNC_FLAGSUIDS) {
-			$response = $this->synchronizer->sync(
-				$client,
-				new Request(
-					$requestId,
-					$mailbox->getName(),
-					$mailbox->getSyncChangedToken(),
-					$uids
-				),
-				$account->getUserId(),
-				$hasQresync,
-				$logger,
-				Horde_Imap_Client::SYNC_FLAGSUIDS,
-			);
+			try {
+				$response = $this->synchronizer->sync(
+					$client,
+					new Request(
+						$requestId,
+						$mailbox->getName(),
+						$mailbox->getSyncChangedToken(),
+						$uids
+					),
+					$account->getUserId(),
+					$hasQresync,
+					$logger,
+					Horde_Imap_Client::SYNC_FLAGSUIDS,
+				);
+			} catch (Horde_Imap_Client_Exception $e) {
+				// A flags phase that cannot finish never advances its token, so
+				// the next one has MORE to do and fails the same way -- a spiral
+				// with no exit (.136: a Gmail INBOX 7,440 changes behind, 36 s
+				// of SEARCH against a 20 s deadline, flags frozen for days).
+				// Hand the mailbox to a pass that is allowed the time, then fail
+				// as before.
+				$this->requestFlagsCatchUp($mailbox, $logger);
+				throw $e;
+			}
 			$perf->step('get changed messages via Horde');
 
 			$permflagsEnabled = $this->mailManager->isPermflagsEnabled($client, $account, $mailbox->getName());
@@ -885,6 +897,37 @@ class ImapToDbSynchronizer {
 		} catch (Throwable $e) {
 			// Detecting a problem must never break the sync that noticed it.
 			$logger->warning("Could not queue a repair for mailbox {$mailbox->getId()}", [
+				'exception' => $e,
+			]);
+		}
+	}
+
+	/**
+	 * Queue one extended-deadline flags pass for a mailbox whose flags phase
+	 * failed, at most once per cooldown. Same shape and same reasons as
+	 * requestRepair(): the failure repeats on every poll until it is cured, and
+	 * a pass that cannot be cured must not be re-queued every cron cycle.
+	 */
+	private function requestFlagsCatchUp(Mailbox $mailbox, LoggerInterface $logger): void {
+		$argument = ['mailboxId' => $mailbox->getId()];
+		try {
+			$cache = $this->cacheFactory->createDistributed('mail_flags_catch_up_request');
+			$cooldownKey = (string)$mailbox->getId();
+			if ($cache->get($cooldownKey) !== null) {
+				return;
+			}
+			if ($this->jobList->has(FlagsCatchUpJob::class, $argument)) {
+				return;
+			}
+			$this->jobList->add(FlagsCatchUpJob::class, $argument);
+			$cache->set($cooldownKey, 1, self::REPAIR_REQUEST_COOLDOWN_SECONDS);
+			$logger->warning(sprintf(
+				'The flags phase of mailbox %d failed; queued a catch-up pass with an extended deadline',
+				$mailbox->getId(),
+			));
+		} catch (Throwable $e) {
+			// Detecting a problem must never replace the error being reported.
+			$logger->warning("Could not queue a flags catch-up for mailbox {$mailbox->getId()}", [
 				'exception' => $e,
 			]);
 		}

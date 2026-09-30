@@ -15,6 +15,7 @@ use Horde_Imap_Client_Data_Capability_Imap;
 use Horde_Imap_Client_Ids;
 use Horde_Imap_Client_Socket;
 use OCA\Mail\Account;
+use OCA\Mail\BackgroundJob\FlagsCatchUpJob;
 use OCA\Mail\BackgroundJob\RepairMailboxJob;
 use OCA\Mail\Cache\HordeSyncTokenParser;
 use OCA\Mail\Contracts\IMailManager;
@@ -29,6 +30,7 @@ use OCA\Mail\Events\NewMessagesSynchronized;
 use OCA\Mail\Events\SynchronizationEvent;
 use OCA\Mail\Exception\IncompleteSyncException;
 use OCA\Mail\Exception\MailboxLockedException;
+use OCA\Mail\Exception\ServiceException;
 use OCA\Mail\IMAP\IMAPClientFactory;
 use OCA\Mail\IMAP\MessageMapper as ImapMessageMapper;
 use OCA\Mail\IMAP\Sync\Synchronizer;
@@ -721,6 +723,58 @@ class ImapToDbSynchronizerTest extends TestCase {
 		$this->jobList->expects($this->never())->method('add');
 
 		$this->runPartialSyncPass($client, $mailbox);
+	}
+
+	/**
+	 * .136: the flags phase must not fail forever. A token that cannot advance
+	 * makes the next attempt costlier still (Gmail INBOX: 7,440 changes behind,
+	 * 36 s of SEARCH against a 20 s deadline), so a failure queues one pass
+	 * that is given the time -- and still reports the failure as before.
+	 */
+	public function testAFailingFlagsPhaseQueuesACatchUpAndStillFails(): void {
+		$mailbox = $this->buildPartialSyncMailbox();
+		// HIGHESTMODSEQ moved (301 vs the token's 300): only the flags phase runs.
+		$client = $this->buildStatusClient([
+			'uidvalidity' => 200,
+			'uidnext' => 100,
+			'highestmodseq' => 301,
+			'messages' => 42,
+		]);
+		$this->dbMapper->method('countByMailbox')->willReturn(42);
+		$this->repairCooldownCache->method('get')->willReturn(null);
+		$this->jobList->method('has')->willReturn(false);
+		$imapSync = $this->createMock(Synchronizer::class);
+		$imapSync->method('sync')->willThrowException(new \Horde_Imap_Client_Exception('Error when communicating with the mail server.'));
+
+		$this->jobList->expects($this->once())
+			->method('add')
+			->with(FlagsCatchUpJob::class, ['mailboxId' => 149]);
+
+		// Reported exactly as before: sync() wraps it, as the live log shows.
+		$this->expectException(ServiceException::class);
+		$this->runPass($client, $imapSync, $mailbox);
+	}
+
+	public function testAFailingFlagsPhaseIsNotRequeuedWithinTheCooldown(): void {
+		$mailbox = $this->buildPartialSyncMailbox();
+		$client = $this->buildStatusClient([
+			'uidvalidity' => 200,
+			'uidnext' => 100,
+			'highestmodseq' => 301,
+			'messages' => 42,
+		]);
+		$this->dbMapper->method('countByMailbox')->willReturn(42);
+		// A catch-up was already asked for: a mailbox the catch-up cannot cure
+		// must not queue one every cron cycle.
+		$this->repairCooldownCache->method('get')->willReturn(1);
+		$imapSync = $this->createMock(Synchronizer::class);
+		$imapSync->method('sync')->willThrowException(new \Horde_Imap_Client_Exception('timeout'));
+
+		$this->jobList->expects($this->never())->method('add');
+
+		// Reported exactly as before: sync() wraps it, as the live log shows.
+		$this->expectException(ServiceException::class);
+		$this->runPass($client, $imapSync, $mailbox);
 	}
 
 	public function testPartialSyncKeepsTheFlagsPhaseWithoutAModseqCapableToken(): void {
