@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, it } from 'vitest'
-import { findShadowedUnreadCopies } from '../../../util/shadowedCopies.js'
+import { findShadowedUnreadCopies, findShadowedUnreadCopiesOfThread } from '../../../util/shadowedCopies.js'
 
 function envelope(databaseId, messageId, seen, accountId = 4) {
 	return {
@@ -65,5 +65,55 @@ describe('shadowed copies', () => {
 		]
 
 		expect(findShadowedUnreadCopies(envelopes, envelopes[0])).toEqual([])
+	})
+})
+
+describe('shadowed copies of a whole thread', () => {
+	it('finds the unread copy hidden behind a read message nobody will expand', () => {
+		// The .133 case: the same GitHub review notification delivered twice,
+		// fifteen hours apart. The thread shows the read copy; the unread one
+		// kept a 327-message thread bold in the list.
+		const twin = envelope(2076973, '<review/5337787773@github.com>', true, 3)
+		const hidden = envelope(2077442, '<review/5337787773@github.com>', false, 3)
+		const newest = envelope(2079189, '<newest@github.com>', true, 3)
+
+		expect(findShadowedUnreadCopiesOfThread([twin, hidden, newest], [twin, newest])).toEqual([2077442])
+	})
+
+	it('never marks copies of a message that is unread where it is shown', () => {
+		// That message will be expanded and read in its own right, and its
+		// copies follow it then. Reading it on the user's behalf here would
+		// mark something read that nobody has read in any copy.
+		const shown = envelope(1, '<a@example.com>', false)
+		const hidden = envelope(2, '<a@example.com>', false)
+
+		expect(findShadowedUnreadCopiesOfThread([shown, hidden], [shown])).toEqual([])
+	})
+
+	it('never returns a copy that is itself on screen', () => {
+		const a = envelope(1, '<a@example.com>', true)
+		const b = envelope(2, '<a@example.com>', false)
+
+		expect(findShadowedUnreadCopiesOfThread([a, b], [a, b])).toEqual([])
+	})
+
+	it('stays inside the account, as the dedup it mirrors does', () => {
+		const shown = envelope(1, '<a@example.com>', true, 4)
+		const elsewhere = envelope(2, '<a@example.com>', false, 5)
+
+		expect(findShadowedUnreadCopiesOfThread([shown, elsewhere], [shown])).toEqual([])
+	})
+
+	it('cannot group rows without a Message-ID', () => {
+		const shown = envelope(1, undefined, true)
+		const other = envelope(2, undefined, false)
+
+		expect(findShadowedUnreadCopiesOfThread([shown, other], [shown])).toEqual([])
+	})
+
+	it('is inert on empty or malformed input', () => {
+		expect(findShadowedUnreadCopiesOfThread(undefined, [])).toEqual([])
+		expect(findShadowedUnreadCopiesOfThread([], undefined)).toEqual([])
+		expect(findShadowedUnreadCopiesOfThread([envelope(1, '<a>', false)], [])).toEqual([])
 	})
 })

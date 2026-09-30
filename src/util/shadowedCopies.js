@@ -48,3 +48,56 @@ export function findShadowedUnreadCopies(envelopes, envelope) {
 			&& other.flags?.seen === false)
 		.map((other) => other.databaseId)
 }
+
+/**
+ * Find every still-unread copy shadowed by the READ messages of a thread.
+ *
+ * findShadowedUnreadCopies() answers this for one envelope, and is called when
+ * that envelope is expanded. That leaves a hole .132 showed live: a copy whose
+ * visible twin was read long ago is only ever tidied if someone expands that
+ * twin again. In a 327-message conversation the thread opens on its newest
+ * message, the read twin stays collapsed three hundred rows up, and the hidden
+ * copy keeps the whole thread bold in the list forever -- while every message
+ * the thread view shows is already read, so nothing on screen explains why.
+ *
+ * A visible copy that is READ stands for its hidden copies, which is the
+ * contract above. A visible copy that is UNREAD does not: it will be expanded
+ * and read in its own right, and its copies follow it then. Only the first
+ * kind is answered here, so this never marks anything read that the user has
+ * not already read in some copy.
+ *
+ * One pass over the known envelopes rather than one per visible message: a
+ * long thread times a large store is the case this exists for.
+ *
+ * @param {object[]} envelopes every envelope currently known
+ * @param {object[]} visible the messages the thread view renders
+ * @return {number[]} database ids of the unread copies they stand for
+ */
+export function findShadowedUnreadCopiesOfThread(envelopes, visible) {
+	if (!Array.isArray(envelopes) || !Array.isArray(visible) || visible.length === 0) {
+		return []
+	}
+
+	const visibleIds = new Set()
+	const readKeys = new Set()
+	for (const envelope of visible) {
+		if (!envelope) {
+			continue
+		}
+		visibleIds.add(envelope.databaseId)
+		if (envelope.messageId && envelope.flags?.seen === true) {
+			readKeys.add(`${envelope.accountId}\u0000${envelope.messageId}`)
+		}
+	}
+	if (readKeys.size === 0) {
+		return []
+	}
+
+	return envelopes
+		.filter((other) => other
+			&& other.messageId
+			&& other.flags?.seen === false
+			&& !visibleIds.has(other.databaseId)
+			&& readKeys.has(`${other.accountId}\u0000${other.messageId}`))
+		.map((other) => other.databaseId)
+}

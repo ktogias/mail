@@ -9603,3 +9603,51 @@ describe('Vuex store actions', () => {
 		})
 	})
 })
+
+describe('markShadowedCopiesSeenOfThread', () => {
+	// .133: the thread-wide form of the .100 tidy. It writes \Seen to IMAP for
+	// copies the user never sees, so what it must NOT touch matters as much as
+	// what it must.
+	let store
+
+	const twin = { databaseId: 2076973, accountId: 3, mailboxId: 31, messageId: '<review@github.com>', flags: { seen: true } }
+	const hidden = { databaseId: 2077442, accountId: 3, mailboxId: 31, messageId: '<review@github.com>', flags: { seen: false } }
+	const unrelatedUnread = { databaseId: 2079000, accountId: 3, mailboxId: 31, messageId: '<other@github.com>', flags: { seen: false } }
+
+	beforeEach(() => {
+		setActivePinia(createPinia())
+		store = useMainStore()
+		vi.mocked(MessageService.setEnvelopeFlags).mockReset()
+		store.envelopes = {
+			[twin.databaseId]: { ...twin, flags: { ...twin.flags } },
+			[hidden.databaseId]: { ...hidden, flags: { ...hidden.flags } },
+			[unrelatedUnread.databaseId]: { ...unrelatedUnread, flags: { ...unrelatedUnread.flags } },
+		}
+	})
+
+	it('writes \\Seen for the hidden copy of a read message, and only for it', async () => {
+		MessageService.setEnvelopeFlags.mockResolvedValue({})
+
+		await store.markShadowedCopiesSeenOfThread([store.envelopes[twin.databaseId], store.envelopes[unrelatedUnread.databaseId]])
+
+		expect(MessageService.setEnvelopeFlags).toHaveBeenCalledTimes(1)
+		expect(MessageService.setEnvelopeFlags).toHaveBeenCalledWith(2077442, { seen: true })
+		expect(store.envelopes[2077442].flags.seen).toBe(true)
+		// Unread where it is shown: the user has not read it in any copy.
+		expect(store.envelopes[2079000].flags.seen).toBe(false)
+	})
+
+	it('makes no request at all when nothing is hidden', async () => {
+		await store.markShadowedCopiesSeenOfThread([store.envelopes[unrelatedUnread.databaseId]])
+
+		expect(MessageService.setEnvelopeFlags).not.toHaveBeenCalled()
+	})
+
+	it('puts the flag back when the write fails, instead of showing a read state IMAP never got', async () => {
+		MessageService.setEnvelopeFlags.mockRejectedValue(new Error('imap down'))
+
+		await store.markShadowedCopiesSeenOfThread([store.envelopes[twin.databaseId]])
+
+		expect(store.envelopes[2077442].flags.seen).toBe(false)
+	})
+})

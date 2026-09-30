@@ -141,7 +141,7 @@ import {
 	threadCarriesFlag,
 	threadIsUnread,
 } from '../../util/priorityInbox.js'
-import { findShadowedUnreadCopies } from '../../util/shadowedCopies.js'
+import { findShadowedUnreadCopies, findShadowedUnreadCopiesOfThread } from '../../util/shadowedCopies.js'
 import { showError, showWarning } from '../../util/toast.js'
 import { wait } from '../../util/wait.js'
 import {
@@ -5035,6 +5035,28 @@ export default function mainStoreActions() {
 				shadowed,
 			})
 
+			await this.markHiddenCopiesSeen(shadowed)
+		},
+
+		// The thread-wide form of markShadowedCopiesSeen(), for the copies
+		// behind READ messages that nobody will expand again. See
+		// findShadowedUnreadCopiesOfThread() for why the per-message form
+		// alone left a thread bold forever.
+		async markShadowedCopiesSeenOfThread(visibleEnvelopes) {
+			const shadowed = findShadowedUnreadCopiesOfThread(Object.values(this.envelopes), visibleEnvelopes)
+			if (shadowed.length === 0) {
+				return
+			}
+
+			logger.info('Marking copies hidden behind read messages of this thread as read', { shadowed })
+
+			await this.markHiddenCopiesSeen(shadowed)
+		},
+
+		// One request per copy, sequentially: these are IMAP flag writes on a
+		// machine whose per-account connection budget is small, and there is
+		// normally one of them, not hundreds.
+		async markHiddenCopiesSeen(shadowed) {
 			for (const databaseId of shadowed) {
 				const copy = this.envelopes[databaseId]
 				try {

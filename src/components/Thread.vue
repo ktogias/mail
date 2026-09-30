@@ -860,7 +860,16 @@ export default {
 		markThreadSeen(targetSeen) {
 			Promise.all(this.thread
 				.filter((envelope) => Boolean(envelope.flags.seen) !== targetSeen)
-				.map((envelope) => this.mainStore.toggleEnvelopeSeen({ envelope }))).catch((error) => {
+				.map((envelope) => this.mainStore.toggleEnvelopeSeen({ envelope }))).then(() => {
+				// "Mark all as read" skipped every message that already read
+				// as read, and with it every unread copy hidden behind one --
+				// so the one action meant to clear a bold thread could not
+				// clear this kind at all.
+				if (targetSeen) {
+					return this.mainStore.markShadowedCopiesSeenOfThread(this.thread)
+				}
+				return undefined
+			}).catch((error) => {
 				logger.error('could not update thread read state', { error })
 				showError(t('mail', 'Could not update read status'))
 			})
@@ -1399,6 +1408,15 @@ export default {
 				this.loadThreadTasks(threadId)
 
 				this.prefetchThreadNeighborhood(target)
+
+				// Tidy the unread copies hidden behind messages that are
+				// already read. ThreadEnvelope does this for the one it
+				// expands, but a read message is only expanded again if the
+				// user goes looking for it -- in a long thread, never. Its
+				// hidden twin then kept the list row bold with nothing on
+				// screen unread to explain it. Fire-and-forget like the
+				// per-message form: decoration on a rendered thread.
+				this.mainStore.markShadowedCopiesSeenOfThread(this.thread).catch(() => {})
 
 				this.loading = false
 			} catch (error) {

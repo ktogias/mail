@@ -2441,3 +2441,109 @@ describe('Thread: tasks made from a message', () => {
 		expect(revealMessage).not.toHaveBeenCalled()
 	})
 })
+
+describe('Thread: unread copies hidden behind read messages', () => {
+	// The live case (.133): a 327-message GitHub review thread in which the
+	// same notification had been delivered twice, fifteen hours apart, into the
+	// same INBOX with the same Message-ID. dedupeFolderCopies() kept the READ
+	// copy (lower id, same rank) and hid the UNREAD one. The thread opened on
+	// its newest message, the read twin stayed collapsed three hundred rows up,
+	// and nothing ever marked the hidden copy read -- so the list row stayed
+	// bold while every message on screen read as read.
+	let store
+	let route
+
+	const inbox = { databaseId: 31, name: 'INBOX', specialRole: 'inbox' }
+	const readTwin = { accountId: 3, threadRootId: 'gh', databaseId: 2076973, mailboxId: 31, messageId: '<review/5337787773@github.com>', from: [], to: [], cc: [], flags: { seen: true } }
+	const hiddenUnread = { accountId: 3, threadRootId: 'gh', databaseId: 2077442, mailboxId: 31, messageId: '<review/5337787773@github.com>', from: [], to: [], cc: [], flags: { seen: false } }
+	const newest = { accountId: 3, threadRootId: 'gh', databaseId: 2079189, mailboxId: 31, messageId: '<newest@github.com>', from: [], to: [], cc: [], flags: { seen: true } }
+	const envelopes = [readTwin, hiddenUnread, newest]
+
+	const settle = async () => {
+		for (let i = 0; i < 5; i++) {
+			await new Promise((resolve) => setTimeout(resolve, 0))
+		}
+	}
+
+	async function mountThread() {
+		store.getEnvelope = vi.fn().mockImplementation((id) => envelopes.find((e) => e.databaseId === id))
+		store.getEnvelopesByThreadRootId = vi.fn().mockReturnValue(envelopes)
+		store.getMailbox = vi.fn().mockReturnValue(inbox)
+		store.getMailboxes = vi.fn().mockReturnValue([inbox])
+		store.getPreference = vi.fn().mockImplementation((key, fallback) => (
+			key === 'layout-message-view' ? 'threaded' : fallback
+		))
+		store.fetchMessage = vi.fn().mockResolvedValue({})
+		store.fetchThread = vi.fn().mockResolvedValue(envelopes)
+		store.markShadowedCopiesSeenOfThread = vi.fn().mockResolvedValue(undefined)
+		store.toggleEnvelopeSeen = vi.fn().mockResolvedValue(undefined)
+		route = { params: { threadId: 2079189 } }
+		const view = shallowMount(Thread, {
+			mocks: { $route: route },
+			store,
+			localVue,
+		})
+		await settle()
+		return view
+	}
+
+	beforeEach(() => {
+		setActivePinia(createPinia())
+		store = useMainStore()
+	})
+
+	it('hides the unread copy behind its read twin, which is why nothing on screen explains the bold row', async () => {
+		const view = await mountThread()
+
+		const ids = view.vm.thread.map((envelope) => envelope.databaseId)
+		expect(ids).toContain(2076973)
+		expect(ids).not.toContain(2077442)
+		expect(view.vm.threadHasUnread).toBe(false)
+	})
+
+	it('tidies the hidden copies when the thread opens, without anything being expanded', async () => {
+		// Opening IS the trigger: no expand, no click, no timer.
+		await mountThread()
+
+		expect(store.markShadowedCopiesSeenOfThread).toHaveBeenCalledTimes(1)
+		const visible = store.markShadowedCopiesSeenOfThread.mock.calls[0][0].map((envelope) => envelope.databaseId)
+		expect(visible).toContain(2076973)
+		expect(visible).not.toContain(2077442)
+	})
+
+	it('does not tidy anything for a thread the user left while it was loading', async () => {
+		const view = await mountThread()
+		store.markShadowedCopiesSeenOfThread.mockClear()
+		store.fetchThread = vi.fn().mockImplementation(async () => {
+			route.params.threadId = 1
+			return envelopes
+		})
+
+		await view.vm.fetchThread()
+
+		expect(store.markShadowedCopiesSeenOfThread).not.toHaveBeenCalled()
+	})
+
+	it('"mark all as read" also clears copies hidden behind messages that already read as read', async () => {
+		const view = await mountThread()
+		store.markShadowedCopiesSeenOfThread.mockClear()
+
+		view.vm.markThreadSeen(true)
+		await settle()
+
+		// Every visible message is already read, so there is nothing to toggle
+		// -- which is exactly why this action used to be powerless here.
+		expect(store.toggleEnvelopeSeen).not.toHaveBeenCalled()
+		expect(store.markShadowedCopiesSeenOfThread).toHaveBeenCalledTimes(1)
+	})
+
+	it('"mark all as unread" leaves hidden copies alone', async () => {
+		const view = await mountThread()
+		store.markShadowedCopiesSeenOfThread.mockClear()
+
+		view.vm.markThreadSeen(false)
+		await settle()
+
+		expect(store.markShadowedCopiesSeenOfThread).not.toHaveBeenCalled()
+	})
+})
