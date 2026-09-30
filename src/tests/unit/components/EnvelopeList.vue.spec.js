@@ -70,6 +70,8 @@ describe('EnvelopeList', () => {
 			expect(store.setEnvelopesSeen).toHaveBeenCalledWith({
 				envelopes: [envelopes[0], envelopes[1]],
 				seen: true,
+				// A threaded row stands for its conversation (.135).
+				wholeThreads: true,
 			})
 			// Marking read changes the messages, not which messages are here,
 			// so the selection survives -- "mark these read" is very often the

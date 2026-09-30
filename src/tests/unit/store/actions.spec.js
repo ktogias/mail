@@ -9694,3 +9694,54 @@ describe('setEnvelopeImportant across copies (.134)', () => {
 		expect(MessageService.setEnvelopeFlags).toHaveBeenCalledWith(2076973, { $label1: false })
 	})
 })
+
+describe('setEnvelopesSeen (.135)', () => {
+	let store
+
+	beforeEach(() => {
+		setActivePinia(createPinia())
+		store = useMainStore()
+		vi.mocked(MessageService.setEnvelopeFlagsBatch).mockReset()
+		MessageService.setEnvelopeFlagsBatch.mockImplementation(async (ids) => ({
+			messages: Object.fromEntries(ids.map((id) => [id, { hasUnseenInThread: false }])),
+		}))
+	})
+
+	function unread(databaseId) {
+		return { databaseId, accountId: 3, mailboxId: 31, threadRootId: 'root', flags: { seen: false } }
+	}
+
+	it('splits more than 200 ids into requests the server accepts', async () => {
+		// setFlagsBatch() answers 400 above 200 ids; the review thread behind
+		// .133 alone has 327 messages.
+		const all = Array.from({ length: 327 }, (_, i) => unread(i + 1))
+		store.envelopes = Object.fromEntries(all.map((envelope) => [envelope.databaseId, envelope]))
+
+		await store.setEnvelopesSeen({ envelopes: Object.values(store.envelopes), seen: true })
+
+		const sizes = MessageService.setEnvelopeFlagsBatch.mock.calls.map((call) => call[0].length)
+		expect(sizes).toEqual([200, 127])
+		expect(Object.values(store.envelopes).every((envelope) => envelope.flags.seen === true)).toBe(true)
+	})
+
+	it('marks the whole conversation behind a threaded list row', async () => {
+		store.envelopes = { 1: unread(1), 2: unread(2), 3: unread(3) }
+		store.getPreference = vi.fn().mockImplementation((key, fallback) => (key === 'layout-message-view' ? 'threaded' : fallback))
+		store.knownOrFetchedThreadMembers = vi.fn().mockResolvedValue([store.envelopes[1], store.envelopes[2], store.envelopes[3]])
+
+		await store.setEnvelopesSeen({ envelopes: [store.envelopes[3]], seen: true, wholeThreads: true })
+
+		expect(MessageService.setEnvelopeFlagsBatch).toHaveBeenCalledWith([1, 2, 3], { seen: true })
+	})
+
+	it('marks only the rows themselves in the flat view', async () => {
+		store.envelopes = { 1: unread(1), 2: unread(2), 3: unread(3) }
+		store.getPreference = vi.fn().mockImplementation((key, fallback) => (key === 'layout-message-view' ? 'flat' : fallback))
+		store.knownOrFetchedThreadMembers = vi.fn()
+
+		await store.setEnvelopesSeen({ envelopes: [store.envelopes[3]], seen: true, wholeThreads: true })
+
+		expect(store.knownOrFetchedThreadMembers).not.toHaveBeenCalled()
+		expect(MessageService.setEnvelopeFlagsBatch).toHaveBeenCalledWith([3], { seen: true })
+	})
+})

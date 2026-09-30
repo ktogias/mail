@@ -2152,29 +2152,35 @@ describe('Thread (fork)', () => {
 			expect(noArchive.vm.threadInlineMenuSize).toBe(1)
 		})
 
-		it('marks all as read by toggling only the messages that are still unread', async () => {
+		// .135: one batch with an explicit target; never a toggle per message.
+		// setEnvelopesSeen() filters out what is already at the target itself.
+		it('marks all as read with one explicit-target batch, not a toggle per message', async () => {
 			store.toggleEnvelopeSeen = vi.fn().mockResolvedValue()
+			store.setEnvelopesSeen = vi.fn().mockResolvedValue()
+			store.fetchThread = vi.fn().mockResolvedValue([])
 			const view = mountThread(4003)
 
-			view.vm.markThreadSeen(true)
-			await view.vm.$nextTick()
+			await view.vm.markThreadSeen(true)
 
-			// Only 4001 is unread in the fixture, so only it is toggled
-			expect(store.toggleEnvelopeSeen).toHaveBeenCalledTimes(1)
-			expect(store.toggleEnvelopeSeen).toHaveBeenCalledWith({
-				envelope: expect.objectContaining({ databaseId: 4001 }),
-			})
+			expect(store.toggleEnvelopeSeen).not.toHaveBeenCalled()
+			expect(store.setEnvelopesSeen).toHaveBeenCalledTimes(1)
+			const { envelopes, seen } = store.setEnvelopesSeen.mock.calls[0][0]
+			expect(seen).toBe(true)
+			expect(envelopes.map((envelope) => envelope.databaseId)).toContain(4001)
 		})
 
-		it('marks all as unread by toggling every currently-read message', async () => {
+		it('marks all as unread with the same batch and target false', async () => {
 			store.toggleEnvelopeSeen = vi.fn().mockResolvedValue()
+			store.setEnvelopesSeen = vi.fn().mockResolvedValue()
+			store.fetchThread = vi.fn().mockResolvedValue([])
 			const view = mountThread(5003)
 
-			view.vm.markThreadSeen(false)
-			await view.vm.$nextTick()
+			await view.vm.markThreadSeen(false)
 
-			// All three fixture messages are read -> all three toggled
-			expect(store.toggleEnvelopeSeen).toHaveBeenCalledTimes(3)
+			expect(store.toggleEnvelopeSeen).not.toHaveBeenCalled()
+			expect(store.setEnvelopesSeen).toHaveBeenCalledTimes(1)
+			expect(store.setEnvelopesSeen.mock.calls[0][0].seen).toBe(false)
+			expect(store.setEnvelopesSeen.mock.calls[0][0].envelopes).toHaveLength(3)
 		})
 
 		it('deletes the whole thread behind an undo window and closes the reading pane immediately', async () => {
@@ -2524,17 +2530,60 @@ describe('Thread: unread copies hidden behind read messages', () => {
 		expect(store.markShadowedCopiesSeenOfThread).not.toHaveBeenCalled()
 	})
 
-	it('"mark all as read" also clears copies hidden behind messages that already read as read', async () => {
+	it('"mark all as read" also reaches copies hidden behind messages that already read as read', async () => {
+		// Every VISIBLE message is already read -- which is why a filter over
+		// what the thread shows used to be powerless here. The members now come
+		// from the server, hidden copies included (.135 subsumes .133's tidy).
 		const view = await mountThread()
-		store.markShadowedCopiesSeenOfThread.mockClear()
+		store.setEnvelopesSeen = vi.fn().mockResolvedValue()
 
-		view.vm.markThreadSeen(true)
-		await settle()
+		await view.vm.markThreadSeen(true)
 
-		// Every visible message is already read, so there is nothing to toggle
-		// -- which is exactly why this action used to be powerless here.
 		expect(store.toggleEnvelopeSeen).not.toHaveBeenCalled()
-		expect(store.markShadowedCopiesSeenOfThread).toHaveBeenCalledTimes(1)
+		const { envelopes: sent, seen } = store.setEnvelopesSeen.mock.calls[0][0]
+		expect(seen).toBe(true)
+		expect(sent.map((envelope) => envelope.databaseId)).toContain(2077442)
+	})
+
+	it('"mark all" takes its members from the server, not from what the client holds (.135)', async () => {
+		// The live failure: the client's picture of a 29-message thread was
+		// incomplete, so "all" was one message and 26 unread ones were never
+		// asked about.
+		const view = await mountThread()
+		const lateMember = { accountId: 3, threadRootId: 'gh', databaseId: 2079999, mailboxId: 31, messageId: '<late@github.com>', from: [], to: [], cc: [], flags: { seen: false } }
+		const known = [...envelopes, lateMember]
+		store.getEnvelope = vi.fn().mockImplementation((id) => known.find((e) => e.databaseId === id))
+		store.fetchThread = vi.fn().mockResolvedValue(known)
+		store.setEnvelopesSeen = vi.fn().mockResolvedValue()
+
+		await view.vm.markThreadSeen(true)
+
+		expect(store.fetchThread).toHaveBeenCalledWith(2079189)
+		const ids = store.setEnvelopesSeen.mock.calls[0][0].envelopes.map((envelope) => envelope.databaseId)
+		expect(ids).toContain(2079999)
+	})
+
+	it('a second click never undoes the first: the target is explicit, not inverted (.135)', async () => {
+		// Live: six clicks sent seen=true, false, true, false, true, false for
+		// the same message, because each one inverted what the client believed.
+		const view = await mountThread()
+		store.setEnvelopesSeen = vi.fn().mockResolvedValue()
+
+		await view.vm.markThreadSeen(true)
+		await view.vm.markThreadSeen(true)
+
+		expect(store.setEnvelopesSeen.mock.calls.map((call) => call[0].seen)).toEqual([true, true])
+	})
+
+	it('falls back to the loaded messages when the refresh fails, and still marks them', async () => {
+		const view = await mountThread()
+		store.fetchThread = vi.fn().mockRejectedValue(new Error('offline'))
+		store.setEnvelopesSeen = vi.fn().mockResolvedValue()
+
+		await view.vm.markThreadSeen(true)
+
+		expect(store.setEnvelopesSeen).toHaveBeenCalledTimes(1)
+		expect(store.setEnvelopesSeen.mock.calls[0][0].envelopes.length).toBeGreaterThan(0)
 	})
 
 	it('knows a message is important when only a hidden copy of it is (.134)', async () => {
@@ -2550,13 +2599,17 @@ describe('Thread: unread copies hidden behind read messages', () => {
 		}
 	})
 
-	it('"mark all as unread" leaves hidden copies alone', async () => {
+	it('"mark all as unread" marks every copy unread, hidden ones included (.135)', async () => {
+		// The thread then reads unread everywhere, consistently -- a hidden
+		// copy left read would be harmless, but there is no reason to leave the
+		// copies disagreeing.
 		const view = await mountThread()
-		store.markShadowedCopiesSeenOfThread.mockClear()
+		store.setEnvelopesSeen = vi.fn().mockResolvedValue()
 
-		view.vm.markThreadSeen(false)
-		await settle()
+		await view.vm.markThreadSeen(false)
 
-		expect(store.markShadowedCopiesSeenOfThread).not.toHaveBeenCalled()
+		const { envelopes: sent, seen } = store.setEnvelopesSeen.mock.calls[0][0]
+		expect(seen).toBe(false)
+		expect(sent.map((envelope) => envelope.databaseId)).toContain(2077442)
 	})
 })

@@ -877,22 +877,47 @@ export default {
 		// Mark every message in the thread read (targetSeen=true) or unread
 		// (false). Only the ones that actually differ are toggled. Reversible
 		// and cheap, so no undo toast -- unlike the removal actions below.
-		markThreadSeen(targetSeen) {
-			Promise.all(this.thread
-				.filter((envelope) => Boolean(envelope.flags.seen) !== targetSeen)
-				.map((envelope) => this.mainStore.toggleEnvelopeSeen({ envelope }))).then(() => {
-				// "Mark all as read" skipped every message that already read
-				// as read, and with it every unread copy hidden behind one --
-				// so the one action meant to clear a bold thread could not
-				// clear this kind at all.
-				if (targetSeen) {
-					return this.mainStore.markShadowedCopiesSeenOfThread(this.thread)
+		// Mark every message of the conversation read (targetSeen=true) or
+		// unread (false).
+		//
+		// Three properties, each learned from a live failure (.135): a
+		// 29-message GitHub thread sent SIX requests over six clicks, all for
+		// one message, alternately seen=true and seen=false, while 26 unread
+		// messages were never asked about at all.
+		//
+		// - An explicit target, never a toggle. Each click used to INVERT
+		//   whatever the client believed, so a second click -- the button had
+		//   meanwhile turned into "Mark all as unread" -- undid the first.
+		// - Members from the server, not from what this client happens to hold.
+		//   The client's picture of the thread was incomplete, so "all" meant
+		//   one. A fresh fetch costs one request and makes "all" mean all,
+		//   hidden duplicates included -- which also clears the copies .133
+		//   tidies, because marking the whole thread read is the user reading
+		//   every copy.
+		// - One batch through setEnvelopesSeen(), instead of a toggle per
+		//   message racing the auto-mark-as-read timer of the expanded one.
+		async markThreadSeen(targetSeen) {
+			let members = this.thread
+			try {
+				const fresh = await this.mainStore.fetchThread(this.threadId)
+				if (Array.isArray(fresh) && fresh.length > 0) {
+					const resolved = fresh
+						.map((envelope) => this.mainStore.getEnvelope(envelope.databaseId))
+						.filter(Boolean)
+					if (resolved.length > 0) {
+						members = resolved
+					}
 				}
-				return undefined
-			}).catch((error) => {
+			} catch (error) {
+				logger.warn('could not refresh the thread before marking it; using the messages already loaded', { error })
+			}
+
+			try {
+				await this.mainStore.setEnvelopesSeen({ envelopes: members, seen: targetSeen })
+			} catch (error) {
 				logger.error('could not update thread read state', { error })
 				showError(t('mail', 'Could not update read status'))
-			})
+			}
 		},
 
 		archiveThread() {

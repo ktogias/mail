@@ -142,6 +142,9 @@ import {
 	threadIsUnread,
 } from '../../util/priorityInbox.js'
 import { findShadowedUnreadCopies, findShadowedUnreadCopiesOfThread } from '../../util/shadowedCopies.js'
+
+// The server's setFlagsBatch() refuses more ids than this in one request.
+const SEEN_BATCH_LIMIT = 200
 import { showError, showWarning } from '../../util/toast.js'
 import { wait } from '../../util/wait.js'
 import {
@@ -5214,10 +5217,29 @@ export default function mainStoreActions() {
 				}
 			})
 		},
-		async setEnvelopesSeen({ envelopes, seen }) {
+		async setEnvelopesSeen({ envelopes, seen, wholeThreads = false }) {
 			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
-				const targets = envelopes.filter((envelope) => envelope.flags.seen !== seen)
+				// A list row in the threaded view stands for its whole
+				// conversation, and it is drawn bold from the THREAD aggregate
+				// (hasUnseenInThread). Marking only the row's own message left
+				// that aggregate true on the server -- the response said so,
+				// and the row went bold again (.135). Importance already
+				// expands this way; seen now matches it.
+				let candidates = envelopes
+				if (wholeThreads && this.getPreference('layout-message-view', 'threaded') === 'threaded') {
+					const membersPerEnvelope = await Promise.all(envelopes.map((envelope) => this.knownOrFetchedThreadMembers(envelope)))
+					const byId = new Map()
+					for (const members of membersPerEnvelope) {
+						for (const member of members) {
+							if (member) {
+								byId.set(member.databaseId, member)
+							}
+						}
+					}
+					candidates = [...byId.values()]
+				}
+				const targets = candidates.filter((envelope) => envelope.flags.seen !== seen)
 				if (targets.length === 0) {
 					return
 				}
@@ -5238,12 +5260,18 @@ export default function mainStoreActions() {
 				})
 
 				try {
-					const response = await setEnvelopeFlagsBatch(
-						targets.map((envelope) => envelope.databaseId),
-						{ seen },
-					)
+					// The batch endpoint refuses more than 200 ids, and a long
+					// conversation marked read as a whole is more than that (the
+					// GitHub review thread behind .133 is 327). Sequential, not
+					// parallel: these are IMAP writes behind one mutation slot.
+					const ids = targets.map((envelope) => envelope.databaseId)
+					const messages = {}
+					for (let offset = 0; offset < ids.length; offset += SEEN_BATCH_LIMIT) {
+						const response = await setEnvelopeFlagsBatch(ids.slice(offset, offset + SEEN_BATCH_LIMIT), { seen })
+						Object.assign(messages, response?.messages ?? {})
+					}
 					targets.forEach((envelope) => {
-						const authoritative = response?.messages?.[envelope.databaseId]
+						const authoritative = messages[envelope.databaseId]
 						if (authoritative?.hasUnseenInThread !== undefined) {
 							this.setHasUnseenInThreadForThreadMutation(
 								envelope,

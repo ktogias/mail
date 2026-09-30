@@ -640,6 +640,7 @@ export default {
 			this.mainStore.setEnvelopesSeen({
 				envelopes,
 				seen: true,
+				wholeThreads: true,
 			}).catch((error) => {
 				logger.error('could not mark selected messages as read', { error })
 				showError(t('mail', 'Could not update read status for the selected messages'))
@@ -652,6 +653,7 @@ export default {
 			this.mainStore.setEnvelopesSeen({
 				envelopes,
 				seen: false,
+				wholeThreads: true,
 			}).catch((error) => {
 				logger.error('could not mark selected messages as unread', { error })
 				showError(t('mail', 'Could not update read status for the selected messages'))
