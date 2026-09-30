@@ -15,6 +15,7 @@ use Horde_Imap_Client_Data_Capability_Imap;
 use Horde_Imap_Client_Ids;
 use Horde_Imap_Client_Socket;
 use OCA\Mail\Account;
+use OCA\Mail\BackgroundJob\RepairMailboxJob;
 use OCA\Mail\Cache\HordeSyncTokenParser;
 use OCA\Mail\Contracts\IMailManager;
 use OCA\Mail\Db\MailAccount;
@@ -37,7 +38,10 @@ use OCA\Mail\Service\Sync\ImapToDbSynchronizer;
 use OCA\Mail\Service\Sync\SyncFastPathStats;
 use OCA\Mail\Support\PerformanceLogger;
 use OCA\Mail\Support\PerformanceLoggerTask;
+use OCP\BackgroundJob\IJobList;
 use OCP\EventDispatcher\IEventDispatcher;
+use OCP\ICache;
+use OCP\ICacheFactory;
 use PHPUnit\Framework\MockObject\MockObject;
 use Psr\Log\LoggerInterface;
 
@@ -49,6 +53,9 @@ class ImapToDbSynchronizerTest extends TestCase {
 	private IEventDispatcher&MockObject $dispatcher;
 	private PerformanceLogger&MockObject $performanceLogger;
 	private SyncFastPathStats&MockObject $fastPathStats;
+	private IJobList&MockObject $jobList;
+	private ICache&MockObject $repairCooldownCache;
+	private ICacheFactory&MockObject $cacheFactory;
 	private ImapToDbSynchronizer $synchronizer;
 
 	protected function setUp(): void {
@@ -62,6 +69,11 @@ class ImapToDbSynchronizerTest extends TestCase {
 		$this->performanceLogger->method('startWithLogger')
 			->willReturn($this->createStub(PerformanceLoggerTask::class));
 		$this->fastPathStats = $this->createMock(SyncFastPathStats::class);
+		$this->jobList = $this->createMock(IJobList::class);
+		$this->repairCooldownCache = $this->createMock(ICache::class);
+		$this->cacheFactory = $this->createMock(ICacheFactory::class);
+		$this->cacheFactory->method('createDistributed')
+			->willReturn($this->repairCooldownCache);
 		$this->synchronizer = new ImapToDbSynchronizer(
 			$this->dbMapper,
 			$this->clientFactory,
@@ -77,6 +89,8 @@ class ImapToDbSynchronizerTest extends TestCase {
 			$this->createStub(NewMessagesClassifier::class),
 			new HordeSyncTokenParser(),
 			$this->fastPathStats,
+			$this->jobList,
+			$this->cacheFactory,
 		);
 	}
 
@@ -282,6 +296,8 @@ class ImapToDbSynchronizerTest extends TestCase {
 				$this->createStub(NewMessagesClassifier::class),
 				new HordeSyncTokenParser(),
 				$this->fastPathStats,
+				$this->jobList,
+				$this->cacheFactory,
 			])
 			->onlyMethods(['sync'])
 			->getMock();
@@ -363,6 +379,8 @@ class ImapToDbSynchronizerTest extends TestCase {
 				$this->createStub(NewMessagesClassifier::class),
 				new HordeSyncTokenParser(),
 				$this->fastPathStats,
+				$this->jobList,
+				$this->cacheFactory,
 			])
 			->onlyMethods(['sync'])
 			->getMock();
@@ -406,6 +424,8 @@ class ImapToDbSynchronizerTest extends TestCase {
 			$classifier ?? $this->createStub(NewMessagesClassifier::class),
 			new HordeSyncTokenParser(),
 			$this->fastPathStats,
+			$this->jobList,
+			$this->cacheFactory,
 		);
 	}
 
@@ -508,6 +528,199 @@ class ImapToDbSynchronizerTest extends TestCase {
 			$mailbox,
 			$this->createStub(LoggerInterface::class),
 		);
+	}
+
+	/**
+	 * A client whose getSyncToken() reports the server's state AT THE MOMENT
+	 * IT IS CALLED, plus a Synchronizer whose sync() advances that state.
+	 *
+	 * Modelling time rather than call order is what makes these tests able to
+	 * fail. A mock keyed on call index would hand the pre-sync value to
+	 * whichever call came first, so the pre-.132 code -- one getSyncToken()
+	 * after the pass -- would receive the early token and appear correct.
+	 * Here it receives what the server would really have said by then.
+	 *
+	 * @param callable(): void $advanceOnSync mutates the server state
+	 */
+	private function buildRaceClient(
+		array $status,
+		callable $tokenNow,
+		callable $advanceOnSync,
+	): array {
+		$capability = $this->createMock(Horde_Imap_Client_Data_Capability_Imap::class);
+		$capability->method('isEnabled')->with('QRESYNC')->willReturn(false);
+		$client = $this->createMock(Horde_Imap_Client_Socket::class);
+		$client->method('__get')->with('capability')->willReturn($capability);
+		$client->method('status')->willReturn($status);
+		$client->method('getSyncToken')->willReturnCallback($tokenNow);
+
+		$imapSync = $this->createMock(Synchronizer::class);
+		$imapSync->method('sync')->willReturnCallback(
+			function () use ($advanceOnSync): \OCA\Mail\IMAP\Sync\Response {
+				$advanceOnSync();
+				return new \OCA\Mail\IMAP\Sync\Response([], [], []);
+			}
+		);
+
+		return [$client, $imapSync];
+	}
+
+	private function runPass(
+		Horde_Imap_Client_Socket&MockObject $client,
+		Synchronizer&MockObject $imapSync,
+		Mailbox $mailbox,
+	): void {
+		$mailAccount = new MailAccount();
+		$mailAccount->setId(1);
+		$mailAccount->setUserId('user');
+		$account = new Account($mailAccount);
+
+		$this->dbMapper->method('findAllUids')->willReturn([]);
+		$this->dbMapper->method('findHighestUid')->willReturn(null);
+
+		$this->buildSynchronizerWithSyncMock($imapSync)->sync(
+			$account,
+			$client,
+			$mailbox,
+			$this->createStub(LoggerInterface::class),
+		);
+	}
+
+	private function runPartialSyncPass(Horde_Imap_Client_Socket&MockObject $client, Mailbox $mailbox): void {
+		$imapSync = $this->createMock(Synchronizer::class);
+		$imapSync->method('sync')->willReturn(new \OCA\Mail\IMAP\Sync\Response([], [], []));
+		$this->runPass($client, $imapSync, $mailbox);
+	}
+
+	public function testNewPhaseKeepsThePreSyncTokenWhenAMessageArrivesMidPass(): void {
+		$mailbox = $this->buildPartialSyncMailbox();
+		$this->dbMapper->method('countByMailbox')->willReturn(42);
+
+		// The server is at UIDNEXT 101 when the pass starts and at 103 by the
+		// time it ends: two messages landed while this very pass was
+		// enumerating, fetching and persisting. The enumeration never saw
+		// them, so a token that says 103 would declare them synced forever --
+		// exactly how UID 7404 was lost on 2026-09-29.
+		$uidNext = 101;
+		[$client, $imapSync] = $this->buildRaceClient(
+			[
+				'uidvalidity' => 200,
+				'uidnext' => 101,
+				'highestmodseq' => 300,
+				'messages' => 42,
+			],
+			static function () use (&$uidNext): string {
+				return base64_encode("U$uidNext,V200,H301");
+			},
+			static function () use (&$uidNext): void {
+				$uidNext = 103;
+			},
+		);
+
+		$this->runPass($client, $imapSync, $mailbox);
+
+		self::assertSame(
+			base64_encode('U101,V200,H301'),
+			$mailbox->getSyncNewToken(),
+			'a pass that was overtaken must persist the token it started with',
+		);
+	}
+
+	public function testNewPhaseTakesTheLaterTokenWhenNoMessageArrivedMidPass(): void {
+		$mailbox = $this->buildPartialSyncMailbox();
+		$this->dbMapper->method('countByMailbox')->willReturn(42);
+
+		// Only HIGHESTMODSEQ moves: a flag changed, no message arrived. The
+		// later token is therefore safe, and taking it is what lets the STATUS
+		// fast path prune this phase on the next poll. Guards against
+		// "simplifying" the choice to always keep the conservative token,
+		// which would re-enumerate this mailbox forever.
+		$modSeq = 301;
+		[$client, $imapSync] = $this->buildRaceClient(
+			[
+				'uidvalidity' => 200,
+				'uidnext' => 101,
+				'highestmodseq' => 300,
+				'messages' => 42,
+			],
+			static function () use (&$modSeq): string {
+				return base64_encode("U101,V200,H$modSeq");
+			},
+			static function () use (&$modSeq): void {
+				$modSeq = 305;
+			},
+		);
+
+		$this->runPass($client, $imapSync, $mailbox);
+
+		self::assertSame(
+			base64_encode('U101,V200,H305'),
+			$mailbox->getSyncNewToken(),
+			'an undisturbed pass must persist the later token so the fast path keeps working',
+		);
+	}
+
+	public function testAStatusSurplusOverTheCacheQueuesARepair(): void {
+		$mailbox = $this->buildPartialSyncMailbox();
+
+		// UIDNEXT still 100, matching the token: nothing has arrived, so
+		// nothing is pending insertion. The server nevertheless reports one
+		// message more than the cache holds, which can only be a message that
+		// was never cached.
+		$client = $this->buildStatusClient([
+			'uidvalidity' => 200,
+			'uidnext' => 100,
+			'highestmodseq' => 300,
+			'messages' => 43,
+		]);
+		$this->dbMapper->method('countByMailbox')->willReturn(42);
+		$this->repairCooldownCache->method('get')->willReturn(null);
+		$this->jobList->method('has')->willReturn(false);
+
+		$this->jobList->expects($this->once())
+			->method('add')
+			->with(RepairMailboxJob::class, ['mailboxId' => 149]);
+		$this->repairCooldownCache->expects($this->once())
+			->method('set')
+			->with('149', 1, ImapToDbSynchronizer::REPAIR_REQUEST_COOLDOWN_SECONDS);
+
+		$this->runPartialSyncPass($client, $mailbox);
+	}
+
+	public function testAStatusSurplusIsNotRequeuedWhileTheCooldownHolds(): void {
+		$mailbox = $this->buildPartialSyncMailbox();
+
+		$client = $this->buildStatusClient([
+			'uidvalidity' => 200,
+			'uidnext' => 100,
+			'highestmodseq' => 300,
+			'messages' => 43,
+		]);
+		$this->dbMapper->method('countByMailbox')->willReturn(42);
+		// A repair was already asked for within the cooldown window. A gap the
+		// repair cannot close must not queue one every single cron cycle.
+		$this->repairCooldownCache->method('get')->willReturn(1);
+
+		$this->jobList->expects($this->never())->method('add');
+
+		$this->runPartialSyncPass($client, $mailbox);
+	}
+
+	public function testAMatchingCountQueuesNoRepair(): void {
+		$mailbox = $this->buildPartialSyncMailbox();
+
+		$client = $this->buildStatusClient([
+			'uidvalidity' => 200,
+			'uidnext' => 100,
+			'highestmodseq' => 300,
+			'messages' => 42,
+		]);
+		$this->dbMapper->method('countByMailbox')->willReturn(42);
+		$this->repairCooldownCache->method('get')->willReturn(null);
+
+		$this->jobList->expects($this->never())->method('add');
+
+		$this->runPartialSyncPass($client, $mailbox);
 	}
 
 	public function testPartialSyncKeepsTheFlagsPhaseWithoutAModseqCapableToken(): void {

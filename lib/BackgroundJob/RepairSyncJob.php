@@ -75,16 +75,24 @@ class RepairSyncJob extends TimedJob {
 		}
 
 		$rebuildThreads = false;
-		$trashMailboxId = $account->getMailAccount()->getTrashMailboxId();
+		// Trash and junk used to be excluded here alongside snooze and sent.
+		// Measured 2026-09-30 on the isi.gr account: Trash held 961 messages
+		// on IMAP against 788 cached rows and Junk 7 against 6 -- 174 messages
+		// that no local search could reach, frozen since 2026-07-27 because
+		// neither mailbox has background sync enabled and so only syncs when
+		// opened. Nothing ever reconciled them, because the one job that could
+		// skipped them by name.
+		//
+		// Snooze and sent stay out: both are mailboxes this app itself writes
+		// into (the snooze move, the sent copy after send), so a reconciliation
+		// racing those writes is a different problem from repairing a mailbox
+		// that only ever receives.
 		$snoozeMailboxId = $account->getMailAccount()->getSnoozeMailboxId();
 		$sentMailboxId = $account->getMailAccount()->getSentMailboxId();
-		$junkMailboxId = $account->getMailAccount()->getJunkMailboxId();
 		foreach ($this->mailboxMapper->findAll($account) as $mailbox) {
 			$isExcluded = [
-				$trashMailboxId === $mailbox->getId(),
 				$snoozeMailboxId === $mailbox->getId(),
 				$sentMailboxId === $mailbox->getId(),
-				$junkMailboxId === $mailbox->getId(),
 			];
 			if (in_array(true, $isExcluded, true)) {
 				continue;

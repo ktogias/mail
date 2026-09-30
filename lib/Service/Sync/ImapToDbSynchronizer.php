@@ -14,6 +14,7 @@ use Horde_Imap_Client_Base;
 use Horde_Imap_Client_Exception;
 use Horde_Imap_Client_Ids;
 use OCA\Mail\Account;
+use OCA\Mail\BackgroundJob\RepairMailboxJob;
 use OCA\Mail\Cache\HordeSyncToken;
 use OCA\Mail\Cache\HordeSyncTokenParser;
 use OCA\Mail\Contracts\IMailManager;
@@ -39,7 +40,9 @@ use OCA\Mail\Model\IMAPMessage;
 use OCA\Mail\Service\Classification\NewMessagesClassifier;
 use OCA\Mail\Support\PerformanceLogger;
 use OCP\AppFramework\Db\DoesNotExistException;
+use OCP\BackgroundJob\IJobList;
 use OCP\EventDispatcher\IEventDispatcher;
+use OCP\ICacheFactory;
 use Psr\Log\LoggerInterface;
 use Throwable;
 use function array_chunk;
@@ -63,6 +66,13 @@ class ImapToDbSynchronizer {
 	/** @var int Upper bound of missing messages backfilled per repair run */
 	public const MAX_REPAIR_BACKFILL = 1000;
 
+	/**
+	 * @var int How long a mailbox is left alone after a repair has been
+	 *          requested for it, so a gap the repair cannot close does not
+	 *          queue one every cron cycle forever.
+	 */
+	public const REPAIR_REQUEST_COOLDOWN_SECONDS = 3600;
+
 	/** @var IEventDispatcher */
 	private $dispatcher;
 
@@ -81,6 +91,8 @@ class ImapToDbSynchronizer {
 		private NewMessagesClassifier $newMessagesClassifier,
 		private HordeSyncTokenParser $syncTokenParser,
 		private SyncFastPathStats $fastPathStats,
+		private IJobList $jobList,
+		private ICacheFactory $cacheFactory,
 	) {
 		$this->dispatcher = $dispatcher;
 	}
@@ -518,6 +530,24 @@ class ImapToDbSynchronizer {
 		$requestId = base64_encode(random_bytes(16));
 
 		if ($criteria & Horde_Imap_Client::SYNC_NEWMSGSUIDS) {
+			// Captured BEFORE the enumeration, because a token that is
+			// persisted must never vouch for a message the enumeration could
+			// not have returned.
+			//
+			// getSyncToken() asks the server for UIDNEXT *now*. Taking it only
+			// after the pass -- as this did until .132 -- means every message
+			// that arrives while the pass is still running lands below the
+			// recorded UIDNEXT without ever having been offered as new. That
+			// window is not microseconds: it spans the UID enumeration, the
+			// FETCH of every message inside Synchronizer::sync(), and then
+			// insertBulk + classification + the NewMessagesSynchronized
+			// listeners for each 500-message chunk. Nothing re-offers such a
+			// UID, because the next pass starts from a token that already
+			// covers it. Measured live on 2026-09-29: UID 7404 vanished this
+			// way from a 6441-message INBOX while every later UID synced
+			// normally, and the hole survived until the weekly repair was due.
+			$tokenBeforeSync = $client->getSyncToken($mailbox->getName());
+
 			$response = $this->synchronizer->sync(
 				$client,
 				new Request(
@@ -580,7 +610,12 @@ class ImapToDbSynchronizer {
 			}
 			$perf->step('persist new messages');
 
-			$mailbox->setSyncNewToken($client->getSyncToken($mailbox->getName()));
+			$mailbox->setSyncNewToken($this->pickNewSyncToken(
+				$tokenBeforeSync,
+				$client->getSyncToken($mailbox->getName()),
+				$mailbox,
+				$logger,
+			));
 			$newOrVanished = $newMessages !== [];
 		}
 		if ($criteria & Horde_Imap_Client::SYNC_FLAGSUIDS) {
@@ -648,6 +683,61 @@ class ImapToDbSynchronizer {
 		$perf->end();
 
 		return $newOrVanished;
+	}
+
+	/**
+	 * Decide which of the two tokens taken around a new-messages pass may be
+	 * persisted.
+	 *
+	 * The later one is preferable: it is what keeps the STATUS fast path
+	 * pruning this phase on the ~99% of polls that find nothing. It is only
+	 * SAFE, though, when UIDNEXT did not move while the pass ran -- otherwise
+	 * something arrived inside the window and the later token would claim
+	 * coverage of a message the enumeration never returned.
+	 *
+	 * So: unchanged UIDNEXT keeps the fast path; a UIDNEXT that moved falls
+	 * back to the token taken before the enumeration. Being behind costs one
+	 * extra non-pruned pass, whose re-offered UIDs the dedup filter above
+	 * discards. Being ahead loses the message permanently. The asymmetry is
+	 * the whole point.
+	 */
+	private function pickNewSyncToken(
+		string $before,
+		string $after,
+		Mailbox $mailbox,
+		LoggerInterface $logger,
+	): string {
+		try {
+			$parsedBefore = $this->syncTokenParser->parseSyncToken($before);
+			$parsedAfter = $this->syncTokenParser->parseSyncToken($after);
+		} catch (Throwable $e) {
+			// A token that cannot be read cannot be compared, and the
+			// conservative choice is always safe.
+			$logger->debug("Could not compare the sync tokens of mailbox {$mailbox->getId()}, keeping the pre-sync one: {$e->getMessage()}");
+			return $before;
+		}
+
+		$nextUidBefore = $parsedBefore->getNextUid();
+		$nextUidAfter = $parsedAfter->getNextUid();
+		if ($nextUidBefore === null || $nextUidAfter === null) {
+			return $before;
+		}
+		// A UIDVALIDITY change invalidates any comparison between them.
+		if ($parsedBefore->getUidValidity() !== $parsedAfter->getUidValidity()) {
+			return $before;
+		}
+
+		if ($nextUidBefore !== $nextUidAfter) {
+			$logger->debug(sprintf(
+				'Mailbox %d received messages during its own sync pass (UIDNEXT %d -> %d); keeping the pre-sync token so the next pass re-offers them',
+				$mailbox->getId(),
+				$nextUidBefore,
+				$nextUidAfter,
+			));
+			return $before;
+		}
+
+		return $after;
 	}
 
 	/**
@@ -735,14 +825,69 @@ class ImapToDbSynchronizer {
 			// nothing, forever).
 			if ($token !== null
 				&& $token->getNextUid() === $uidNext
-				&& $messages >= $this->dbMapper->countByMailbox($mailbox)) {
-				$criteria &= ~Horde_Imap_Client::SYNC_VANISHEDUIDS;
+			) {
+				$localCount = $this->dbMapper->countByMailbox($mailbox);
+				if ($messages >= $localCount) {
+					// The "gap the vanished phase cannot repair" is, however,
+					// PROOF that one exists -- UIDNEXT has not moved, so
+					// nothing is pending arrival and the surplus can only be
+					// something we never cached. Until .132 that proof was
+					// computed on every poll and thrown away, which is how UID
+					// 7404 stayed invisible for a day and a half while the
+					// unread badge faithfully counted it. Hand it to a repair
+					// instead of only using it to skip work.
+					if ($messages > $localCount) {
+						$this->requestRepair($mailbox, $messages - $localCount, $logger);
+					}
+					$criteria &= ~Horde_Imap_Client::SYNC_VANISHEDUIDS;
+				}
 			}
 		}
 
 		$this->fastPathStats->recordOutcome($criteriaBeforePruning, $criteria);
 
 		return $criteria;
+	}
+
+	/**
+	 * Queue a one-off repair of a mailbox that IMAP proves has more messages
+	 * than the cache holds.
+	 *
+	 * Rate-limited, and deliberately so. The detector fires on EVERY poll for
+	 * as long as the gap exists, and a gap the repair cannot close -- one
+	 * beyond MAX_REPAIR_BACKFILL, or a mailbox whose repair keeps failing --
+	 * would otherwise queue a full IMAP UID-set comparison every cron cycle,
+	 * forever. That is the same shape of runaway the pruning above was written
+	 * to stop, so it must not be reintroduced by the fix for it. The cooldown
+	 * bounds an unfixable gap to one attempt per hour; the jobList check keeps
+	 * a fixable one from being queued twice.
+	 */
+	private function requestRepair(Mailbox $mailbox, int $missing, LoggerInterface $logger): void {
+		$argument = ['mailboxId' => $mailbox->getId()];
+		try {
+			$cache = $this->cacheFactory->createDistributed('mail_repair_request');
+			$cooldownKey = (string)$mailbox->getId();
+			if ($cache->get($cooldownKey) !== null) {
+				return;
+			}
+
+			if ($this->jobList->has(RepairMailboxJob::class, $argument)) {
+				return;
+			}
+
+			$this->jobList->add(RepairMailboxJob::class, $argument);
+			$cache->set($cooldownKey, 1, self::REPAIR_REQUEST_COOLDOWN_SECONDS);
+			$logger->warning(sprintf(
+				'Mailbox %d is missing %d message(s) that IMAP still has; queued a repair',
+				$mailbox->getId(),
+				$missing,
+			));
+		} catch (Throwable $e) {
+			// Detecting a problem must never break the sync that noticed it.
+			$logger->warning("Could not queue a repair for mailbox {$mailbox->getId()}", [
+				'exception' => $e,
+			]);
+		}
 	}
 
 	/**

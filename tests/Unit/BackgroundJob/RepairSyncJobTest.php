@@ -143,6 +143,43 @@ class RepairSyncJobTest extends TestCase {
 		$this->startJob();
 	}
 
+	public function testRepairsTrashAndJunkButNotTheMailboxesThisAppWritesInto(): void {
+		// Trash and junk were skipped by name until .132. Measured on the
+		// isi.gr account: 174 messages that IMAP still held were unreachable
+		// from any local search because the only job that could reconcile them
+		// excluded them. Snooze and sent stay excluded -- this app writes into
+		// those itself, which is a different problem from repairing a mailbox
+		// that only receives.
+		$mailAccount = new MailAccount();
+		$mailAccount->setId(13);
+		$mailAccount->setUserId('user');
+		$mailAccount->setInboundPassword('test-password');
+		$mailAccount->setTrashMailboxId(32);
+		$mailAccount->setJunkMailboxId(38);
+		$mailAccount->setSentMailboxId(33);
+		$mailAccount->setSnoozeMailboxId(40);
+		$account = new Account($mailAccount);
+
+		$inbox = $this->mailbox(39, 'INBOX');
+		$trash = $this->mailbox(32, 'Trash');
+		$junk = $this->mailbox(38, 'Junk');
+		$sent = $this->mailbox(33, 'Sent');
+		$snooze = $this->mailbox(40, 'Snooze');
+		$this->seedAccountLookups($account, [$inbox, $trash, $junk, $sent, $snooze]);
+
+		$repaired = [];
+		$this->syncService->expects(self::exactly(3))
+			->method('repairSync')
+			->willReturnCallback(function (Account $_account, Mailbox $mailbox) use (&$repaired): int {
+				$repaired[] = $mailbox->getId();
+				return 0;
+			});
+
+		$this->startJob();
+
+		self::assertSame([39, 32, 38], $repaired);
+	}
+
 	private function account(): Account {
 		$mailAccount = new MailAccount();
 		$mailAccount->setId(13);
