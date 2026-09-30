@@ -15,6 +15,7 @@ use OCA\Mail\Account;
 use OCA\Mail\Attachment;
 use OCA\Mail\Db\MailAccount;
 use OCA\Mail\Db\Mailbox;
+use OCA\Mail\Events\MessageFlaggedEvent;
 use OCA\Mail\Db\MailboxMapper;
 use OCA\Mail\Db\Message;
 use OCA\Mail\Db\MessageMapper as DbMessageMapper;
@@ -398,6 +399,131 @@ class MailManagerTest extends TestCase {
 			->with($tag, '<abc@example.com>');
 
 		$this->manager->flagMessage($account, 'INBOX', 123, Tag::LABEL_IMPORTANT, false);
+	}
+
+	/**
+	 * .134: importance reaches every copy of the message, not only the one the
+	 * user acted on. The live case: GitHub delivered two review notifications
+	 * twice each into one INBOX, the classifier judged only the second
+	 * deliveries important, and the thread view -- which shows one copy per
+	 * Message-ID -- offered no important message to unmark while the
+	 * conversation sat under Important.
+	 */
+	public function testImportanceReachesEveryOtherCopyOfTheMessage(): void {
+		[$account, $inbox, $label] = $this->importanceFixture();
+		$acted = $this->cachedCopy(2076973, 31, 22062);
+		$sameInbox = $this->cachedCopy(2077442, 31, 22490);
+		$otherFolder = $this->cachedCopy(9001, 40, 7);
+
+		$this->dbMessageMapper->method('findByUids')->willReturnCallback(
+			static fn ($mailbox, array $uids) => $uids === [22062] ? [$acted] : [],
+		);
+		$this->dbMessageMapper->expects($this->once())
+			->method('findCopiesByMessageIds')
+			->with($account, ['<review/5337787773@github.com>'])
+			->willReturn([$acted, $sameInbox, $otherFolder]);
+		$this->mailboxMapper->method('findById')->with(40)->willReturn($label);
+
+		$removed = [];
+		$this->imapMessageMapper->method('removeFlag')->willReturnCallback(
+			static function ($client, Mailbox $mailbox, array $uids, string $flag) use (&$removed): void {
+				$removed[] = $mailbox->getId() . ':' . implode(',', $uids) . ':' . $flag;
+			},
+		);
+		$events = [];
+		$this->eventDispatcher->method('dispatch')->willReturnCallback(
+			static function (string $name, $event) use (&$events): void {
+				if ($event instanceof MessageFlaggedEvent) {
+					$events[] = $event->getMessage()->getId() . ':' . $event->getFlag() . '=' . ($event->isSet() ? '1' : '0');
+				}
+			},
+		);
+
+		$this->manager->flagMessages($account, 'INBOX', [22062], [Tag::LABEL_IMPORTANT => false]);
+
+		// The copy the user acted on, then each other copy -- grouped per
+		// mailbox, both importance keywords each, one connection throughout.
+		self::assertSame([
+			'31:22062:$label1',
+			'31:22062:$important',
+			'31:22490:$label1',
+			'31:22490:$important',
+			'40:7:$label1',
+			'40:7:$important',
+		], $removed);
+		// Every copy's cached row follows in this request, so the thread
+		// aggregate is right before any mailbox next syncs.
+		self::assertEqualsCanonicalizing([
+			'2076973:$label1=0',
+			'2077442:$label1=0',
+			'9001:$label1=0',
+		], $events);
+	}
+
+	public function testAnOrdinaryFlagIsNotCarriedToCopies(): void {
+		[$account] = $this->importanceFixture();
+		$this->dbMessageMapper->method('findByUids')->willReturn([$this->cachedCopy(1, 31, 22062)]);
+
+		// Seen has its own contract (the thread view tidies hidden copies
+		// only when a visible one is READ); this path must stay out of it.
+		$this->dbMessageMapper->expects($this->never())->method('findCopiesByMessageIds');
+
+		$this->manager->flagMessages($account, 'INBOX', [22062], ['seen' => true]);
+	}
+
+	public function testACopyThatCannotBeWrittenDoesNotFailTheUsersOwnWrite(): void {
+		[$account, $inbox, $label] = $this->importanceFixture();
+		$acted = $this->cachedCopy(2076973, 31, 22062);
+		$this->dbMessageMapper->method('findByUids')->willReturn([$acted]);
+		$this->dbMessageMapper->method('findCopiesByMessageIds')
+			->willReturn([$acted, $this->cachedCopy(9001, 40, 7)]);
+		$this->mailboxMapper->method('findById')->willReturn($label);
+		$this->imapMessageMapper->method('removeFlag')->willReturnCallback(
+			static function ($client, Mailbox $mailbox) : void {
+				if ($mailbox->getId() === 40) {
+					throw new \Horde_Imap_Client_Exception('mailbox went away');
+				}
+			},
+		);
+
+		$this->logger->expects($this->once())
+			->method('warning')
+			->with('Could not carry an importance change to every copy of the message');
+
+		$this->manager->flagMessages($account, 'INBOX', [22062], [Tag::LABEL_IMPORTANT => false]);
+	}
+
+	/**
+	 * @return array{0: Account, 1: Mailbox, 2: Mailbox}
+	 */
+	private function importanceFixture(): array {
+		$client = $this->createMock(Horde_Imap_Client_Socket::class);
+		$client->method('status')->willReturn(['permflags' => ['11' => "\*"]]);
+		$this->imapClientFactory->expects($this->once())->method('getClient')->willReturn($client);
+		$account = $this->createStub(Account::class);
+		$account->method('getUserId')->willReturn('user');
+		$account->method('getId')->willReturn(3);
+		$tag = new Tag();
+		$tag->setImapLabel(Tag::LABEL_IMPORTANT);
+		$this->tagMapper->method('getTagByImapLabel')->willReturn($tag);
+
+		$inbox = new Mailbox();
+		$inbox->setId(31);
+		$inbox->setName('INBOX');
+		$label = new Mailbox();
+		$label->setId(40);
+		$label->setName('Label');
+		$this->mailboxMapper->method('find')->willReturn($inbox);
+		return [$account, $inbox, $label];
+	}
+
+	private function cachedCopy(int $id, int $mailboxId, int $uid): Message {
+		$message = new Message();
+		$message->setId($id);
+		$message->setMailboxId($mailboxId);
+		$message->setUid($uid);
+		$message->setMessageId('<review/5337787773@github.com>');
+		return $message;
 	}
 
 	/**

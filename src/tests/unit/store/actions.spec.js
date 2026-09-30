@@ -9651,3 +9651,46 @@ describe('markShadowedCopiesSeenOfThread', () => {
 		expect(store.envelopes[2077442].flags.seen).toBe(false)
 	})
 })
+
+describe('setEnvelopeImportant across copies (.134)', () => {
+	let store
+
+	const visible = { databaseId: 2076973, accountId: 3, mailboxId: 31, threadRootId: 'gh', messageId: '<review@github.com>', flags: { important: false }, tags: [] }
+	const hidden = { databaseId: 2077442, accountId: 3, mailboxId: 31, threadRootId: 'gh', messageId: '<review@github.com>', flags: { important: true }, tags: [] }
+
+	beforeEach(() => {
+		setActivePinia(createPinia())
+		store = useMainStore()
+		vi.mocked(MessageService.setEnvelopeFlags).mockReset()
+		MessageService.setEnvelopeFlags.mockResolvedValue({})
+		store.envelopes = {
+			[visible.databaseId]: { ...visible, flags: { ...visible.flags } },
+			[hidden.databaseId]: { ...hidden, flags: { ...hidden.flags } },
+		}
+		store.getEnvelopesByThreadRootId = vi.fn().mockImplementation(() => Object.values(store.envelopes))
+	})
+
+	it('does not stop at a copy already at the target while a twin is not', async () => {
+		// The visible copy is already unimportant, so the old guard returned
+		// here and the hidden, important twin kept the thread under Important.
+		await store.setEnvelopeImportant(store.envelopes[visible.databaseId], false)
+
+		expect(MessageService.setEnvelopeFlags).toHaveBeenCalledTimes(1)
+		expect(MessageService.setEnvelopeFlags).toHaveBeenCalledWith(2076973, { $label1: false })
+		expect(store.envelopes[2077442].flags.important).toBe(false)
+	})
+
+	it('is still a no-op when every copy is already at the target', async () => {
+		store.envelopes[hidden.databaseId].flags.important = false
+
+		await store.setEnvelopeImportant(store.envelopes[visible.databaseId], false)
+
+		expect(MessageService.setEnvelopeFlags).not.toHaveBeenCalled()
+	})
+
+	it('toggleEnvelopeImportant honours an explicit target instead of inverting the copy', async () => {
+		await store.toggleEnvelopeImportant(store.envelopes[visible.databaseId], { important: false })
+
+		expect(MessageService.setEnvelopeFlags).toHaveBeenCalledWith(2076973, { $label1: false })
+	})
+})

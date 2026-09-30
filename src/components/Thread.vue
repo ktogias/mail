@@ -240,6 +240,7 @@
 				:full-height="thread.length === 1"
 				:thread-index="index"
 				:tasks="tasksForEnvelope(env)"
+				:important-in-a-copy="importantMessageIds.has(env.messageId)"
 				@delete="$emit('delete', env.databaseId)"
 				@request-delete="onRequestDeleteOne"
 				@request-archive="onRequestArchiveOne"
@@ -479,6 +480,25 @@ export default {
 		// happened yet.
 		visibleThread() {
 			return this.thread.filter((envelope) => !this.isPendingUndo(envelope.databaseId))
+		},
+
+		// Message-IDs of which SOME copy is important, hidden copies included.
+		//
+		// dedupeFolderCopies() shows one copy per Message-ID, but the list
+		// files the conversation by every copy. When only a hidden copy was
+		// important -- the classifier judged the second delivery of a GitHub
+		// notification important and not the first -- the conversation sat
+		// under Important with no important message anywhere in it to see or
+		// to unmark (.134). Showing the message important if any copy is makes
+		// the reason visible, and unmarking it clears every copy.
+		importantMessageIds() {
+			const envelope = this.mainStore.getEnvelope(this.threadId)
+			if (!envelope?.threadRootId) {
+				return new Set()
+			}
+			return new Set(this.mainStore.getEnvelopesByThreadRootId(envelope.accountId, envelope.threadRootId)
+				.filter((member) => member.messageId && member.flags?.important === true)
+				.map((member) => member.messageId))
 		},
 
 		threadTasksLabel() {

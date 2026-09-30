@@ -1516,6 +1516,40 @@ class MessageMapper extends QBMapper {
 	 *
 	 * @return Message[]
 	 */
+	/**
+	 * Every cached copy of the given Message-IDs within one account.
+	 *
+	 * The batched form of findByMessageId(), for writes that must reach every
+	 * copy of a message at once: the same mail delivered twice into one INBOX,
+	 * or one Gmail message present as a row per label. Chunked because a
+	 * batch flag write can name many messages.
+	 *
+	 * @param string[] $messageIds
+	 * @return Message[]
+	 */
+	public function findCopiesByMessageIds(Account $account, array $messageIds): array {
+		$messageIds = array_values(array_unique(array_filter($messageIds, static fn ($id) => is_string($id) && $id !== '')));
+		if ($messageIds === []) {
+			return [];
+		}
+
+		$copies = [];
+		foreach (array_chunk($messageIds, 500) as $chunk) {
+			$qb = $this->db->getQueryBuilder();
+			$qb->select('messages.*')
+				->from($this->getTableName(), 'messages')
+				->join('messages', 'mail_mailboxes', 'mailboxes', $qb->expr()->eq('messages.mailbox_id', 'mailboxes.id', IQueryBuilder::PARAM_INT))
+				->where(
+					$qb->expr()->eq('mailboxes.account_id', $qb->createNamedParameter($account->getId(), IQueryBuilder::PARAM_INT), IQueryBuilder::PARAM_INT),
+					$qb->expr()->in('messages.message_id', $qb->createNamedParameter($chunk, IQueryBuilder::PARAM_STR_ARRAY), IQueryBuilder::PARAM_STR_ARRAY)
+				);
+			foreach ($this->findEntities($qb) as $copy) {
+				$copies[] = $copy;
+			}
+		}
+		return $copies;
+	}
+
 	public function findByMessageId(Account $account, string $messageId): array {
 		$qb = $this->db->getQueryBuilder();
 		$qb->select('messages.*')

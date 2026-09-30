@@ -594,6 +594,14 @@ export default {
 			default: false,
 		},
 
+		// Some OTHER copy of this message (same Message-ID, hidden by the
+		// thread's dedup) is important. See Thread.vue importantMessageIds().
+		importantInACopy: {
+			required: false,
+			type: Boolean,
+			default: false,
+		},
+
 		fullHeight: {
 			required: false,
 			type: Boolean,
@@ -729,7 +737,7 @@ export default {
 		// Per-copy flag, not the user-wide tag -- see Envelope.vue's own
 		// isImportant() for the multi-account divergence this avoids.
 		isImportant() {
-			return this.envelope.flags.important === true
+			return this.envelope.flags.important === true || this.importantInACopy
 		},
 
 		tags() {
@@ -1290,7 +1298,10 @@ export default {
 		},
 
 		onToggleImportant() {
-			this.mainStore.toggleEnvelopeImportant(this.envelope)
+			// From what is SHOWN, not from this copy's own flag: a message shown
+			// important because a hidden copy is must be unmarked by the click,
+			// whereas toggling this copy's own (false) flag would mark it.
+			this.mainStore.toggleEnvelopeImportant(this.envelope, { important: !this.isImportant })
 		},
 
 		onToggleFlagged() {

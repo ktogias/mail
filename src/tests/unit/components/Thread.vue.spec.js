@@ -2537,6 +2537,19 @@ describe('Thread: unread copies hidden behind read messages', () => {
 		expect(store.markShadowedCopiesSeenOfThread).toHaveBeenCalledTimes(1)
 	})
 
+	it('knows a message is important when only a hidden copy of it is (.134)', async () => {
+		// The classifier judged the second delivery important, not the first.
+		hiddenUnread.flags.important = true
+		try {
+			const view = await mountThread()
+			const ids = view.vm.importantMessageIds
+			expect(ids.has('<review/5337787773@github.com>')).toBe(true)
+			expect(ids.has('<newest@github.com>')).toBe(false)
+		} finally {
+			delete hiddenUnread.flags.important
+		}
+	})
+
 	it('"mark all as unread" leaves hidden copies alone', async () => {
 		const view = await mountThread()
 		store.markShadowedCopiesSeenOfThread.mockClear()

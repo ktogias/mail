@@ -1085,3 +1085,39 @@ describe('ThreadEnvelope', () => {
 		})
 	})
 })
+
+describe('ThreadEnvelope: importance shown across copies (.134)', () => {
+	it('shows the message important when only a hidden copy is', () => {
+		const isImportant = ThreadEnvelope.computed.isImportant.call({
+			envelope: { flags: { important: false } },
+			importantInACopy: true,
+		})
+
+		expect(isImportant).toBe(true)
+	})
+
+	it('shows it not important when no copy is', () => {
+		const isImportant = ThreadEnvelope.computed.isImportant.call({
+			envelope: { flags: { important: false } },
+			importantInACopy: false,
+		})
+
+		expect(isImportant).toBe(false)
+	})
+
+	it('unmarks what it shows, rather than inverting this copy\'s own flag', () => {
+		// This copy is NOT important; it is shown important because a hidden
+		// twin is. Inverting this copy's flag would MARK it -- the opposite of
+		// the click.
+		const toggleEnvelopeImportant = vi.fn()
+		const envelope = { databaseId: 2076973, flags: { important: false } }
+
+		ThreadEnvelope.methods.onToggleImportant.call({
+			mainStore: { toggleEnvelopeImportant },
+			envelope,
+			isImportant: true,
+		})
+
+		expect(toggleEnvelopeImportant).toHaveBeenCalledWith(envelope, { important: false })
+	})
+})

@@ -43,6 +43,7 @@ use OCA\Mail\Model\IMAPMessage;
 use OCP\AppFramework\Db\DoesNotExistException;
 use OCP\EventDispatcher\IEventDispatcher;
 use Psr\Log\LoggerInterface;
+use Throwable;
 use function array_map;
 use function array_values;
 
@@ -461,6 +462,8 @@ class MailManager implements IMailManager {
 			allowReservedSlot: true,
 			workClass: ImapWorkClass::QUICK_MUTATION,
 		);
+		$importanceValue = null;
+		$importanceCopies = [];
 		try {
 			foreach ($flags as $flag => $value) {
 				$value = filter_var($value, FILTER_VALIDATE_BOOLEAN);
@@ -483,6 +486,10 @@ class MailManager implements IMailManager {
 					}
 				}
 			}
+			$importanceValue = self::importanceValueOf($flags);
+			$importanceCopies = $importanceValue === null
+				? []
+				: $this->writeImportanceToCopies($client, $account, $mb, $uids, $importanceValue);
 		} catch (Horde_Imap_Client_Exception $e) {
 			throw new ServiceException(
 				'Could not set message flag on IMAP: ' . $e->getMessage(),
@@ -491,6 +498,19 @@ class MailManager implements IMailManager {
 			);
 		} finally {
 			$client->logout();
+		}
+
+		// The copies' cached rows follow through the same listener as the
+		// message the user acted on, so the server-side thread aggregate --
+		// what files the conversation under Important -- is right in this
+		// request rather than after each copy's own mailbox next syncs.
+		foreach ($importanceCopies as [$copyMailbox, $copies]) {
+			foreach ($copies as $copy) {
+				$this->eventDispatcher->dispatch(
+					MessageFlaggedEvent::class,
+					new MessageFlaggedEvent($account, $copyMailbox, $copy, Tag::LABEL_IMPORTANT, (bool)$importanceValue),
+				);
+			}
 		}
 
 		// The importance TAG is the same fact as flag_important stored a
@@ -572,6 +592,93 @@ class MailManager implements IMailManager {
 				$this->tagMapper->untagMessage($tag, $message->getMessageId());
 			}
 		}
+	}
+
+	/**
+	 * The importance target in a flag write, or null when it has none.
+	 *
+	 * @param array<string, mixed> $flags
+	 */
+	private static function importanceValueOf(array $flags): ?bool {
+		foreach ($flags as $flag => $value) {
+			if ($flag === Tag::LABEL_IMPORTANT) {
+				return filter_var($value, FILTER_VALIDATE_BOOLEAN);
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Write an importance change to every OTHER cached copy of the messages.
+	 *
+	 * Importance is a judgement about a message, not about one delivery of
+	 * it. The thread view presents same-Message-ID copies as one message, so
+	 * marking that message important or not must reach all of them -- or the
+	 * copy nobody can see keeps the conversation under Important. Measured
+	 * live on 2026-09-30: GitHub delivered two review notifications twice
+	 * each, the classifier judged only the second deliveries important, and a
+	 * 327-message thread sat under Important with no important message
+	 * anywhere on screen.
+	 *
+	 * Gmail propagates a label across its folder views by itself; a server
+	 * that stores duplicates as separate messages (the dovecot here) does not,
+	 * so the client's optimistic flip of every copy used to be undone by the
+	 * next sync. Uses the caller's client: a second connection costs seconds
+	 * of connect/auth on this machine, a STORE on an open one costs little.
+	 *
+	 * Best effort. The user's own message has already been written; a copy
+	 * that cannot be reached must not turn that into a failure.
+	 *
+	 * @param int[] $uids
+	 * @return list<array{0: Mailbox, 1: Message[]}> the copies written, per mailbox
+	 */
+	private function writeImportanceToCopies(Horde_Imap_Client_Socket $client, Account $account, Mailbox $mb, array $uids, bool $value): array {
+		$written = [];
+		try {
+			$messageIds = [];
+			foreach ($this->dbMessageMapper->findByUids($mb, $uids) as $message) {
+				$messageIds[] = $message->getMessageId();
+			}
+			$messageIds = array_values(array_filter($messageIds, static fn ($id) => is_string($id) && $id !== ''));
+			if ($messageIds === []) {
+				return [];
+			}
+
+			$byMailbox = [];
+			foreach ($this->dbMessageMapper->findCopiesByMessageIds($account, $messageIds) as $copy) {
+				if ($copy->getMailboxId() === $mb->getId() && in_array($copy->getUid(), $uids, true)) {
+					continue;
+				}
+				// Not skipped when the cache already agrees: a stale cache is
+				// exactly the case this exists for, and a STORE that changes
+				// nothing is harmless.
+				$byMailbox[$copy->getMailboxId()][] = $copy;
+			}
+
+			foreach ($byMailbox as $mailboxId => $copies) {
+				$copyMailbox = $mailboxId === $mb->getId() ? $mb : $this->mailboxMapper->findById($mailboxId);
+				$copyUids = array_values(array_map(static fn (Message $copy) => $copy->getUid(), $copies));
+				foreach ([Tag::LABEL_IMPORTANT, '$important'] as $writeFlag) {
+					foreach ($this->filterFlags($client, $account, $writeFlag, $copyMailbox->getName()) as $imapFlag) {
+						if (empty($imapFlag) === true) {
+							continue;
+						}
+						if ($value) {
+							$this->imapMessageMapper->addFlag($client, $copyMailbox, $copyUids, $imapFlag);
+						} else {
+							$this->imapMessageMapper->removeFlag($client, $copyMailbox, $copyUids, $imapFlag);
+						}
+					}
+				}
+				$written[] = [$copyMailbox, $copies];
+			}
+		} catch (Throwable $e) {
+			$this->logger->warning('Could not carry an importance change to every copy of the message', [
+				'exception' => $e,
+				'mailbox' => $mb->getId(),
+			]);
+		}
+		return $written;
 	}
 
 	/**

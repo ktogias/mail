@@ -4810,9 +4810,17 @@ export default function mainStoreActions() {
 				}
 			})
 		},
-		async toggleEnvelopeImportant(envelope) {
+		async toggleEnvelopeImportant(envelope, { important } = {}) {
 			this.setInteractionPriorityMutation()
 			return handleHttpAuthErrors(async () => {
+				// An explicit target from a caller that shows importance across
+				// copies (ThreadEnvelope, .134). Inverting this copy's own flag
+				// would be wrong there: it may be false while the message is
+				// shown important because a hidden copy is.
+				if (important !== undefined) {
+					await this.setEnvelopeImportant(envelope, important)
+					return
+				}
 				// Current state from the per-copy FLAG, not the user-wide
 				// $label1 tag: the badge and the priority sections both
 				// read the flag now, and the two sources genuinely diverge
@@ -4870,7 +4878,18 @@ export default function mainStoreActions() {
 			// can disagree with this copy's own state, and gating on it
 			// here made the action a silent no-op (or an inversion)
 			// exactly when the user was trying to fix such a message.
-			if ((envelope.flags.important === true) === important) {
+			// Every copy, not just this one: a copy already at the target may
+			// stand for a hidden twin that is not (.134), and returning here
+			// would leave that twin keeping the conversation under Important.
+			const copiesAtTarget = [envelope]
+			if (envelope.messageId && envelope.threadRootId) {
+				for (const member of this.getEnvelopesByThreadRootId(envelope.accountId, envelope.threadRootId)) {
+					if (member.databaseId !== envelope.databaseId && member.messageId === envelope.messageId) {
+						copiesAtTarget.push(member)
+					}
+				}
+			}
+			if (copiesAtTarget.every((copy) => (copy.flags.important === true) === important)) {
 				return
 			}
 			beginPrioritySectionMutation()
